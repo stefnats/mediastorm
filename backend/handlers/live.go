@@ -569,9 +569,19 @@ func (h *LiveHandler) StreamChannel(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "live provider unavailable", http.StatusServiceUnavailable)
 		return
 	}
-	lease, err := livecapacity.Default.Acquire(capacityTarget.BucketKey, "", capacityTarget.MaxStreams)
+	// Raw direct requests remain non-preempting: negotiation belongs to the
+	// JSON tune endpoint, where a recording warning can be presented.
+	admission := liveAdmissionForRequest(r, h.usersSvc, targetURL.String())
+	var admissionConfig ConfigProvider
+	if h.cfgManager != nil {
+		admissionConfig = h.cfgManager
+	}
+	admission.bindSettings(r, admissionConfig, h.userSettingsSvc)
+	lease, err := livecapacity.Default.AcquireOwned(capacityTarget.BucketKey, "", capacityTarget.MaxStreams, admission.Owner)
 	if err != nil {
-		writeLiveCapacityError(w, capacityTarget)
+		if !writeLiveAdmissionError(w, capacityTarget, err) {
+			http.Error(w, "Live stream unavailable", http.StatusServiceUnavailable)
+		}
 		return
 	}
 	defer lease.Release()
@@ -581,6 +591,7 @@ func (h *LiveHandler) StreamChannel(w http.ResponseWriter, r *http.Request) {
 	// context ends it when the client goes. A fixed cap ended every direct stream at that mark.
 	ctx, cancel := context.WithCancel(r.Context())
 	defer cancel()
+	lease.SetStop(func(context.Context) error { cancel(); return nil })
 
 	var stremioRequestHeaders map[string]string
 	stremioHLS := false

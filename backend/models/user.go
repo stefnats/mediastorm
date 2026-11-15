@@ -35,6 +35,9 @@ type User struct {
 	ScrobAccountID   string `json:"scrobAccountId,omitempty"`   // ID of the linked self-hosted Scrob account
 	IsKidsProfile    bool   `json:"isKidsProfile"`              // Whether this is a kids profile with content restrictions
 	AllowShareLinks  bool   `json:"allowShareLinks"`            // Whether this profile may mint shareable playback links (master-controlled, default off)
+	// Live takeover rights are granted by account management and default off.
+	AllowLiveTakeover          bool `json:"allowLiveTakeover"`
+	AllowRecordingInterruption bool `json:"allowRecordingInterruption"`
 	// ActivityPrivacy controls whether this profile's watch activity appears in
 	// server-wide shelves like "Popular on This Server", "Recently Watched",
 	// and the active "Dashboard" shelf.

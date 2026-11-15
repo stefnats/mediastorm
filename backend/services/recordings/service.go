@@ -62,6 +62,7 @@ type Service struct {
 	remuxRecording func(string) error
 
 	mu       sync.Mutex
+	statusMu sync.Mutex
 	ctx      context.Context
 	cancel   context.CancelFunc
 	running  bool
@@ -313,6 +314,8 @@ func (s *Service) maybeStartRecordingImmediately(recording models.Recording) {
 }
 
 func (s *Service) Cancel(id string) error {
+	s.statusMu.Lock()
+	defer s.statusMu.Unlock()
 	recording, err := s.Get(id)
 	if err != nil {
 		return err
@@ -764,14 +767,29 @@ func (s *Service) startRecording(recording models.Recording) {
 		s.finalizeFailure(recording, now, err.Error())
 		return
 	}
-	if reserver, ok := s.channels.(CapacityReserver); ok {
-		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
-		release, err := reserver.ReserveRecording(ctx, recording)
-		cancel()
+	var managedLease *livecapacity.Lease
+	var releaseProvider = func() {}
+	var releaseOnce sync.Once
+	releaseCapacity := func() { releaseOnce.Do(releaseProvider) }
+	defer releaseCapacity()
+	reserver, reserves := s.channels.(CapacityReserver)
+	managed, owns := s.channels.(ManagedCapacityReserver)
+	if reserves || owns {
+		reserveCtx, reserveCancel := context.WithTimeout(context.Background(), 15*time.Second)
+		var err error
+		if owns {
+			managedLease, err = managed.ReserveManagedRecording(reserveCtx, recording)
+			if err == nil {
+				releaseProvider = managedLease.Release
+			}
+		} else {
+			releaseProvider, err = reserver.ReserveRecording(reserveCtx, recording)
+		}
+		reserveCancel()
 		if err != nil {
+			// A failing legacy reserver may return a nil callback.
+			releaseProvider = func() {}
 			if errors.Is(err, livecapacity.ErrLimit) {
-				// Retain the pending job for the scheduler's next pass. Never
-				// open or truncate an output, nor evict a viewer, on a conflict.
 				recording.Error = "Provider connection limit reached; waiting for a free IPTV connection"
 				recording.UpdatedAt = now
 				if updateErr := s.repo.Update(context.Background(), &recording); updateErr != nil {
@@ -782,7 +800,6 @@ func (s *Service) startRecording(recording models.Recording) {
 			s.finalizeFailure(recording, now, "recording provider capacity unavailable")
 			return
 		}
-		defer release()
 	}
 	recording.Error = ""
 	recording.Status = models.RecordingStatusStarting
@@ -814,14 +831,22 @@ func (s *Service) startRecording(recording models.Recording) {
 	s.mu.Lock()
 	s.active[recording.ID] = cancel
 	s.mu.Unlock()
+	var closeOnce sync.Once
+	closeInput := func() {
+		closeOnce.Do(func() {
+			s.statusMu.Lock()
+			s.mu.Lock()
+			delete(s.active, recording.ID)
+			s.mu.Unlock()
+			releaseCapacity()
+			s.statusMu.Unlock()
+		})
+	}
+	if managedLease != nil {
+		managedLease.SetStop(func(stopContext context.Context) error { return s.InterruptForTakeover(stopContext, recording.ID) })
+	}
 	liveusage.GetTracker().StartRecording(recording.ID, recording.UserID)
-	defer func() {
-		s.mu.Lock()
-		delete(s.active, recording.ID)
-		s.mu.Unlock()
-		liveusage.GetTracker().EndRecording(recording.ID)
-		cancel()
-	}()
+	defer func() { closeInput(); liveusage.GetTracker().EndRecording(recording.ID); cancel() }()
 
 	log.Printf("[recordings] recording start id=%s title=%q channel=%q source=%s window=%s..%s stopAt=%s",
 		recording.ID, recording.Title, recording.ChannelName, redactSourceURL(recording.SourceURL),
@@ -838,6 +863,7 @@ func (s *Service) startRecording(recording models.Recording) {
 		result := s.runRecordingAttempt(ctx, recording, stopAt, attempt)
 		finishedAt := time.Now().UTC()
 		if ctx.Err() != nil {
+			closeInput()
 			s.handleInterruptedRecording(recording.ID, finishedAt)
 			return
 		}
@@ -867,12 +893,16 @@ func (s *Service) startRecording(recording models.Recording) {
 		select {
 		case <-ctx.Done():
 			timer.Stop()
+			closeInput()
 			s.handleInterruptedRecording(recording.ID, time.Now().UTC())
 			return
 		case <-timer.C:
 		}
 	}
 
+	closeInput()
+	s.statusMu.Lock()
+	defer s.statusMu.Unlock()
 	latest, err := s.Get(recording.ID)
 	if err != nil {
 		log.Printf("[recordings] reload recording after ffmpeg exit failed: %v", err)
@@ -1054,6 +1084,8 @@ func redactSourceURL(raw string) string {
 }
 
 func (s *Service) handleInterruptedRecording(id string, ts time.Time) {
+	s.statusMu.Lock()
+	defer s.statusMu.Unlock()
 	latest, err := s.Get(id)
 	if err != nil {
 		log.Printf("[recordings] reload interrupted recording failed: %v", err)

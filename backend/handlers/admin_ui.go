@@ -7438,27 +7438,29 @@ type TestDebridProviderRequest struct {
 
 // ProfileWithPinStatus represents a profile with its PIN status
 type ProfileWithPinStatus struct {
-	ID                 string    `json:"id"`
-	AccountID          string    `json:"accountId,omitempty"`
-	Name               string    `json:"name"`
-	Color              string    `json:"color,omitempty"`
-	IconURL            string    `json:"iconUrl,omitempty"`
-	HasPin             bool      `json:"hasPin"`
-	HasIcon            bool      `json:"hasIcon"`
-	IsKidsProfile      bool      `json:"isKidsProfile"`
-	AllowShareLinks    bool      `json:"allowShareLinks"`
-	ActivityPrivacy    string    `json:"activityPrivacy"`
-	KidsMode           string    `json:"kidsMode,omitempty"`
-	KidsMaxRating      string    `json:"kidsMaxRating,omitempty"`
-	KidsMaxMovieRating string    `json:"kidsMaxMovieRating,omitempty"`
-	KidsMaxTVRating    string    `json:"kidsMaxTVRating,omitempty"`
-	KidsAllowedLists   []string  `json:"kidsAllowedLists,omitempty"`
-	TraktAccountID     string    `json:"traktAccountId,omitempty"`
-	MdblistAccountID   string    `json:"mdblistAccountId,omitempty"`
-	SimklAccountID     string    `json:"simklAccountId,omitempty"`
-	ScrobAccountID     string    `json:"scrobAccountId,omitempty"`
-	CreatedAt          time.Time `json:"createdAt"`
-	UpdatedAt          time.Time `json:"updatedAt"`
+	ID                         string    `json:"id"`
+	AccountID                  string    `json:"accountId,omitempty"`
+	Name                       string    `json:"name"`
+	Color                      string    `json:"color,omitempty"`
+	IconURL                    string    `json:"iconUrl,omitempty"`
+	HasPin                     bool      `json:"hasPin"`
+	HasIcon                    bool      `json:"hasIcon"`
+	IsKidsProfile              bool      `json:"isKidsProfile"`
+	AllowShareLinks            bool      `json:"allowShareLinks"`
+	AllowLiveTakeover          bool      `json:"allowLiveTakeover"`
+	AllowRecordingInterruption bool      `json:"allowRecordingInterruption"`
+	ActivityPrivacy            string    `json:"activityPrivacy"`
+	KidsMode                   string    `json:"kidsMode,omitempty"`
+	KidsMaxRating              string    `json:"kidsMaxRating,omitempty"`
+	KidsMaxMovieRating         string    `json:"kidsMaxMovieRating,omitempty"`
+	KidsMaxTVRating            string    `json:"kidsMaxTVRating,omitempty"`
+	KidsAllowedLists           []string  `json:"kidsAllowedLists,omitempty"`
+	TraktAccountID             string    `json:"traktAccountId,omitempty"`
+	MdblistAccountID           string    `json:"mdblistAccountId,omitempty"`
+	SimklAccountID             string    `json:"simklAccountId,omitempty"`
+	ScrobAccountID             string    `json:"scrobAccountId,omitempty"`
+	CreatedAt                  time.Time `json:"createdAt"`
+	UpdatedAt                  time.Time `json:"updatedAt"`
 }
 
 // GetProfiles returns all profiles with their PIN status (for admin dashboard)
@@ -7475,27 +7477,29 @@ func (h *AdminUIHandler) GetProfiles(w http.ResponseWriter, r *http.Request) {
 	profiles := make([]ProfileWithPinStatus, len(users))
 	for i, u := range users {
 		profiles[i] = ProfileWithPinStatus{
-			ID:                 u.ID,
-			AccountID:          u.AccountID,
-			Name:               u.Name,
-			Color:              u.Color,
-			IconURL:            u.IconURL,
-			HasPin:             u.HasPin(),
-			HasIcon:            u.HasIcon(),
-			IsKidsProfile:      u.IsKidsProfile,
-			AllowShareLinks:    u.AllowShareLinks,
-			ActivityPrivacy:    models.NormalizeActivityPrivacy(u.ActivityPrivacy),
-			KidsMode:           u.KidsMode,
-			KidsMaxRating:      u.KidsMaxRating,
-			KidsMaxMovieRating: u.KidsMaxMovieRating,
-			KidsMaxTVRating:    u.KidsMaxTVRating,
-			KidsAllowedLists:   u.KidsAllowedLists,
-			TraktAccountID:     u.TraktAccountID,
-			MdblistAccountID:   u.MdblistAccountID,
-			SimklAccountID:     u.SimklAccountID,
-			ScrobAccountID:     u.ScrobAccountID,
-			CreatedAt:          u.CreatedAt,
-			UpdatedAt:          u.UpdatedAt,
+			ID:                         u.ID,
+			AccountID:                  u.AccountID,
+			Name:                       u.Name,
+			Color:                      u.Color,
+			IconURL:                    u.IconURL,
+			HasPin:                     u.HasPin(),
+			HasIcon:                    u.HasIcon(),
+			IsKidsProfile:              u.IsKidsProfile,
+			AllowShareLinks:            u.AllowShareLinks,
+			AllowLiveTakeover:          u.AllowLiveTakeover,
+			AllowRecordingInterruption: u.AllowRecordingInterruption,
+			ActivityPrivacy:            models.NormalizeActivityPrivacy(u.ActivityPrivacy),
+			KidsMode:                   u.KidsMode,
+			KidsMaxRating:              u.KidsMaxRating,
+			KidsMaxMovieRating:         u.KidsMaxMovieRating,
+			KidsMaxTVRating:            u.KidsMaxTVRating,
+			KidsAllowedLists:           u.KidsAllowedLists,
+			TraktAccountID:             u.TraktAccountID,
+			MdblistAccountID:           u.MdblistAccountID,
+			SimklAccountID:             u.SimklAccountID,
+			ScrobAccountID:             u.ScrobAccountID,
+			CreatedAt:                  u.CreatedAt,
+			UpdatedAt:                  u.UpdatedAt,
 		}
 	}
 

@@ -501,6 +501,8 @@ type HLSSession struct {
 	LiveTuning                      LiveTuningSettings // FFmpeg tuning settings for live sessions
 	LiveUpstreamKey                 string             // Provider connection shared with same-channel sessions ("" = private)
 	liveCapacityLease               *livecapacity.Lease
+	liveCapacityOwner               livecapacity.Owner
+	LiveRevoked                     bool
 	LiveSourceID                    string
 	LiveSourceName                  string
 	LiveFailoverAttempts            int
@@ -581,6 +583,7 @@ type HLSSession struct {
 // LiveTuningSettings contains FFmpeg tuning parameters for live TV sessions.
 type LiveTuningSettings struct {
 	StationFailover    *liveStationFailover
+	Capacity           *liveCapacityAdmission
 	MaxStreams         int // Provider-account capacity; zero keeps the existing unconfigured policy.
 	ProbeSizeMB        int
 	AnalyzeDurationSec int
@@ -2596,9 +2599,15 @@ func (m *HLSManager) CreateLiveSession(ctx context.Context, liveURL, provider, b
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	lease, err := livecapacity.Default.Acquire(bucketKey, liveUpstreamShareKey(liveURL, tuning), tuning.MaxStreams)
+	admission := tuning.Capacity
+	lease, err := admission.acquire(ctx, bucketKey, liveUpstreamShareKey(liveURL, tuning), tuning.MaxStreams)
+	tuning.Capacity = nil
 	if err != nil {
 		return nil, err
+	}
+	if admission != nil && admission.Current != nil && !admission.Current() {
+		lease.Release()
+		return nil, livecapacity.ErrPermission
 	}
 	sessionID := generateSessionID()
 	outputDir := filepath.Join(m.baseDir, sessionID)
@@ -2644,6 +2653,11 @@ func (m *HLSManager) CreateLiveSession(ctx context.Context, liveURL, provider, b
 		liveCapacityLease:       lease,
 		LiveCCExtractionEnabled: liveCCExtractionEnabled,
 		subtitleExtractOffsets:  make(map[int]float64),
+	}
+	if admission != nil {
+		session.liveCapacityOwner = admission.Owner
+		session.liveCapacityOwner.Stop = func(context.Context) error { revokeLiveSession(session); return nil }
+		lease.SetStop(session.liveCapacityOwner.Stop)
 	}
 	if plan := tuning.StationFailover; plan != nil {
 		session.LiveSourceID = plan.candidates[0].SourceID

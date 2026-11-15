@@ -5288,6 +5288,8 @@ func (h *VideoHandler) StartLiveHLSSession(w http.ResponseWriter, r *http.Reques
 		http.Error(w, "live provider unavailable", http.StatusServiceUnavailable)
 		return
 	}
+	admission := liveAdmissionForRequest(r, h.usersSvc, liveURL)
+	admission.bindSettings(r, h.configManager, h.userSettingsSvc)
 	stationPlan := h.liveStationPlan(r, liveURL)
 	if target.Provider != "m3u" && target.Provider != "xtream" {
 		stationPlan = nil
@@ -5316,7 +5318,7 @@ func (h *VideoHandler) StartLiveHLSSession(w http.ResponseWriter, r *http.Reques
 	if parseOptionalBool(r.URL.Query().Get("timeshift")) {
 		timeshiftWindow = h.liveTimeshiftWindow()
 	}
-	forceHLS := stationPlan != nil || timeshiftWindow > 0 ||
+	forceHLS := (admission.Policy.AllowLive || admission.Policy.AllowRecording) && admission.Owner.RevocationKey != "" || stationPlan != nil || timeshiftWindow > 0 ||
 		strings.EqualFold(strings.TrimSpace(r.URL.Query().Get("format")), "hls") ||
 		strings.EqualFold(strings.TrimSpace(r.URL.Query().Get("target")), "web") ||
 		(hdHomeRunInput && strings.EqualFold(strings.TrimSpace(r.URL.Query().Get("target")), "cast"))
@@ -5348,7 +5350,7 @@ func (h *VideoHandler) StartLiveHLSSession(w http.ResponseWriter, r *http.Reques
 		if profileName != "" {
 			proxyParams.Set("profileName", profileName)
 		}
-		for _, key := range []string{"sourceId", "channelId"} {
+		for _, key := range []string{"sourceId", "channelId", "playAttemptId"} {
 			if value := strings.TrimSpace(r.URL.Query().Get(key)); value != "" {
 				proxyParams.Set(key, value)
 			}
@@ -5371,13 +5373,16 @@ func (h *VideoHandler) StartLiveHLSSession(w http.ResponseWriter, r *http.Reques
 		directURL := ""
 		if normalizeLiveProvider(target.Provider) == "stalker" {
 			ticket := h.registerLiveDirectTarget(liveDirectTarget{
-				URL:            liveURL,
-				ProxyURL:       target.ProxyURL,
-				RequestHeaders: providerRequestHeaders,
-				AccountID:      auth.GetAccountID(r),
-				Provider:       target.Provider,
-				BucketKey:      target.BucketKey,
-				MaxStreams:     target.MaxStreams,
+				URL:             liveURL,
+				ProxyURL:        target.ProxyURL,
+				RequestHeaders:  providerRequestHeaders,
+				AccountID:       auth.GetAccountID(r),
+				ProfileID:       profileID,
+				RequestedSource: requestedURL,
+				CapacityOwner:   admission.Owner,
+				Provider:        target.Provider,
+				BucketKey:       target.BucketKey,
+				MaxStreams:      target.MaxStreams,
 			})
 			directURL = fmt.Sprintf("/video/live-direct/%s/stream.ts", ticket)
 			if encoded := encodePlayerQuery(proxyParams); encoded != "" {
@@ -5430,6 +5435,7 @@ func (h *VideoHandler) StartLiveHLSSession(w http.ResponseWriter, r *http.Reques
 
 	tuning := LiveTuningSettings{
 		StationFailover:    stationPlan,
+		Capacity:           admission,
 		MaxStreams:         target.MaxStreams,
 		ProbeSizeMB:        target.ProbeSizeMB,
 		AnalyzeDurationSec: target.AnalyzeDurationSec,
@@ -5445,8 +5451,7 @@ func (h *VideoHandler) StartLiveHLSSession(w http.ResponseWriter, r *http.Reques
 	liveCCEnabled := h.liveClosedCaptionExtractionEnabled(profileID, clientID)
 	session, err := h.hlsManager.CreateLiveSession(r.Context(), liveURL, target.Provider, target.BucketKey, profileID, profileName, getClientIP(r), playbackTarget, tuning, liveCCEnabled)
 	if err != nil {
-		if errors.Is(err, livecapacity.ErrLimit) {
-			writeLiveCapacityError(w, target)
+		if writeLiveAdmissionError(w, target, err) {
 			return
 		}
 		log.Printf("[video] failed to create live HLS session: %v", err)

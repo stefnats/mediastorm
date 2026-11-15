@@ -248,6 +248,7 @@
 {{end}}
 
 {{define "scripts"}}
+<script src="{{.ServerBasePath}}/api/static/profile-live-permissions-v1.js?v=1"></script>
 <script>
 let accounts = [];
 let profiles = [];
@@ -428,6 +429,7 @@ function renderProfiles() {
                 </div>
                 <div class="profile-actions">
                     <button class="btn btn-secondary btn-sm" onclick="showEditProfileModal('${p.id}')">Edit</button>
+                    <button class="btn btn-secondary btn-sm" onclick="showLivePermissions('${p.id}')">IPTV rights</button>
                     <a class="btn btn-secondary btn-sm" href="${basePath}/settings?profileId=${p.id}">Settings</a>
                     <a class="btn btn-secondary btn-sm" href="${basePath}/notifications?profileId=${p.id}">Notifications</a>
                     ${isAdmin ? `<a class="btn btn-secondary btn-sm" href="${basePath}/tasks?profileId=${encodeURIComponent(p.id)}">Automations</a>` : ''}
@@ -566,6 +568,7 @@ function renderPersonRow(profile, forceShowStale = false) {
             </div>
             <div class="person-actions">
                 <button class="btn btn-secondary btn-sm" onclick="showEditProfileModal('${profile.id}')">Manage</button>
+                <button class="btn btn-secondary btn-sm" onclick="showLivePermissions('${profile.id}')">IPTV rights</button>
                 <a class="btn btn-secondary btn-sm" href="${basePath}/settings?profileId=${encodeURIComponent(profile.id)}">Settings</a>
                 <a class="btn btn-secondary btn-sm" href="${basePath}/notifications?profileId=${encodeURIComponent(profile.id)}">Notifications</a>
                 <a class="btn btn-secondary btn-sm" href="${basePath}/tasks?profileId=${encodeURIComponent(profile.id)}">Automations</a>
@@ -964,6 +967,10 @@ async function createProfile(e) {
     } catch (err) {
         showToast('Error: ' + err.message, 'error');
     }
+}
+
+function showLivePermissions(profileId) {
+    window.MediastormLivePermissions.open({profile:profiles.find(p=>p.id===profileId),basePath,onSaved:()=>loadData(),showMessage:showToast});
 }
 
 function showEditProfileModal(profileId) {

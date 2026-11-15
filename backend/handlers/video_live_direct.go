@@ -14,6 +14,7 @@ import (
 	"novastream/internal/auth"
 	"novastream/internal/livecapacity"
 	"novastream/internal/netproxy"
+	"novastream/internal/profileaccess"
 	"novastream/internal/requestsecurity"
 
 	"github.com/gorilla/mux"
@@ -22,21 +23,27 @@ import (
 const liveDirectTicketTTL = 30 * time.Minute
 
 type liveDirectTarget struct {
-	URL            string
-	ProxyURL       string
-	RequestHeaders map[string]string
-	AccountID      string
-	Provider       string
-	BucketKey      string
-	MaxStreams     int
-	ExpiresAt      time.Time
-	Active         int
+	URL             string
+	ProxyURL        string
+	RequestHeaders  map[string]string
+	AccountID       string
+	Provider        string
+	BucketKey       string
+	MaxStreams      int
+	ExpiresAt       time.Time
+	Active          int
+	ProfileID       string
+	RequestedSource string
+	CapacityOwner   livecapacity.Owner
+	Revoked         bool
+	cancellations   map[*livecapacity.Lease]context.CancelFunc
 }
 
 func (h *VideoHandler) registerLiveDirectTarget(target liveDirectTarget) string {
 	now := time.Now()
 	target.ExpiresAt = now.Add(liveDirectTicketTTL)
 	target.RequestHeaders = cloneStringMap(target.RequestHeaders)
+	target.cancellations = make(map[*livecapacity.Lease]context.CancelFunc)
 	ticket := generateSessionID()
 
 	h.liveDirectMu.Lock()
@@ -66,7 +73,7 @@ func (h *VideoHandler) acquireLiveDirectTarget(ticket, accountID string) (liveDi
 	h.liveDirectMu.Lock()
 	defer h.liveDirectMu.Unlock()
 	target, ok := h.liveDirectTargets[ticket]
-	if !ok || now.After(target.ExpiresAt) || (target.AccountID != "" && target.AccountID != accountID) {
+	if !ok || target.Revoked || now.After(target.ExpiresAt) || (target.AccountID != "" && target.AccountID != accountID) {
 		if ok && target.Active == 0 && now.After(target.ExpiresAt) {
 			delete(h.liveDirectTargets, ticket)
 		}
@@ -115,11 +122,23 @@ func (h *VideoHandler) ServeLiveDirect(w http.ResponseWriter, r *http.Request) {
 		http.NotFound(w, r)
 		return
 	}
+	stored, exists := h.peekLiveDirectTarget(ticket, auth.GetAccountID(r))
+	if !exists {
+		http.NotFound(w, r)
+		return
+	}
+	resource := stored.RequestedSource
+	if resource == "" {
+		resource = stored.URL
+	}
+	if !profileaccess.CheckResource(w, r, stored.ProfileID, resource) {
+		return
+	}
+	if stored.Revoked {
+		writeLiveAdmissionError(w, liveStreamTarget{}, livecapacity.ErrTakenOver)
+		return
+	}
 	if r.Method == http.MethodHead {
-		if _, ok := h.peekLiveDirectTarget(ticket, auth.GetAccountID(r)); !ok {
-			http.NotFound(w, r)
-			return
-		}
 		setLiveDirectResponseHeaders(w.Header(), "video/mp2t")
 		w.WriteHeader(http.StatusOK)
 		return
@@ -131,9 +150,11 @@ func (h *VideoHandler) ServeLiveDirect(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer h.releaseLiveDirectTarget(ticket)
-	lease, err := livecapacity.Default.Acquire(target.BucketKey, "", target.MaxStreams)
+	lease, err := livecapacity.Default.AcquireOwned(target.BucketKey, "", target.MaxStreams, target.CapacityOwner)
 	if err != nil {
-		writeLiveCapacityError(w, liveStreamTarget{Provider: target.Provider, BucketKey: target.BucketKey, MaxStreams: target.MaxStreams})
+		if !writeLiveAdmissionError(w, liveStreamTarget{Provider: target.Provider, BucketKey: target.BucketKey, MaxStreams: target.MaxStreams}, err) {
+			http.Error(w, "Live stream unavailable", http.StatusServiceUnavailable)
+		}
 		return
 	}
 	defer lease.Release()
@@ -141,6 +162,37 @@ func (h *VideoHandler) ServeLiveDirect(w http.ResponseWriter, r *http.Request) {
 	// No overall deadline: the request context ends the stream when the client goes.
 	ctx, cancel := context.WithCancel(r.Context())
 	defer cancel()
+	h.liveDirectMu.Lock()
+	current := h.liveDirectTargets[ticket]
+	if current == nil || current.Revoked {
+		h.liveDirectMu.Unlock()
+		writeLiveAdmissionError(w, liveStreamTarget{}, livecapacity.ErrTakenOver)
+		return
+	}
+	current.cancellations[lease] = cancel
+	h.liveDirectMu.Unlock()
+	defer func() {
+		h.liveDirectMu.Lock()
+		if entry := h.liveDirectTargets[ticket]; entry != nil {
+			delete(entry.cancellations, lease)
+		}
+		h.liveDirectMu.Unlock()
+	}()
+	lease.SetStop(func(context.Context) error {
+		h.liveDirectMu.Lock()
+		var stops []context.CancelFunc
+		if entry := h.liveDirectTargets[ticket]; entry != nil {
+			entry.Revoked = true
+			for _, stop := range entry.cancellations {
+				stops = append(stops, stop)
+			}
+		}
+		h.liveDirectMu.Unlock()
+		for _, stop := range stops {
+			stop()
+		}
+		return nil
+	})
 	client, err := netproxy.NewHTTPClientWithOptions(netproxy.HTTPClientOptions{
 		ResponseHeaderTimeout: defaultStreamOpenTimeout,
 	}, target.ProxyURL)

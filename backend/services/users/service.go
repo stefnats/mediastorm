@@ -245,6 +245,10 @@ func (s *Service) Reassign(profileID, newAccountID string) (models.User, error) 
 	}
 
 	previous := user
+	if user.AccountID != newAccountID {
+		user.AllowLiveTakeover = false
+		user.AllowRecordingInterruption = false
+	}
 	user.AccountID = newAccountID
 	user.UpdatedAt = time.Now().UTC()
 	s.users[profileID] = user
@@ -729,6 +733,10 @@ func (s *Service) SetKidsProfile(id string, isKids bool) (models.User, error) {
 	}
 
 	user.IsKidsProfile = isKids
+	if isKids {
+		user.AllowLiveTakeover = false
+		user.AllowRecordingInterruption = false
+	}
 
 	// Apply default kids settings when enabling kids profile
 	if isKids && user.KidsMode == "" {

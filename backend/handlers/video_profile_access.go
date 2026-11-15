@@ -2,6 +2,8 @@ package handlers
 
 import (
 	"net/http"
+	"novastream/internal/livecapacity"
+	"strings"
 
 	"novastream/internal/profileaccess"
 )
@@ -25,5 +27,15 @@ func (h *VideoHandler) requireHLSSessionAccess(w http.ResponseWriter, r *http.Re
 		resource = session.Path
 	}
 	session.mu.RUnlock()
-	return profileaccess.CheckResource(w, r, profileID, resource)
+	if !profileaccess.CheckResource(w, r, profileID, resource) {
+		return false
+	}
+	session.mu.RLock()
+	revoked := session.LiveRevoked
+	session.mu.RUnlock()
+	if revoked && !(r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/stop")) {
+		writeLiveAdmissionError(w, liveStreamTarget{}, livecapacity.ErrTakenOver)
+		return false
+	}
+	return true
 }

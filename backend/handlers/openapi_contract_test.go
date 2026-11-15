@@ -6,6 +6,8 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -13,8 +15,11 @@ import (
 	"github.com/gorilla/mux"
 
 	"novastream/api/openapi"
+	"novastream/config"
 	"novastream/internal/apierror"
 	"novastream/internal/auth"
+	"novastream/internal/livecapacity"
+	"novastream/internal/parentauth"
 	"novastream/models"
 	"novastream/services/accounts"
 	"novastream/services/clients"
@@ -938,6 +943,75 @@ func TestOpenAPIContract(t *testing.T) {
 	t.Run("visible episode source hints", func(t *testing.T) {
 		h, _, _ := episodeEndpointFixture()
 		exercise(t, v, contractCall{method: "PUT", target: "/api/users/profile/source-availability/episodes/view-1", vars: map[string]string{"userID": "profile", "viewID": "view-1"}, headers: map[string]string{"X-Client-ID": "fixture-client"}, body: map[string]any{"version": 1, "episodes": []any{}}}, h.EpisodeSourceHints, 200)
+	})
+
+	t.Run("independent account-managed live rights", func(t *testing.T) {
+		profiles, err := users.NewService(t.TempDir())
+		if err != nil {
+			t.Fatal(err)
+		}
+		profile, err := profiles.CreateForAccount(contractAccountID, "Synthetic viewer")
+		if err != nil {
+			t.Fatal(err)
+		}
+		h := &AdminUIHandler{usersService: profiles, parentAuthorization: parentauth.New(livePermissionTestAccounts{})}
+		manage := func(w http.ResponseWriter, r *http.Request) {
+			ctx := context.WithValue(r.Context(), adminSessionContextKey{}, &models.Session{AccountID: contractAccountID})
+			h.SetProfileLivePermissions(w, r.WithContext(ctx))
+		}
+		for _, live := range []bool{true, false} {
+			exercise(t, v, contractCall{method: "PUT", target: "/account/api/profiles/live-permissions?profileId=" + profile.ID,
+				headers: map[string]string{"X-Account-Password": "synthetic-confirmation", "Cookie": sessionCookieName + "=synthetic-contract-session"},
+				body:    map[string]bool{"allowLiveTakeover": live, "allowRecordingInterruption": !live}}, manage, 200)
+			stored, _ := profiles.Get(profile.ID)
+			if stored.AllowLiveTakeover != live || stored.AllowRecordingInterruption != !live {
+				t.Fatal("independent rights did not persist")
+			}
+		}
+	})
+
+	t.Run("live recording warning and explicit retry", func(t *testing.T) {
+		_, provider := newLiveTSServer(t, 0)
+		manager := config.NewManager(filepath.Join(t.TempDir(), "settings.json"))
+		if err := manager.Save(config.Settings{Live: config.LiveSettings{Mode: "m3u", PlaylistURL: provider.URL + "/list.m3u", MaxStreams: 1}}); err != nil {
+			t.Fatal(err)
+		}
+		h := NewVideoHandlerWithProvider(true, stubBinary(t, "true"), stubBinary(t, "true"), t.TempDir(), nil)
+		t.Cleanup(h.hlsManager.Shutdown)
+		h.SetConfigManager(manager)
+		h.usersSvc = liveAccountUsers{"actor": {ID: "actor", AccountID: contractAccountID, AllowRecordingInterruption: true}}
+		h.liveChannels = staticLiveChannelProvider{channels: []LiveChannel{{ID: "synthetic-channel", URL: provider.URL + "/channel.ts"}}}
+		call := contractCall{method: "GET", target: "/api/live/hls/start?profileId=actor&playAttemptId=synthetic-contract-play&url=" + url.QueryEscape(provider.URL+"/channel.ts")}
+		r, _ := call.request(t)
+		target, err := h.liveCapacityTarget(r, provider.URL+"/channel.ts")
+		if err != nil {
+			t.Fatal(err)
+		}
+		stops := 0
+		var recordingLease *livecapacity.Lease
+		recordingLease, err = livecapacity.Default.AcquireOwned(target.BucketKey, "", 1, livecapacity.Owner{
+			AccountID: contractAccountID, ProfileID: "recorder", Kind: livecapacity.KindRecording, RecordingID: "synthetic-recording",
+			Stop: func(context.Context) error { stops++; recordingLease.Release(); return nil },
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer recordingLease.Release()
+		warning := exercise(t, v, call, h.StartLiveHLSSession, 409)
+		if stops != 0 {
+			t.Fatal("warning stopped the recording before confirmation")
+		}
+		var challenge struct {
+			ConfirmationToken string `json:"confirmationToken"`
+		}
+		if err := json.Unmarshal(warning.Body.Bytes(), &challenge); err != nil || challenge.ConfirmationToken == "" {
+			t.Fatal("missing recording confirmation")
+		}
+		call.headers = map[string]string{"X-Live-Recording-Confirmation": challenge.ConfirmationToken}
+		exercise(t, v, call, h.StartLiveHLSSession, 200)
+		if stops != 1 {
+			t.Fatal("explicit retry did not stop exactly the selected recording")
+		}
 	})
 
 	t.Run("coverage", func(t *testing.T) {

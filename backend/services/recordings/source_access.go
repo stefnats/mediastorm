@@ -5,6 +5,7 @@ import (
 	"errors"
 	"time"
 
+	"novastream/internal/livecapacity"
 	"novastream/models"
 )
 
@@ -18,6 +19,12 @@ type SourceAuthorizer interface {
 // callback must run only after FFmpeg and its provider connection have stopped.
 type CapacityReserver interface {
 	ReserveRecording(context.Context, models.Recording) (func(), error)
+}
+
+// ManagedCapacityReserver keeps ownership and shutdown tied to the running
+// recording. A scheduler reservation alone never enables or performs takeover.
+type ManagedCapacityReserver interface {
+	ReserveManagedRecording(context.Context, models.Recording) (*livecapacity.Lease, error)
 }
 
 func (s *Service) authorizeSource(recording *models.Recording) error {

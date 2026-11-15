@@ -6,6 +6,7 @@ package livecapacity
 import (
 	"errors"
 	"sync"
+	"time"
 )
 
 var ErrLimit = errors.New("live provider connection limit reached")
@@ -13,9 +14,16 @@ var ErrLimit = errors.New("live provider connection limit reached")
 var Default = NewManager()
 
 type Manager struct {
-	mu      sync.Mutex
-	buckets map[string]*bucket
-	next    uint64
+	mu            sync.Mutex
+	buckets       map[string]*bucket
+	next          uint64
+	owners        map[*Lease]Owner
+	claims        map[string]*handoff
+	confirmations map[string]confirmation
+	draining      map[uint64]bool
+	revoked       map[string]time.Time
+	admitted      map[string]time.Time
+	changed       chan struct{}
 }
 
 type bucket struct {
@@ -31,7 +39,10 @@ type Lease struct {
 	released   bool
 }
 
-func NewManager() *Manager { return &Manager{buckets: make(map[string]*bucket)} }
+func NewManager() *Manager {
+	return &Manager{buckets: make(map[string]*bucket), owners: make(map[*Lease]Owner),
+		claims: make(map[string]*handoff), confirmations: make(map[string]confirmation), draining: make(map[uint64]bool), revoked: make(map[string]time.Time), admitted: make(map[string]time.Time), changed: make(chan struct{})}
+}
 
 // Acquire atomically reserves a connection. Only consumers actually using the
 // shared upstream hub may supply a share key; private inputs use an empty key.
@@ -40,6 +51,13 @@ func NewManager() *Manager { return &Manager{buckets: make(map[string]*bucket)} 
 func (m *Manager) Acquire(key, shareKey string, limit int) (*Lease, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	return m.acquireLocked(key, shareKey, limit, Owner{})
+}
+
+func (m *Manager) acquireLocked(key, shareKey string, limit int, owner Owner) (*Lease, error) {
+	if owner.RevocationKey != "" && m.revokedLocked(owner.RevocationKey, time.Now()) {
+		return nil, ErrTakenOver
+	}
 	b := m.buckets[key]
 	if b == nil {
 		b = &bucket{connections: make(map[uint64]int), shared: make(map[string]uint64)}
@@ -49,10 +67,14 @@ func (m *Manager) Acquire(key, shareKey string, limit int) (*Lease, error) {
 		b.limit = limit
 	}
 	if id, ok := b.shared[shareKey]; shareKey != "" && ok {
+		if m.draining[id] {
+			return nil, ErrLimit
+		}
 		b.connections[id]++
-		return &Lease{manager: m, bucket: key, connection: id}, nil
+		return m.leaseLocked(key, id, owner), nil
 	}
-	if b.limit > 0 && len(b.connections) >= b.limit {
+	reserved := m.reservedLocked(key, b)
+	if b.limit > 0 && len(b.connections)+reserved >= b.limit {
 		return nil, ErrLimit
 	}
 	m.next++
@@ -61,7 +83,7 @@ func (m *Manager) Acquire(key, shareKey string, limit int) (*Lease, error) {
 	if shareKey != "" {
 		b.shared[shareKey] = id
 	}
-	return &Lease{manager: m, bucket: key, connection: id}, nil
+	return m.leaseLocked(key, id, owner), nil
 }
 
 // MakePrivate corrects an optimistic TS share when the provider unexpectedly
@@ -78,8 +100,11 @@ func (l *Lease) MakePrivate() error {
 		return ErrLimit
 	}
 	b := m.buckets[l.bucket]
+	if m.draining[l.connection] {
+		return ErrLimit
+	}
 	if b.connections[l.connection] > 1 {
-		if b.limit > 0 && len(b.connections) >= b.limit {
+		if b.limit > 0 && len(b.connections)+m.reservedLocked(l.bucket, b) >= b.limit {
 			return ErrLimit
 		}
 		b.connections[l.connection]--
@@ -106,19 +131,24 @@ func (l *Lease) Release() {
 		return
 	}
 	l.released = true
+	owner := m.owners[l]
+	m.markAdmittedLocked(owner.RevocationKey, time.Now())
+	delete(m.owners, l)
 	b := m.buckets[l.bucket]
 	b.connections[l.connection]--
 	if b.connections[l.connection] == 0 {
 		delete(b.connections, l.connection)
+		delete(m.draining, l.connection)
 		for key, id := range b.shared {
 			if id == l.connection {
 				delete(b.shared, key)
 			}
 		}
 	}
-	if len(b.connections) == 0 {
+	if len(b.connections) == 0 && m.claims[l.bucket] == nil {
 		delete(m.buckets, l.bucket)
 	}
+	m.notifyLocked()
 }
 
 func (m *Manager) Current(key string) int {

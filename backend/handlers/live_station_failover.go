@@ -256,7 +256,10 @@ func (p *liveStationFailover) next(ctx context.Context, session *HLSSession) err
 		tuning.ForceHLSInput = false
 		tuning.HDHomeRunInput = candidate.hdHomeRun
 		key := liveUpstreamShareKey(candidate.channel.URL, tuning)
-		lease, err := livecapacity.Default.Acquire(candidate.target.BucketKey, key, candidate.target.MaxStreams)
+		session.mu.RLock()
+		owner := session.liveCapacityOwner
+		session.mu.RUnlock()
+		lease, err := livecapacity.Default.AcquireOwned(candidate.target.BucketKey, key, candidate.target.MaxStreams, owner)
 		if err != nil {
 			if errors.Is(err, livecapacity.ErrLimit) {
 				capacityBlocked = true

@@ -10,13 +10,25 @@ import (
 )
 
 func (h *LiveHandler) ReserveRecording(ctx context.Context, recording models.Recording) (func(), error) {
+	lease, err := h.ReserveManagedRecording(ctx, recording)
+	if err != nil {
+		return nil, err
+	}
+	return lease.Release, nil
+}
+
+// ReserveManagedRecording registers ownership without enabling interruption
+// until the recording service publishes its actual running process callback.
+func (h *LiveHandler) ReserveManagedRecording(ctx context.Context, recording models.Recording) (*livecapacity.Lease, error) {
 	// Scheduled jobs have no HTTP middleware, so recheck the upstream kids
 	// policy here as well as the current channel/account assignment.
+	owner := livecapacity.Owner{}
 	if h.usersSvc != nil {
 		profile, ok := h.usersSvc.Get(recording.UserID)
 		if !ok || profile.IsKidsProfile {
 			return nil, errors.New("recording profile unavailable")
 		}
+		owner = livecapacity.Owner{AccountID: profile.AccountID, ProfileID: profile.ID, Kind: livecapacity.KindRecording, RecordingID: recording.ID}
 	}
 	request, err := http.NewRequestWithContext(ctx, http.MethodGet, "/api/live/channels", nil)
 	if err != nil {
@@ -31,11 +43,11 @@ func (h *LiveHandler) ReserveRecording(ctx context.Context, recording models.Rec
 	}
 	// The recorder currently opens its own FFmpeg input, even on a channel
 	// already being watched. It therefore consumes a private connection.
-	lease, err := livecapacity.Default.Acquire(target.BucketKey, "", target.MaxStreams)
+	lease, err := livecapacity.Default.AcquireOwned(target.BucketKey, "", target.MaxStreams, owner)
 	if err != nil {
 		return nil, err
 	}
-	return lease.Release, nil
+	return lease, nil
 }
 
 func (h *RecordingsHandler) bindRecordingChannel(w http.ResponseWriter, r *http.Request, profileID string, payload *createRecordingPayload) bool {

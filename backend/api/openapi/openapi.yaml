@@ -1867,8 +1867,138 @@ paths:
         '404':
           $ref: '#/components/responses/Error'
 
+  /api/live/hls/start:
+    get:
+      operationId: startLivePlayback
+      summary: Open an authorized live channel within shared provider capacity
+      description: |
+        playAttemptId identifies one explicit Play action. Keep it on automatic
+        retries and select a new nonce only for a new explicit action.
+        Automatic retunes additionally set automaticRetry=true, which suppresses
+        preemption even after the bounded nonce history expires. Profile
+        takeover rights are read from current server state and apply only within
+        the same account. Calls without a nonce cannot initiate takeover.
+        A displaced nonce receives LIVE_STREAM_TAKEN_OVER; stop automatic retry.
+
+        Recording interruption needs a separate profile right and a 409 challenge.
+        Dismissal sends no retry and preserves the recording. After explicit
+        consent, repeat this exact tune with X-Live-Recording-Confirmation.
+        The single-use token expires in 30 seconds and binds the actor, device,
+        source and current consumers. No recording or viewer names are returned.
+        Replacement admission waits for actual provider-input closure; recorded
+        portions remain saved with cancelled status and an incomplete reason.
+      parameters:
+        - $ref: '#/components/parameters/ProfileUnlock'
+        - $ref: '#/components/parameters/StreamProfileID'
+        - name: url
+          in: query
+          required: true
+          schema:
+            type: string
+        - name: sourceId
+          in: query
+          schema:
+            type: string
+        - name: playAttemptId
+          in: query
+          schema:
+            type: string
+            pattern: '^[a-zA-Z0-9_-]{16,80}$'
+        - name: X-Live-Recording-Confirmation
+          in: header
+          description: Opaque challenge sent only after explicit consent to interrupt the recording.
+          schema:
+            type: string
+        - name: automaticRetry
+          in: query
+          description: Suppress takeover on automatic retunes while retaining nonce revocation checks.
+          schema:
+            type: boolean
+      responses:
+        '200':
+          description: Direct media URL or HLS session according to the source and target.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  isDirect:
+                    type: boolean
+                  streamUrl:
+                    type: string
+                  sessionId:
+                    type: string
+                  playlistUrl:
+                    type: string
+                  isLive:
+                    type: boolean
+                  hasClosedCaptions:
+                    type: boolean
+                  timeshiftWindowSeconds:
+                    type: integer
+                  stremioStreamIndex:
+                    type: integer
+                  stremioStreamIndexes:
+                    type: array
+                    items:
+                      type: integer
+        '409':
+          description: Recording confirmation required, expired confirmation, or incomplete handoff.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LiveCapacityError'
+        '410':
+          description: Playback was taken over; stop automatic retries and offer an explicit Play action.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LiveCapacityError'
+        '429':
+          description: Occupied capacity with no permitted takeover available.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LiveCapacityError'
+        default:
+          $ref: '#/components/responses/Error'
+
+  /account/api/profiles/live-permissions:
+    put:
+      operationId: setProfileLivePermissions
+      summary: Set independent IPTV rights for an owned adult profile
+      security:
+        - accountSession: []
+      parameters:
+        - $ref: '#/components/parameters/StreamProfileID'
+        - name: X-Account-Password
+          in: header
+          description: Fresh account-password proof required for non-master management.
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ProfileLivePermissions'
+      responses:
+        '200':
+          description: Independently saved rights; children cannot be granted either right.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ProfileLivePermissions'
+        default:
+          description: Invalid request, insufficient management authority, or a foreign profile.
+
 components:
   securitySchemes:
+    accountSession:
+      type: apiKey
+      in: cookie
+      name: strmr_admin_session
+      description: Account-management session; a playback token cannot grant these rights.
     bearerAuth:
       type: http
       scheme: bearer
@@ -2166,6 +2296,50 @@ components:
         isMaster:
           type: boolean
 
+    ProfileLivePermissions:
+      type: object
+      additionalProperties: false
+      required: [allowLiveTakeover, allowRecordingInterruption]
+      properties:
+        allowLiveTakeover:
+          type: boolean
+        allowRecordingInterruption:
+          type: boolean
+
+    LiveCapacityError:
+      type: object
+      additionalProperties: false
+      required: [code, message]
+      properties:
+        code:
+          type: string
+          enum: [LIVE_STREAM_LIMIT_REACHED, LIVE_RECORDING_CONFIRMATION_REQUIRED, LIVE_RECORDING_CONFIRMATION_EXPIRED, LIVE_STREAM_TAKEN_OVER, LIVE_TAKEOVER_PERMISSION_CHANGED, LIVE_TAKEOVER_STOP_FAILED, LIVE_TAKEOVER_PENDING_CLOSE]
+        message:
+          type: string
+        confirmationToken:
+          type: string
+          pattern: '^[a-f0-9]{48}$'
+        recordingCount:
+          type: integer
+          minimum: 1
+        expiresInSeconds:
+          type: integer
+          minimum: 1
+          maximum: 30
+        retryAutomatically:
+          type: boolean
+          enum: [false]
+        provider:
+          type: string
+        currentStreams:
+          type: integer
+        maxStreams:
+          type: integer
+        available:
+          type: integer
+        atLimit:
+          type: boolean
+
     Profile:
       type: object
       required: [id, accountId, name]
@@ -2202,6 +2376,14 @@ components:
           type: boolean
         allowShareLinks:
           type: boolean
+        allowLiveTakeover:
+          type: boolean
+          default: false
+          description: Account-managed permission to stop an eligible live input in the same account.
+        allowRecordingInterruption:
+          type: boolean
+          default: false
+          description: Separate account-managed permission; every recording interruption still requires confirmation.
         activityPrivacy:
           type: string
           enum: [shared, shared_anonymous, not_shared]
