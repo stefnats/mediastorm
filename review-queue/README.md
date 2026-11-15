@@ -1,6 +1,8 @@
 # Review queue
 
-The earlier 39 own PRs have been reduced to three independent backend corrections; 36 requests are closed. Each is based directly on upstream `master` at [`8b278f9e00ed`](https://github.com/godver3/mediastorm/commit/8b278f9e00ed8c100839e3abf3b9b0f688c2dfe0); none requires another PR. The table suggests a reading order, with the smallest diff first. They can be merged in any order.
+PRs [81](https://github.com/godver3/mediastorm/pull/81), [82](https://github.com/godver3/mediastorm/pull/82) and [96](https://github.com/godver3/mediastorm/pull/96) were merged by the maintainer on 15 November 2026 at 19:30 Europe/Berlin. No own upstream PR is open in either repository. Deferred features remain in the forks pending scope discussion.
+
+The table retains the reviewed source heads, pinned diffs and recorded validation for the three completed independent corrections.
 
 | PR | Problem and result | Complete diff | Recorded validation |
 | --- | --- | --- | --- |
