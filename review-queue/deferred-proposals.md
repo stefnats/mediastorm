@@ -73,3 +73,37 @@ The horizon is seven days, with at most 200 enabled rules processed, 500 catalog
 The complete backend suite passed 8,407 cases with 38 explicit skips. Three service race runs passed 216 cases and three HTTP race runs passed nine cases. API schema checks passed, the backend builds, and the real cookie-authenticated web page was checked at six widths, including profile switching, no projection job actions, cancellation, incomplete coverage, escaped titles, old responses and unavailable forecasts. UI edge-case response mutations are fixtures, not real provider behavior. The new internal-catalog regression uses only a loopback M3U server. No private playlist, provider/indexer access, native rebuild or device acceptance was used for this package.
 
 This branch retains the integration history and is not an isolated upstream PR candidate. Further features remain pending scope discussion. No own upstream PR is open, and none was created for this package. No deployment or reactivation occurred.
+
+## Fork-only scoped local source preferences
+
+Profiles can prefer eligible local files, use normal search, or inherit at title,
+canonical season and episode scope. A dedicated capability-gated write preserves
+audio and subtitle preferences. Pending preparations retire after source changes;
+active playback IDs remain usable for progress and release reports. Migration 074
+is required and reversible.
+
+Backend: [feature/content-local-preference](https://github.com/stefnats/mediastorm/tree/feature/content-local-preference), `d77c5e573352a715ecab29d83351753b94ad38a7`.
+TV/phone: [feature/content-local-controls](https://github.com/stefnats/mediastorm-androidtv/tree/feature/content-local-controls), `e237329fde94c5da8a7024ffd04cca3ad3abd25c`.
+
+Validation: 8,395 backend tests passed, 38 explicit skips; synthetic PostgreSQL
+fresh/upgrade/rollback checks, repeated preparation races, six native request
+fixtures against the backend contract, 952 native tests and both debug APKs.
+A separate test-only commit synchronizes the existing completion browser fixture.
+Native inherited policy still retains the prior library-first behavior including
+Plex/Jellyfin. Alternate numbering is title-only. Physical native rendering,
+focus and touch remain untested. No deployment or new upstream proposal.
+
+## Fork-only observed partial series coverage
+
+[feature/partial-series-availability](https://github.com/stefnats/mediastorm/tree/feature/partial-series-availability)
+adds optional observed episode/season counts without changing legacy scalar states.
+Only current found-plus-missing evidence is partial. A general series candidate
+never proves complete availability; conflicting episode aliases remain unknown.
+Existing cache and local proofs are revalidated against profile, language,
+quality, rights, report revisions and expiry without new search/probe work.
+
+Validation: 162 source/report cases passed, one explicit skip; 87 repeated race
+cases, the full OpenAPI contract suite and real local HTTP title/episode responses.
+Two independent source reviews completed without remaining concrete findings.
+Native display and combined integration verification are in progress. No migration,
+deployment or new upstream proposal.
