@@ -126,3 +126,25 @@ preferences and partial-series coverage. The combined baseline at
 explicit skips, including synthetic PostgreSQL and authenticated browser fixtures.
 The separately tested split-rating routing fix is included in the current branch.
 This is a development integration branch, not a new upstream proposal or deployment.
+
+## Fork-only regional certification provenance
+
+[feature/regional-certification-foundation](https://github.com/stefnats/mediastorm/tree/feature/regional-certification-foundation)
+retains bounded country/release-specific raw ratings from existing TMDB responses,
+with actual provider identity and original retrieval/expiry times. Conflicting
+release rows remain distinct. Legacy scalar selection and request scheduling stay
+compatible. Cached copies do not renew evidence; people/unknown media never
+inherit series evidence through a numeric-ID collision. Manual-match and backup
+inputs cannot manufacture provider provenance.
+
+This is metadata foundation only. It enables no regional child authorization,
+claims no official registry verification and treats series ratings separately
+from episode evidence. No migration is required. Scope: 23 files, 17 new test
+functions. Validation: 804 affected-package tests, 51 repeated race cases,
+43 API/validator cases, full source build and an independent review completed.
+
+The latest combined integration at
+`69cc67ac7d41628be4a2a9eaa8705a65f3c9c5e3` passed 8,515 backend cases with 38
+explicit skips, including synthetic PostgreSQL and authenticated loopback browser
+fixtures. The committed backend binary has matching VCS metadata. Source packages
+remain separate. No production deployment, activation or new upstream proposal.
