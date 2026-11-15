@@ -143,8 +143,34 @@ from episode evidence. No migration is required. Scope: 23 files, 17 new test
 functions. Validation: 804 affected-package tests, 51 repeated race cases,
 43 API/validator cases, full source build and an independent review completed.
 
-The latest combined integration at
+The earlier combined integration at
 `69cc67ac7d41628be4a2a9eaa8705a65f3c9c5e3` passed 8,515 backend cases with 38
 explicit skips, including synthetic PostgreSQL and authenticated loopback browser
 fixtures. The committed backend binary has matching VCS metadata. Source packages
 remain separate. No production deployment, activation or new upstream proposal.
+
+## Fork-only personal reminders and inbox
+
+[Backend](https://github.com/stefnats/mediastorm/tree/feature/profile-reminders)
+and [TV/phone](https://github.com/stefnats/mediastorm-androidtv/tree/feature/native-reminders-inbox)
+add adult-profile release, episode-metadata and matching-source interests with a
+paged inbox. Source interests use the creating device's preferences. Existing
+normal observations deliver events; there is no new polling service or external
+delivery. An observed candidate is not a playback guarantee. Children are denied.
+
+Migration 075 and the private JSON fallback preserve deduplication, ownership,
+history and revocation. Restore retains messages without renewing source proof or
+trusting imported catalog aliases. Opening a reminder does not start playback or
+preparation; ordinary configured detail-page source hints remain unchanged.
+
+Validation: 3,492 affected backend cases, 270 repeated race cases, synthetic
+PostgreSQL migration/backup/concurrency checks, 1,011 native tests and both APK
+builds. All 13 native request fixtures pass real local handlers and OpenAPI.
+Physical TV/phone rendering, focus and touch remain untested.
+
+The combined development commit
+`57fc0816599b720ecbcdeebe35a05e8678bafeed` passes 8,592 backend cases. Its optional
+native fixture path was then exercised separately with all 13 examples, leaving
+38 pre-existing opt-in skips. The backend binary has matching commit metadata.
+Packages remain in separate fork branches; the combined branch is for integration
+verification. No new upstream PR, production deployment or service activation.
