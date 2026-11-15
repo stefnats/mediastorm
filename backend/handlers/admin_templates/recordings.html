@@ -135,12 +135,15 @@
 {{end}}
 
 {{define "scripts"}}
+<script src="{{.ServerBasePath}}/api/static/recording-plan-v1.js"></script>
 <script>
 const profiles = {{json .Users}};
 let channels = [];
 let currentEPGProgram = null;
 let epgPrograms = [];
 let serverTimeOffsetMs = 0;
+let currentRecordingPlan = new Map();
+let recordingListGeneration = 0;
 
 function pageApiBase() {
     return basePath + '/api/live/recordings';
@@ -445,6 +448,7 @@ function useSelectedEPGProgram() {
         throw new Error('Selected EPG program is no longer available');
     }
     applyProgramToForm(program, 'Loaded selected EPG program.');
+    recordingPlanUI.invalidate();
     return program;
 }
 
@@ -476,6 +480,7 @@ function buildPayload() {
 async function scheduleManualRecording() {
     try {
         const payload = buildPayload();
+        if (!await recordingPlanUI.confirm(payload, pageApiBase(), () => JSON.stringify(buildPayload()))) return;
         const response = await fetch(`${pageApiBase()}/time-block`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
@@ -503,6 +508,7 @@ async function scheduleEPGRecording() {
         payload.description = selectedProgram.description || payload.description;
         payload.start = selectedProgram.start;
         payload.stop = selectedProgram.stop;
+        if (!await recordingPlanUI.confirm(payload, pageApiBase(), () => JSON.stringify(buildPayload()))) return;
         const response = await fetch(`${pageApiBase()}/epg`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
@@ -540,10 +546,23 @@ function streamRecordingURL(id) {
 }
 
 async function loadRecordings() {
+    const generation = ++recordingListGeneration;
     const profileId = document.getElementById('recordingProfile').value;
     const response = await fetch(`${pageApiBase()}?profileId=${encodeURIComponent(profileId)}`);
     if (!response.ok) throw new Error('Failed to load recordings');
     const data = await response.json();
+    if (generation !== recordingListGeneration || document.getElementById('recordingProfile').value !== profileId) return;
+    currentRecordingPlan = new Map();
+    renderRecordings(data.recordings || []);
+    try {
+        const planResponse = await fetch(`${pageApiBase()}/plan?profileId=${encodeURIComponent(profileId)}`);
+        if (!planResponse.ok) throw new Error('Plan unavailable');
+        const plan = await planResponse.json();
+        if (generation !== recordingListGeneration || document.getElementById('recordingProfile').value !== profileId) return;
+        currentRecordingPlan = new Map((plan.recordings || []).map(item => [item.recordingId, item]));
+    } catch (_) {
+        if (generation !== recordingListGeneration || document.getElementById('recordingProfile').value !== profileId) return;
+    }
     renderRecordings(data.recordings || []);
 }
 
@@ -568,6 +587,7 @@ function renderRecordings(recordings) {
                     <div style="font-size: 0.85rem; color: var(--text-muted); margin-top: 0.25rem;">
                         ${escapeHtml(recording.channelName || '')} · ${escapeHtml(recording.status)} · ${new Date(recording.startAt).toLocaleString()}
                     </div>
+                    ${canCancel ? `<div class="recording-plan-hint" style="font-size:0.85rem; margin-top:0.4rem; overflow-wrap:anywhere;">${escapeHtml(recordingPlanUI.label(currentRecordingPlan.get(recording.id)))}</div>` : ''}
                     ${visibleError ? `<div style="font-size: 0.8rem; color: var(--danger); margin-top: 0.25rem;">${escapeHtml(visibleError)}</div>` : ''}
                 </div>
                 <div style="display: flex; gap: 0.5rem; flex-wrap: wrap;">
@@ -588,6 +608,9 @@ function escapeHtml(text) {
 }
 
 document.getElementById('recordingProfile').addEventListener('change', async () => {
+    recordingPlanUI.invalidate();
+    recordingListGeneration++;
+    currentRecordingPlan = new Map();
     try {
         await loadChannels();
         epgPrograms = [];
@@ -603,6 +626,10 @@ document.getElementById('recordingChannel').addEventListener('change', () => {
     epgPrograms = [];
     renderEPGPrograms();
 });
+
+document.addEventListener('input', () => recordingPlanUI.invalidate());
+document.addEventListener('change', () => recordingPlanUI.invalidate());
+window.addEventListener('pagehide', () => recordingPlanUI.invalidate());
 
 initProfiles();
 loadChannels().then(async () => {

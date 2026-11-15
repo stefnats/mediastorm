@@ -1030,6 +1030,22 @@ func TestOpenAPIContract(t *testing.T) {
 		}
 	})
 
+	t.Run("recording planning", func(t *testing.T) {
+		h, _ := recordingPlanningFixture(t)
+		for i := range h.users.(*fakeRecordingUsersProvider).users {
+			if h.users.(*fakeRecordingUsersProvider).users[i].AccountID == "household" {
+				h.users.(*fakeRecordingUsersProvider).users[i].AccountID = contractAccountID
+			}
+		}
+		for _, base := range []string{"/api/live/recordings", "/admin/api/live/recordings", "/account/api/live/recordings"} {
+			exercise(t, v, contractCall{method: "GET", target: base + "/plan?profileId=viewer"}, h.Plan, 200)
+			exercise(t, v, contractCall{method: "POST", target: base + "/preview", body: previewBody(t, "visible")}, h.Preview, 200)
+			exercise(t, v, contractCall{method: "POST", target: base + "/preview", body: previewBody(t, "separate")}, h.Preview, 200)
+			exercise(t, v, contractCall{method: "GET", target: base + "/plan?profileId=foreign"}, h.Plan, 404)
+			exercise(t, v, contractCall{method: "GET", target: base + "/plan?profileId=kid"}, h.Plan, 403)
+		}
+	})
+
 	t.Run("saved provider capacity", func(t *testing.T) {
 		h, _, _ := capacityFixture(t, nil)
 		for _, source := range []string{"xtream", "export", "plain"} {

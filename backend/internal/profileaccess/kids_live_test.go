@@ -15,7 +15,7 @@ func TestBlockKidsFromLiveTV(t *testing.T) {
 	router := mux.NewRouter()
 	router.Use(BlockKidsFromLiveTV(isKids))
 	ok := func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusNoContent) }
-	for _, path := range []string{"/api/live/channels", "/api/live/hls/start", "/api/live/epg/now", "/api/live/recordings/epg",
+	for _, path := range []string{"/api/live/channels", "/api/live/hls/start", "/api/live/epg/now", "/api/live/recordings/epg", "/api/live/recordings/plan", "/api/live/recordings/preview",
 		"/api/sports/game/{id}/streams", "/api/sports/teams/linked-channels", "/api/sports/teams/{teamId}/channel-suggestions",
 		"/api/users/{userID}/settings", "/api/sports/scoreboard"} {
 		router.HandleFunc(path, ok)
@@ -30,6 +30,8 @@ func TestBlockKidsFromLiveTV(t *testing.T) {
 		{http.MethodGet, "/api/live/hls/start?profileId=kid&url=x", "", http.StatusForbidden},
 		{http.MethodGet, "/api/live/epg/now?userId=kid", "", http.StatusForbidden},
 		{http.MethodPost, "/api/live/recordings/epg", `{"profileId":"kid","channelId":"1"}`, http.StatusForbidden},
+		{http.MethodGet, "/api/live/recordings/plan?profileId=kid", "", http.StatusForbidden},
+		{http.MethodPost, "/api/live/recordings/preview", `{"profileId":"kid","channelId":"1"}`, http.StatusForbidden},
 		{http.MethodGet, "/api/sports/game/7/streams?profileId=kid", "", http.StatusForbidden},
 		{http.MethodGet, "/api/sports/teams/linked-channels?profileId=kid", "", http.StatusForbidden},
 		{http.MethodGet, "/api/sports/teams/3/channel-suggestions?profileId=kid", "", http.StatusForbidden},

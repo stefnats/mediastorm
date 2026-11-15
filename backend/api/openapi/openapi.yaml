@@ -1981,6 +1981,203 @@ paths:
               schema:
                 type: string
 
+  /api/live/recordings/plan:
+    get:
+      operationId: getRecordingPlan
+      summary: Forecast materialized recording overlaps for an owned adult profile
+      description: |
+        Advisory read-only snapshot, not a reservation. Uses padded windows and
+        private recorder inputs against shared source-account caps. Includes other
+        accounts in aggregate demand without returning their job IDs or metadata.
+        Live viewers, external apps and future rule expansion are not predicted.
+        Missing limits remain unknown. Incomplete or unresolved overlapping jobs
+        cannot produce a clear forecast. Runtime atomic admission remains final;
+        recordings wait for a free connection and never preempt viewers.
+      parameters:
+        - name: profileId
+          in: query
+          required: true
+          schema:
+            type: string
+            minLength: 1
+      responses:
+        '200':
+          description: Only the selected profile's upcoming materialized jobs.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RecordingPlan'
+        default:
+          description: Invalid or unavailable profile, forbidden child profile or unavailable plan.
+          content:
+            text/plain:
+              schema:
+                type: string
+
+  /api/live/recordings/preview:
+    post:
+      operationId: previewRecordingPlan
+      summary: Forecast a proposed recording without creating it
+      description: |
+        Resolves the channel from the selected profile's visible catalog; a
+        compatibility sourceUrl field is ignored. No job, provider input or
+        capacity lease is created. Use the normal creation route separately to
+        schedule a job. Existing pending, starting and running jobs are included,
+        subject to the same limitations as the recording plan.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RecordingPreviewRequest'
+      responses:
+        '200':
+          description: Includes an advisory candidate item with no recording ID.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RecordingPlan'
+        default:
+          description: Invalid body, unavailable or forbidden profile/channel or unavailable plan.
+          content:
+            text/plain:
+              schema:
+                type: string
+
+  /admin/api/live/recordings/plan:
+    get:
+      operationId: getRecordingPlanAdmin
+      summary: Forecast materialized recording overlaps for an owned adult profile
+      description: |
+        Advisory read-only snapshot, not a reservation. Uses padded windows and
+        private recorder inputs against shared source-account caps. Includes other
+        accounts in aggregate demand without returning their job IDs or metadata.
+        Live viewers, external apps and future rule expansion are not predicted.
+        Missing limits remain unknown. Incomplete or unresolved overlapping jobs
+        cannot produce a clear forecast. Runtime atomic admission remains final;
+        recordings wait for a free connection and never preempt viewers.
+      security:
+        - accountSession: []
+      parameters:
+        - name: profileId
+          in: query
+          required: true
+          schema:
+            type: string
+            minLength: 1
+      responses:
+        '200':
+          description: Only the selected profile's upcoming materialized jobs.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RecordingPlan'
+        default:
+          description: Invalid or unavailable profile, forbidden child profile or unavailable plan.
+          content:
+            text/plain:
+              schema:
+                type: string
+
+  /admin/api/live/recordings/preview:
+    post:
+      operationId: previewRecordingPlanAdmin
+      summary: Forecast a proposed recording without creating it
+      description: |
+        Resolves the channel from the selected profile's visible catalog; a
+        compatibility sourceUrl field is ignored. No job, provider input or
+        capacity lease is created. Use the normal creation route separately to
+        schedule a job. Existing pending, starting and running jobs are included,
+        subject to the same limitations as the recording plan.
+      security:
+        - accountSession: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RecordingPreviewRequest'
+      responses:
+        '200':
+          description: Includes an advisory candidate item with no recording ID.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RecordingPlan'
+        default:
+          description: Invalid body, unavailable or forbidden profile/channel or unavailable plan.
+          content:
+            text/plain:
+              schema:
+                type: string
+
+  /account/api/live/recordings/plan:
+    get:
+      operationId: getRecordingPlanAccount
+      summary: Forecast materialized recording overlaps for an owned adult profile
+      description: |
+        Advisory read-only snapshot, not a reservation. Uses padded windows and
+        private recorder inputs against shared source-account caps. Includes other
+        accounts in aggregate demand without returning their job IDs or metadata.
+        Live viewers, external apps and future rule expansion are not predicted.
+        Missing limits remain unknown. Incomplete or unresolved overlapping jobs
+        cannot produce a clear forecast. Runtime atomic admission remains final;
+        recordings wait for a free connection and never preempt viewers.
+      security:
+        - accountSession: []
+      parameters:
+        - name: profileId
+          in: query
+          required: true
+          schema:
+            type: string
+            minLength: 1
+      responses:
+        '200':
+          description: Only the selected profile's upcoming materialized jobs.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RecordingPlan'
+        default:
+          description: Invalid or unavailable profile, forbidden child profile or unavailable plan.
+          content:
+            text/plain:
+              schema:
+                type: string
+
+  /account/api/live/recordings/preview:
+    post:
+      operationId: previewRecordingPlanAccount
+      summary: Forecast a proposed recording without creating it
+      description: |
+        Resolves the channel from the selected profile's visible catalog; a
+        compatibility sourceUrl field is ignored. No job, provider input or
+        capacity lease is created. Use the normal creation route separately to
+        schedule a job. Existing pending, starting and running jobs are included,
+        subject to the same limitations as the recording plan.
+      security:
+        - accountSession: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RecordingPreviewRequest'
+      responses:
+        '200':
+          description: Includes an advisory candidate item with no recording ID.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RecordingPlan'
+        default:
+          description: Invalid body, unavailable or forbidden profile/channel or unavailable plan.
+          content:
+            text/plain:
+              schema:
+                type: string
+
   /admin/api/live/provider-capacity:
     post:
       operationId: checkLiveProviderCapacity
@@ -2259,6 +2456,92 @@ components:
             $ref: '#/components/schemas/Error'
 
   schemas:
+    RecordingPreviewRequest:
+      type: object
+      additionalProperties: false
+      required: [profileId, channelId, start, stop]
+      properties:
+        profileId:
+          type: string
+          minLength: 1
+        channelId:
+          type: string
+          minLength: 1
+        tvgId:
+          type: string
+        channelName:
+          type: string
+        sourceUrl:
+          type: string
+          description: Ignored compatibility field; the visible catalog supplies the source.
+        title:
+          type: string
+        description:
+          type: string
+        start:
+          type: string
+          format: date-time
+        stop:
+          type: string
+          format: date-time
+        paddingBeforeSeconds:
+          type: integer
+          minimum: 0
+          maximum: 3600
+        paddingAfterSeconds:
+          type: integer
+          minimum: 0
+          maximum: 3600
+
+    RecordingPlan:
+      type: object
+      additionalProperties: false
+      required: [checkedAt, complete, recordings]
+      properties:
+        checkedAt:
+          type: string
+          format: date-time
+        complete:
+          type: boolean
+          description: All materialized jobs fit within the bounded scan and their routing could be read. Does not imply a known limit.
+        recordings:
+          type: array
+          items:
+            $ref: '#/components/schemas/RecordingPlanItem'
+        candidate:
+          $ref: '#/components/schemas/RecordingPlanItem'
+
+    RecordingPlanItem:
+      type: object
+      additionalProperties: false
+      required: [state, start, end, maxStreams, peakScheduledConnections]
+      properties:
+        recordingId:
+          type: string
+        state:
+          type: string
+          enum: [clear, conflict, unknown, unavailable]
+        start:
+          type: string
+          format: date-time
+        end:
+          type: string
+          format: date-time
+        maxStreams:
+          type: integer
+          minimum: 0
+          description: Zero means the configured capacity is unknown, not unlimited.
+        peakScheduledConnections:
+          type: integer
+          minimum: 0
+        firstConflictStart:
+          type: string
+          format: date-time
+        firstConflictEnd:
+          type: string
+          format: date-time
+          description: End of the first conflicting constant-demand segment, not necessarily the last conflict.
+
     TasteOnboardingState:
       type: object
       additionalProperties: false
