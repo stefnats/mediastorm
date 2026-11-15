@@ -981,7 +981,7 @@ func TestOpenAPIContract(t *testing.T) {
 		h.SetConfigManager(manager)
 		h.usersSvc = liveAccountUsers{"actor": {ID: "actor", AccountID: contractAccountID, AllowRecordingInterruption: true}}
 		h.liveChannels = staticLiveChannelProvider{channels: []LiveChannel{{ID: "synthetic-channel", URL: provider.URL + "/channel.ts"}}}
-		call := contractCall{method: "GET", target: "/api/live/hls/start?profileId=actor&playAttemptId=synthetic-contract-play&url=" + url.QueryEscape(provider.URL+"/channel.ts")}
+		call := contractCall{method: "GET", target: "/api/live/hls/start?profileId=actor&playAttemptId=" + generateSessionID() + "&url=" + url.QueryEscape(provider.URL+"/channel.ts")}
 		r, _ := call.request(t)
 		target, err := h.liveCapacityTarget(r, provider.URL+"/channel.ts")
 		if err != nil {

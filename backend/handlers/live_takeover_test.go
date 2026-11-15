@@ -129,15 +129,16 @@ func TestHLSOwnedTakeoverClosesPreviousInputAndRejectsOldAttempt(t *testing.T) {
 	bucket := t.Name()
 	t.Cleanup(func() { manager.Shutdown(); waitCapacityReleased(t, bucket) })
 	profiles := liveAccountUsers{"old": {ID: "old", AccountID: "household"}, "new": {ID: "new", AccountID: "household", AllowLiveTakeover: true}}
+	oldAttempt, newAttempt := generateSessionID(), generateSessionID()
 	create := func(profile, attempt, path string) (*HLSSession, error) {
 		admission := liveAdmissionForRequest(takeoverRequest(profile, attempt, provider.URL+path), profiles, provider.URL+path)
 		return manager.CreateLiveSession(context.Background(), provider.URL+path, "m3u", bucket, profile, "", "", "native", LiveTuningSettings{MaxStreams: 1, Capacity: admission}, false)
 	}
-	old, err := create("old", "synthetic-old-attempt", "/old.ts")
+	old, err := create("old", oldAttempt, "/old.ts")
 	if err != nil {
 		t.Fatal(err)
 	}
-	current, err := create("new", "synthetic-new-attempt", "/new.ts")
+	current, err := create("new", newAttempt, "/new.ts")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -150,7 +151,7 @@ func TestHLSOwnedTakeoverClosesPreviousInputAndRejectsOldAttempt(t *testing.T) {
 	if !revoked || !stopped {
 		t.Fatal("old HLS playback remained authorized")
 	}
-	if _, err := create("old", "synthetic-old-attempt", "/old.ts"); !errors.Is(err, livecapacity.ErrTakenOver) {
+	if _, err := create("old", oldAttempt, "/old.ts"); !errors.Is(err, livecapacity.ErrTakenOver) {
 		t.Fatal("old automatic retry was admitted")
 	}
 }
