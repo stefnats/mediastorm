@@ -18,6 +18,10 @@ import (
 )
 
 func recordingPlanningBrowserFixture(t *testing.T) http.Handler {
+	return recordingPlanningBrowserFixtureMode(t, false)
+}
+
+func recordingPlanningBrowserFixtureMode(t *testing.T, withRules bool) http.Handler {
 	t.Helper()
 	h, repo := recordingPlanningFixture(t)
 	dir := t.TempDir()
@@ -55,6 +59,9 @@ func recordingPlanningBrowserFixture(t *testing.T) http.Handler {
 	j.UserID = viewer.ID
 	j.Title = "Synthetic recording"
 	repo.jobs[j.ID] = j
+	if withRules {
+		enableHTTPRuleForecast(t, h, repo, viewer.ID)
+	}
 	prefs, err := user_settings.NewService(dir)
 	if err != nil {
 		t.Fatal(err)

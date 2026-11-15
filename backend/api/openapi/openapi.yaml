@@ -1989,7 +1989,9 @@ paths:
         Advisory read-only snapshot, not a reservation. Uses padded windows and
         private recorder inputs against shared source-account caps. Includes other
         accounts in aggregate demand without returning their job IDs or metadata.
-        Live viewers, external apps and future rule expansion are not predicted.
+        Known cached-guide matches of enabled recording rules are projected for
+        at most seven days without creating jobs. Missing or uncovered guide
+        windows remain uncertain. Live viewers and external apps are not predicted.
         Missing limits remain unknown. Incomplete or unresolved overlapping jobs
         cannot produce a clear forecast. Runtime atomic admission remains final;
         recordings wait for a free connection and never preempt viewers.
@@ -2023,7 +2025,7 @@ paths:
         compatibility sourceUrl field is ignored. No job, provider input or
         capacity lease is created. Use the normal creation route separately to
         schedule a job. Existing pending, starting and running jobs are included,
-        subject to the same limitations as the recording plan.
+        subject to the same guide coverage and capacity limitations as the recording plan.
       requestBody:
         required: true
         content:
@@ -2052,7 +2054,9 @@ paths:
         Advisory read-only snapshot, not a reservation. Uses padded windows and
         private recorder inputs against shared source-account caps. Includes other
         accounts in aggregate demand without returning their job IDs or metadata.
-        Live viewers, external apps and future rule expansion are not predicted.
+        Known cached-guide matches of enabled recording rules are projected for
+        at most seven days without creating jobs. Missing or uncovered guide
+        windows remain uncertain. Live viewers and external apps are not predicted.
         Missing limits remain unknown. Incomplete or unresolved overlapping jobs
         cannot produce a clear forecast. Runtime atomic admission remains final;
         recordings wait for a free connection and never preempt viewers.
@@ -2088,7 +2092,7 @@ paths:
         compatibility sourceUrl field is ignored. No job, provider input or
         capacity lease is created. Use the normal creation route separately to
         schedule a job. Existing pending, starting and running jobs are included,
-        subject to the same limitations as the recording plan.
+        subject to the same guide coverage and capacity limitations as the recording plan.
       security:
         - accountSession: []
       requestBody:
@@ -2119,7 +2123,9 @@ paths:
         Advisory read-only snapshot, not a reservation. Uses padded windows and
         private recorder inputs against shared source-account caps. Includes other
         accounts in aggregate demand without returning their job IDs or metadata.
-        Live viewers, external apps and future rule expansion are not predicted.
+        Known cached-guide matches of enabled recording rules are projected for
+        at most seven days without creating jobs. Missing or uncovered guide
+        windows remain uncertain. Live viewers and external apps are not predicted.
         Missing limits remain unknown. Incomplete or unresolved overlapping jobs
         cannot produce a clear forecast. Runtime atomic admission remains final;
         recordings wait for a free connection and never preempt viewers.
@@ -2155,7 +2161,7 @@ paths:
         compatibility sourceUrl field is ignored. No job, provider input or
         capacity lease is created. Use the normal creation route separately to
         schedule a job. Existing pending, starting and running jobs are included,
-        subject to the same limitations as the recording plan.
+        subject to the same guide coverage and capacity limitations as the recording plan.
       security:
         - accountSession: []
       requestBody:
@@ -2503,13 +2509,41 @@ components:
           format: date-time
         complete:
           type: boolean
-          description: All materialized jobs fit within the bounded scan and their routing could be read. Does not imply a known limit.
+          description: The bounded materialized-job and known-rule forecast could be resolved. Does not imply a known limit or guarantee future capacity.
         recordings:
           type: array
           items:
             $ref: '#/components/schemas/RecordingPlanItem'
         candidate:
           $ref: '#/components/schemas/RecordingPlanItem'
+        ruleForecast:
+          $ref: '#/components/schemas/RecordingRuleForecast'
+        projectedRecordings:
+          type: array
+          maxItems: 2000
+          description: Only the requested profile's ephemeral rule matches; these are not persisted recording jobs.
+          items:
+            $ref: '#/components/schemas/ProjectedRecordingPlanItem'
+
+    RecordingRuleForecast:
+      type: object
+      additionalProperties: false
+      required: [status, horizonStart, horizonEnd, projectedCount]
+      properties:
+        status:
+          type: string
+          enum: [not_configured, available, partial, unavailable]
+        horizonStart:
+          type: string
+          format: date-time
+        horizonEnd:
+          type: string
+          format: date-time
+        projectedCount:
+          type: integer
+          minimum: 0
+          maximum: 2000
+          description: Number of unmaterialized matches belonging only to the requested profile.
 
     RecordingPlanItem:
       type: object
@@ -2517,6 +2551,41 @@ components:
       required: [state, start, end, maxStreams, peakScheduledConnections]
       properties:
         recordingId:
+          type: string
+        state:
+          type: string
+          enum: [clear, conflict, unknown, unavailable]
+        start:
+          type: string
+          format: date-time
+        end:
+          type: string
+          format: date-time
+        maxStreams:
+          type: integer
+          minimum: 0
+          description: Zero means the configured capacity is unknown, not unlimited.
+        peakScheduledConnections:
+          type: integer
+          minimum: 0
+        firstConflictStart:
+          type: string
+          format: date-time
+        firstConflictEnd:
+          type: string
+          format: date-time
+          description: End of the first conflicting constant-demand segment, not necessarily the last conflict.
+
+    ProjectedRecordingPlanItem:
+      type: object
+      additionalProperties: false
+      required: [ruleId, channelName, title, state, start, end, maxStreams, peakScheduledConnections]
+      properties:
+        ruleId:
+          type: string
+        channelName:
+          type: string
+        title:
           type: string
         state:
           type: string

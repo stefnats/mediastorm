@@ -132,6 +132,14 @@
         <div id="recordingsList" style="padding: 1rem; color: var(--text-muted);">Loading...</div>
     </div>
 </div>
+
+<div class="card" style="margin-top: 1.5rem;">
+    <div class="card-header"><h2>Upcoming rule matches</h2></div>
+    <div class="card-body">
+        <p id="recordingRuleForecastStatus" role="status" style="margin-bottom: 0.75rem;">Loading rule forecast...</p>
+        <div id="recordingRuleForecastItems"></div>
+    </div>
+</div>
 {{end}}
 
 {{define "scripts"}}
@@ -553,6 +561,7 @@ async function loadRecordings() {
     const data = await response.json();
     if (generation !== recordingListGeneration || document.getElementById('recordingProfile').value !== profileId) return;
     currentRecordingPlan = new Map();
+    renderRuleForecast(null, 'Loading rule forecast...');
     renderRecordings(data.recordings || []);
     try {
         const planResponse = await fetch(`${pageApiBase()}/plan?profileId=${encodeURIComponent(profileId)}`);
@@ -560,10 +569,25 @@ async function loadRecordings() {
         const plan = await planResponse.json();
         if (generation !== recordingListGeneration || document.getElementById('recordingProfile').value !== profileId) return;
         currentRecordingPlan = new Map((plan.recordings || []).map(item => [item.recordingId, item]));
+        renderRuleForecast(plan);
     } catch (_) {
         if (generation !== recordingListGeneration || document.getElementById('recordingProfile').value !== profileId) return;
+        renderRuleForecast(null, 'Rule forecast unavailable. No recording has been changed.');
     }
     renderRecordings(data.recordings || []);
+}
+
+function renderRuleForecast(plan, fallback) {
+    const status = document.getElementById('recordingRuleForecastStatus');
+    const items = document.getElementById('recordingRuleForecastItems');
+    status.textContent = fallback || recordingPlanUI.ruleScope(plan?.ruleForecast);
+    items.innerHTML = (plan?.projectedRecordings || []).map(item => `
+        <div style="padding:0.75rem 0;border-top:1px solid var(--border);overflow-wrap:anywhere;">
+            <strong>${escapeHtml(item.title || 'Rule match')}</strong>
+            <div>${escapeHtml(item.channelName || '')} · ${escapeHtml(new Date(item.start).toLocaleString())}</div>
+            <div>${escapeHtml(recordingPlanUI.label(item))}</div>
+            <small>Forecast only. This recording has not been scheduled yet.</small>
+        </div>`).join('');
 }
 
 function renderRecordings(recordings) {
@@ -611,6 +635,7 @@ document.getElementById('recordingProfile').addEventListener('change', async () 
     recordingPlanUI.invalidate();
     recordingListGeneration++;
     currentRecordingPlan = new Map();
+    renderRuleForecast(null, 'Loading rule forecast...');
     try {
         await loadChannels();
         epgPrograms = [];

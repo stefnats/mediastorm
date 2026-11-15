@@ -29,7 +29,7 @@ type planningWindow struct {
 	resolved bool
 }
 
-// Plan reads every account's materialized jobs to account for shared provider
+// Plan combines materialized jobs and known rule matches across shared provider
 // budgets, but returns only profileID's items. No job or lease is changed.
 func (s *Service) Plan(ctx context.Context, profileID string, candidate *models.Recording) (models.RecordingPlan, error) {
 	ctx, cancel := context.WithTimeout(ctx, 8*time.Second)
@@ -47,6 +47,7 @@ func (s *Service) Plan(ctx context.Context, profileID string, candidate *models.
 	if candidate != nil {
 		copy := *candidate
 		copy.ID = ""
+		copy.RuleID = ""
 		copy.UserID = profileID
 		copy.Status = models.RecordingStatusPending
 		jobs = append(jobs, copy)
@@ -61,6 +62,22 @@ func (s *Service) Plan(ctx context.Context, profileID string, candidate *models.
 		ok     bool
 	}
 	cache := make(map[cacheKey]cached)
+	resolve := func(job models.Recording) (RecordingCapacity, bool) {
+		if !supported || ctx.Err() != nil {
+			return RecordingCapacity{}, false
+		}
+		key := cacheKey{job.UserID, job.ChannelID, job.SourceURL}
+		target, exists := cache[key]
+		if !exists {
+			capacity, resolveErr := planner.PlanRecordingCapacity(ctx, job)
+			target = cached{capacity, resolveErr == nil && capacity.Key != "" && capacity.Limit >= 0}
+			cache[key] = target
+		}
+		return target.target, target.ok
+	}
+	projection := s.projectRecordingRules(ctx, profileID, now, jobs, resolve)
+	jobs = projection.jobs
+	windows = make([]planningWindow, 0, len(jobs))
 	for _, job := range jobs {
 		if !planningStatus(job.Status) {
 			continue
@@ -72,19 +89,12 @@ func (s *Service) Plan(ctx context.Context, profileID string, candidate *models.
 		window := planningWindow{job: job, start: start, end: end}
 		if !valid {
 			complete = false
-		} else if supported && ctx.Err() == nil {
-			key := cacheKey{job.UserID, job.ChannelID, job.SourceURL}
-			target, exists := cache[key]
-			if !exists {
-				capacity, resolveErr := planner.PlanRecordingCapacity(ctx, job)
-				target = cached{capacity, resolveErr == nil && capacity.Key != "" && capacity.Limit >= 0}
-				cache[key] = target
-			}
-			window.capacity, window.resolved = target.target, target.ok
+		} else {
+			window.capacity, window.resolved = resolve(job)
 		}
 		windows = append(windows, window)
 	}
-	return buildRecordingPlan(now, profileID, windows, complete), nil
+	return buildRecordingPlan(now, profileID, windows, complete, &projection), nil
 }
 
 func planningStatus(status models.RecordingStatus) bool {
@@ -112,8 +122,18 @@ type planningEvent struct {
 	delta int
 }
 
-func buildRecordingPlan(now time.Time, profileID string, windows []planningWindow, complete bool) models.RecordingPlan {
+func buildRecordingPlan(now time.Time, profileID string, windows []planningWindow, complete bool, projections ...*ruleProjection) models.RecordingPlan {
 	plan := models.RecordingPlan{CheckedAt: now, Complete: complete, Recordings: []models.RecordingPlanItem{}}
+	var projection *ruleProjection
+	if len(projections) > 0 {
+		projection = projections[0]
+	}
+	if projection != nil {
+		plan.RuleForecast = projection.metadata
+		if projection.metadata != nil && (projection.metadata.Status == "partial" || projection.metadata.Status == "unavailable") {
+			plan.Complete = false
+		}
+	}
 	events := make(map[string][]planningEvent)
 	limits := make(map[string]int)
 	for _, window := range windows {
@@ -167,6 +187,10 @@ func buildRecordingPlan(now time.Time, profileID string, windows []planningWindo
 				}
 			}
 			uncertain := !complete
+			if projection != nil && projection.uncertain(window) {
+				uncertain = true
+				plan.Complete = false
+			}
 			for _, other := range windows {
 				if !other.resolved && other.start.Before(window.end) && other.end.After(window.start) {
 					uncertain = true
@@ -178,12 +202,26 @@ func buildRecordingPlan(now time.Time, profileID string, windows []planningWindo
 				item.State = "clear"
 			}
 		}
-		if window.job.ID == "" {
+		if window.job.ID == "" && window.job.RuleID != "" {
+			plan.ProjectedRecordings = append(plan.ProjectedRecordings, models.ProjectedRecordingPlanItem{
+				RecordingPlanItem: item, RuleID: window.job.RuleID, ChannelName: window.job.ChannelName, Title: window.job.Title,
+			})
+		} else if window.job.ID == "" {
 			plan.Candidate = &item
 		} else {
 			plan.Recordings = append(plan.Recordings, item)
 		}
 	}
 	sort.Slice(plan.Recordings, func(i, j int) bool { return plan.Recordings[i].RecordingID < plan.Recordings[j].RecordingID })
+	sort.Slice(plan.ProjectedRecordings, func(i, j int) bool {
+		a, b := plan.ProjectedRecordings[i], plan.ProjectedRecordings[j]
+		if !a.Start.Equal(b.Start) {
+			return a.Start.Before(b.Start)
+		}
+		if a.RuleID != b.RuleID {
+			return a.RuleID < b.RuleID
+		}
+		return a.ChannelName < b.ChannelName
+	})
 	return plan
 }
