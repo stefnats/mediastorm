@@ -20,16 +20,22 @@ def run(args):
         page.on("pageerror", lambda error: errors.append(str(error)))
         page.goto(args.base_url + "/player?token=test-token", wait_until="domcontentloaded")
         page.wait_for_function("typeof renderPlayerShell === 'function'")
-        page.evaluate("""() => {
+        page.evaluate("""async () => {
             activeProfileId='profile-a';activeProfileName='Synthetic profile';
             window.fixture={rating:'none',writes:[],lists:[],requests:[],failSave:false,failLoad:false,delaySuggestions:false,held:[]};
-            window.preparePostPlay = (kind='movie', known=true, next=false) => {
+            window.preparePostPlay = async (kind='movie', known=true, next=false, playMedia=false) => {
                 closeWebPostPlay();webPostPlaySeen.clear();webPostPlayDiscarded.clear();webPostPlayLeaving=false;
-                webPlayerPlaybackEnded=false;progressCompleted=false;webPlayerCanonicalProgressItemId=null;
+                resetNextEpisodeState();progressCompleted=false;
                 playbackMeta={title:kind==='movie'?'Synthetic completed movie':'Synthetic completed series',itemId:kind==='movie'?'tmdb:movie:1':'tmdb:tv:1',mediaType:kind==='movie'?'movie':'episode',seasonNumber:1,episodeNumber:1};
-                nextEpisodeLookupComplete=true;nextEpisodeInfo=next?{seasonNumber:1,episodeNumber:2}:null;webPostPlaySeriesContextKnown=known;
                 renderPlayerShell();
-                const video=document.getElementById('webPlayer');installVideoEvents(video);video.muted=true;video.src='/media.mp4';video.play();
+                // The shell installs events and starts its metadata lookup. Settle
+                // it before supplying the isolated completion context for this case.
+                await ensureNextEpisodeInfo();
+                nextEpisodeLookupComplete=true;nextEpisodeInfo=next?{seasonNumber:1,episodeNumber:2}:null;webPostPlaySeriesContextKnown=known;
+                const video=document.getElementById('webPlayer');video.muted=true;
+                // Only the natural-end proof needs media. Context-only cases keep
+                // an inert video, so replacing the shell cannot abort pending play.
+                if(playMedia){video.src='/media.mp4';await video.play();}
             };
             window.suggestionReply = () => ({rating:fixture.rating,ratingScope:playbackMeta.mediaType==='episode'?'series':'movie',source:'saved_choices',items:Array.from({length:12},(_,i)=>({title:{id:'tmdb:movie:'+String(i+10),name:'Synthetic suggestion '+String(i+1),mediaType:'movie',tmdbId:i+10,year:2025,backdrop:{url:'data:image/svg+xml,'+encodeURIComponent('<svg xmlns="http://www.w3.org/2000/svg" width="320" height="180"><rect width="320" height="180" fill="#1b2735"/></svg>')}}}))});
             apiCall=async(path,options={})=>{
@@ -50,7 +56,7 @@ def run(args):
                 return {};
             };
             maybeTriggerNextEpisodePrequeue=()=>{};maybeStartWebCreditsDetection=()=>{};
-            preparePostPlay();
+            await preparePostPlay('movie',true,false,true);
         }""")
         page.wait_for_function("document.querySelector('video').webkitDecodedFrameCount > 2")
         check(not page.locator('#postPlayDialog').evaluate('d=>d.open'), 'Question shown before actual completion')
@@ -119,24 +125,24 @@ def run(args):
         page.wait_for_function("webPostPlayState.rating==='like' && webPostPlayState.items.length===6")
         checks.append('failed-context-reload-clears-stale-actions-and-recovers')
         # Existing vote suppresses the initial question; unknown ordering never claims series completion.
-        page.evaluate("preparePostPlay('movie');webPlayerPlaybackEnded=true;maybeOfferWebPostPlay()")
+        page.evaluate("async () => { await preparePostPlay('movie');webPlayerPlaybackEnded=true;maybeOfferWebPostPlay() }")
         page.wait_for_function("webPostPlayState?.rating==='like' && !webPostPlayState.busy")
         check(not page.get_by_role('button',name='Yes',exact=True).is_visible(),'Existing rating re-asked')
-        page.evaluate("preparePostPlay('series',false);webPlayerPlaybackEnded=true;maybeOfferWebPostPlay()")
+        page.evaluate("async () => { await preparePostPlay('series',false);webPlayerPlaybackEnded=true;maybeOfferWebPostPlay() }")
         page.wait_for_timeout(100)
         check(not page.locator('#postPlayDialog').evaluate('d=>d.open'),'Unknown local ordering offered whole-series completion')
-        page.evaluate("preparePostPlay('series',true,true);webPlayerPlaybackEnded=true;maybeOfferWebPostPlay()")
+        page.evaluate("async () => { await preparePostPlay('series',true,true);webPlayerPlaybackEnded=true;maybeOfferWebPostPlay() }")
         page.wait_for_timeout(100)
         check(not page.locator('#postPlayDialog').evaluate('d=>d.open'),'Ordinary episode interrupted by rating question')
-        page.evaluate("preparePostPlay('series',true);webPlayerPlaybackEnded=true;maybeOfferWebPostPlay()")
+        page.evaluate("async () => { await preparePostPlay('series',true);webPlayerPlaybackEnded=true;maybeOfferWebPostPlay() }")
         page.wait_for_function("webPostPlayState?.kind==='series' && webPostPlayState.rating==='like'")
         check(page.locator('#postPlayScope').text_content()=='Your rating is for the whole series','Series rating scope ambiguous')
         checks.append('existing-vote-and-episode-ordering-preserve-next-episode-flow')
         # Leaving or a confirmed wrong-content report during pending completion suppresses the offer.
-        page.evaluate("preparePostPlay();webPlayerPlaybackEnded=true;window.pendingCompletion=maybeOfferWebPostPlay(new Promise(r=>window.releaseCompletion=r));discardWebPostPlaySource({profileId:activeProfileId,sourcePath,prequeueId:webPlayerActivePrequeueId});releaseCompletion({itemId:'tmdb:movie:1'})")
+        page.evaluate("async () => { await preparePostPlay();webPlayerPlaybackEnded=true;window.pendingCompletion=maybeOfferWebPostPlay(new Promise(r=>window.releaseCompletion=r));discardWebPostPlaySource({profileId:activeProfileId,sourcePath,prequeueId:webPlayerActivePrequeueId});releaseCompletion({itemId:'tmdb:movie:1'}) }")
         page.wait_for_timeout(100)
         check(not page.locator('#postPlayDialog').evaluate('d=>d.open'),'Reported wrong title got a completion question')
-        page.evaluate("preparePostPlay();webPostPlayLeaving=true;webPlayerPlaybackEnded=true;maybeOfferWebPostPlay()")
+        page.evaluate("async () => { await preparePostPlay();webPostPlayLeaving=true;webPlayerPlaybackEnded=true;maybeOfferWebPostPlay() }")
         page.wait_for_timeout(100)
         check(not page.locator('#postPlayDialog').evaluate('d=>d.open'),'Navigation created a late end dialog')
         checks.append('late-wrong-content-report-and-navigation-suppress-offer')
