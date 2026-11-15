@@ -1091,6 +1091,92 @@ paths:
         '404':
           $ref: '#/components/responses/Error'
 
+  /api/users/{userId}/content-preferences/local-source:
+    put:
+      operationId: setContentLocalSourcePreference
+      summary: Set an owned profile's local source ordering without replacing track preferences
+      description: |
+        The dedicated mutation route is absent on older servers, preventing an
+        unsafe downgrade to the older full-document preference update. Prefer
+        local true means try an eligible matching file first; false keeps normal
+        search-first selection with local fallback; null clears only this source
+        override and inherits. Track fields are rejected and retained unchanged.
+        Episode scope overrides season scope, series/movie, then profile/server.
+        Scoped IDs use <series>:season:<n>[:episode:<n>]. Scoped season zero is
+        supported; episode numbers must be positive. No file rights are granted.
+      parameters:
+        - name: userId
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [contentId, preferLocalFiles]
+              properties:
+                contentId:
+                  type: string
+                  minLength: 1
+                  maxLength: 1024
+                contentType:
+                  type: string
+                  enum: [series, movie]
+                preferLocalFiles:
+                  type: [boolean, 'null']
+      responses:
+        '200':
+          description: Stored preference with explicit local-source capability marker.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ContentPreferenceResponse'
+        default:
+          description: Invalid or inaccessible profile/preference, locked profile or persistence failure.
+          content:
+            text/plain:
+              schema:
+                type: string
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /api/users/{userId}/preferences/content/{contentID}:
+    get:
+      operationId: getContentPreference
+      summary: Read an owned profile's saved content preference and local-source capability
+      parameters:
+        - name: userId
+          in: path
+          required: true
+          schema:
+            type: string
+        - name: contentID
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Capability marker with saved fields when a preference exists.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ContentPreferenceResponse'
+        default:
+          description: Invalid or inaccessible profile/preference or locked profile.
+          content:
+            text/plain:
+              schema:
+                type: string
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
   /api/users/{userId}/details-bundle:
     get:
       tags: [metadata]
@@ -3285,6 +3371,29 @@ components:
         activeOrdering:
           type: string
 
+    ContentPreferenceResponse:
+      type: object
+      required: [localSourcePreferenceSupported]
+      properties:
+        localSourcePreferenceSupported:
+          type: boolean
+          enum: [true]
+        contentId:
+          type: string
+        contentType:
+          type: string
+        audioLanguage:
+          type: string
+        subtitleLanguage:
+          type: string
+        subtitleMode:
+          type: string
+        preferLocalFiles:
+          type: [boolean, 'null']
+        updatedAt:
+          type: string
+          format: date-time
+
     ContentPreference:
       type: object
       required: [contentId, contentType]
@@ -3294,6 +3403,14 @@ components:
         contentType:
           type: string
           enum: [series, movie]
+        preferLocalFiles:
+          type: [boolean, 'null']
+          description: |
+            Nullable source ordering override. True prefers an eligible local
+            file; false keeps normal search-first selection with local fallback.
+            Null inherits. Omitted fields retain their saved value on update.
+            Scoped series IDs use <series>:season:<n>[:episode:<n>] and override
+            episode, season, series, then profile/server in that order.
         audioLanguage:
           type: string
           description: ISO 639-2 code.

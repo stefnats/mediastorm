@@ -52,6 +52,18 @@ func (h *PrequeueHandler) localPlaybackPreferred(userID string) bool {
 	return models.BoolVal(defaults.Playback.PreferLocalFiles, false)
 }
 
+// Content overrides affect ordering only; the same eligibility and fallback
+// paths run for local-first and normal search-first selection.
+func (h *PrequeueHandler) localPlaybackPreferredFor(userID, titleID string, episode *models.EpisodeReference) bool {
+	fallback := h.localPlaybackPreferred(userID)
+	if h.contentPreferencesSvc != nil && strings.TrimSpace(titleID) != "" {
+		if preferred, err := h.contentPreferencesSvc.ResolveLocalPreference(userID, titleID, episode, fallback); err == nil {
+			return preferred
+		}
+	}
+	return fallback
+}
+
 func (h *PrequeueHandler) localItemAllowed(item models.LocalMediaItem, userID string) bool {
 	profiles, ok := h.users.(interface {
 		Get(string) (models.User, bool)
@@ -239,7 +251,7 @@ func (h *PrequeueHandler) validateReadyEntryForRequest(r *http.Request, entry *p
 	if !h.localEntryAllowed(r, entry) {
 		return errors.New("local library file unavailable")
 	}
-	if _, local := localmedia.ParseStreamPath(entry.StreamPath); !local && h.localPlaybackPreferred(entry.UserID) {
+	if _, local := localmedia.ParseStreamPath(entry.StreamPath); !local && h.localPlaybackPreferredFor(entry.UserID, entry.TitleID, entry.TargetEpisode) {
 		query := models.LocalMediaMatchQuery{TitleID: entry.TitleID, MediaType: entry.MediaType}
 		scope := prequeueLocalScope{accountID: auth.GetAccountID(r), master: auth.IsMaster(r)}
 		if len(requests) == 1 {

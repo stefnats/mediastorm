@@ -1046,6 +1046,24 @@ func TestOpenAPIContract(t *testing.T) {
 		}
 	})
 
+	t.Run("content local source preference", func(t *testing.T) {
+		h, _ := contentLocalHandler(t)
+		id := "tmdb:tv:123:season:2"
+		vars := map[string]string{"userID": "viewer", "contentID": id}
+		get := contractCall{method: "GET", target: "/api/users/viewer/preferences/content/" + id, vars: vars, master: true}
+		missing := exercise(t, v, get, h.GetPreference, 200)
+		if !strings.Contains(missing.Body.String(), `"localSourcePreferenceSupported":true`) {
+			t.Fatal("missing capability marker")
+		}
+		for _, value := range []any{true, false, nil} {
+			exercise(t, v, contractCall{method: "PUT", target: "/api/users/viewer/content-preferences/local-source", vars: vars, master: true,
+				body: map[string]any{"contentId": id, "contentType": "series", "preferLocalFiles": value}}, h.SetLocalSourcePreference, 200)
+			exercise(t, v, get, h.GetPreference, 200)
+		}
+		exercise(t, v, contractCall{method: "PUT", target: "/api/users/viewer/content-preferences/local-source", vars: vars, master: true, invalid: true,
+			body: map[string]any{"contentId": id, "preferLocalFiles": true, "audioLanguage": "eng"}}, h.SetLocalSourcePreference, 400)
+	})
+
 	t.Run("saved provider capacity", func(t *testing.T) {
 		h, _, _ := capacityFixture(t, nil)
 		for _, source := range []string{"xtream", "export", "plain"} {

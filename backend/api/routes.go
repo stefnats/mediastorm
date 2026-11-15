@@ -993,6 +993,8 @@ func Register(
 
 	// Content Preferences endpoints (per-content audio/subtitle preferences)
 	if contentPreferencesHandler != nil {
+		profileProtected.HandleFunc("/{userID}/content-preferences/local-source", contentPreferencesHandler.SetLocalSourcePreference).Methods(http.MethodPut)
+		profileProtected.HandleFunc("/{userID}/content-preferences/local-source", contentPreferencesHandler.Options).Methods(http.MethodOptions)
 		profileProtected.HandleFunc("/{userID}/preferences/content", contentPreferencesHandler.ListPreferences).Methods(http.MethodGet)
 		profileProtected.HandleFunc("/{userID}/preferences/content", contentPreferencesHandler.SetPreference).Methods(http.MethodPut)
 		profileProtected.HandleFunc("/{userID}/preferences/content", contentPreferencesHandler.Options).Methods(http.MethodOptions)

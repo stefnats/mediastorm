@@ -99,7 +99,8 @@ func (s *Service) Get(userID, contentID string) (*models.ContentPreference, erro
 		return nil, nil
 	}
 
-	return &pref, nil
+	copy := copyPreference(pref)
+	return &copy, nil
 }
 
 // Set creates or updates a content preference.
@@ -116,6 +117,19 @@ func (s *Service) Set(userID string, pref models.ContentPreference) error {
 
 	// Normalize the content ID
 	pref.ContentID = contentID
+	pref.ContentType = strings.ToLower(strings.TrimSpace(pref.ContentType))
+	if pref.ContentType == "" {
+		switch {
+		case strings.Contains(contentID, ":season:"), strings.HasPrefix(contentID, "tmdb:tv:"), strings.HasPrefix(contentID, "tvdb:"):
+			pref.ContentType = "series"
+		case strings.HasPrefix(contentID, "tmdb:movie:"):
+			pref.ContentType = "movie"
+		}
+	}
+	if err := validatePreference(pref); err != nil {
+		return err
+	}
+	pref = copyPreference(pref)
 	pref.UpdatedAt = time.Now().UTC()
 
 	if s.useDB() {
@@ -126,9 +140,20 @@ func (s *Service) Set(userID string, pref models.ContentPreference) error {
 	defer s.mu.Unlock()
 
 	perUser := s.ensureUserLocked(userID)
+	previous, existed := perUser[contentID]
 	perUser[contentID] = pref
-
-	return s.saveLocked()
+	if err := s.saveLocked(); err != nil {
+		if existed {
+			perUser[contentID] = previous
+		} else {
+			delete(perUser, contentID)
+			if len(perUser) == 0 {
+				delete(s.preferences, userID)
+			}
+		}
+		return err
+	}
+	return nil
 }
 
 // Delete removes a content preference.
@@ -155,6 +180,7 @@ func (s *Service) Delete(userID, contentID string) error {
 		return nil // Nothing to delete
 	}
 
+	previous, existed := perUser[contentID]
 	delete(perUser, contentID)
 
 	// Clean up empty user maps
@@ -162,7 +188,14 @@ func (s *Service) Delete(userID, contentID string) error {
 		delete(s.preferences, userID)
 	}
 
-	return s.saveLocked()
+	if err := s.saveLocked(); err != nil {
+		if existed {
+			perUser[contentID] = previous
+			s.preferences[userID] = perUser
+		}
+		return err
+	}
+	return nil
 }
 
 // List returns all content preferences for a user.
@@ -197,7 +230,7 @@ func (s *Service) List(userID string) ([]models.ContentPreference, error) {
 
 	result := make([]models.ContentPreference, 0, len(perUser))
 	for _, pref := range perUser {
-		result = append(result, pref)
+		result = append(result, copyPreference(pref))
 	}
 
 	// Sort by most recently updated
@@ -307,10 +340,26 @@ func (s *Service) saveLocked() error {
 		return fmt.Errorf("encode content preferences: %w", err)
 	}
 
-	if err := os.WriteFile(s.path, data, 0o644); err != nil {
+	file, err := os.CreateTemp(filepath.Dir(s.path), ".content_preferences-*.json")
+	if err != nil {
+		return fmt.Errorf("create content preferences temporary file: %w", err)
+	}
+	name := file.Name()
+	defer os.Remove(name)
+	if err := file.Chmod(0o644); err != nil {
+		file.Close()
+		return err
+	}
+	if _, err := file.Write(data); err != nil {
+		file.Close()
 		return fmt.Errorf("write content preferences: %w", err)
 	}
-
+	if err := file.Close(); err != nil {
+		return err
+	}
+	if err := os.Rename(name, s.path); err != nil {
+		return fmt.Errorf("replace content preferences: %w", err)
+	}
 	return nil
 }
 

@@ -406,13 +406,15 @@ type prequeueScopePlayback struct {
 }
 
 type prequeueScopeSignature struct {
-	Filtering          models.FilterSettings            `json:"filtering"`
-	AnimeFiltering     models.AnimeFilteringSettings    `json:"animeFiltering"`
-	Ranking            *models.UserRankingSettings      `json:"ranking,omitempty"`
-	ClientRanking      *[]models.ClientRankingCriterion `json:"clientRanking,omitempty"`
-	NewestReleaseFirst bool                             `json:"newestReleaseFirst,omitempty"`
-	Playback           prequeueScopePlayback            `json:"playback"`
-	ContentPreference  *models.ContentPreference        `json:"contentPreference,omitempty"`
+	Filtering                models.FilterSettings            `json:"filtering"`
+	AnimeFiltering           models.AnimeFilteringSettings    `json:"animeFiltering"`
+	Ranking                  *models.UserRankingSettings      `json:"ranking,omitempty"`
+	ClientRanking            *[]models.ClientRankingCriterion `json:"clientRanking,omitempty"`
+	NewestReleaseFirst       bool                             `json:"newestReleaseFirst,omitempty"`
+	Playback                 prequeueScopePlayback            `json:"playback"`
+	ContentPreference        *models.ContentPreference        `json:"contentPreference,omitempty"`
+	ContentLocalOverrides    []models.ContentLocalOverride    `json:"contentLocalOverrides,omitempty"`
+	ContentLocalLookupFailed bool                             `json:"contentLocalLookupFailed,omitempty"`
 }
 
 func configFilterToUserFilter(f config.FilterSettings) models.FilterSettings {
@@ -666,8 +668,20 @@ func (h *PrequeueHandler) prequeueSettingsScopeDetails(userID, clientID, titleID
 	}
 
 	if h.contentPreferencesSvc != nil && userID != "" && titleID != "" {
+		overrides, overrideErr := h.contentPreferencesSvc.LocalOverrides(userID, titleID)
+		if overrideErr != nil {
+			effective.ContentLocalLookupFailed = true
+		} else {
+			effective.ContentLocalOverrides = overrides
+		}
 		if pref, err := h.contentPreferencesSvc.Get(userID, titleID); err == nil && pref != nil {
-			effective.ContentPreference = pref
+			// Fingerprint effective choices, not write metadata. Replaying the
+			// same source setting or saving inheritance must not retire an
+			// otherwise reusable preparation merely by refreshing UpdatedAt.
+			if pref.AudioLanguage != "" || pref.SubtitleLanguage != "" || pref.SubtitleMode != "" || pref.PreferLocalFiles != nil {
+				pref.UpdatedAt = time.Time{}
+				effective.ContentPreference = pref
+			}
 		} else if err != nil {
 			log.Printf("[prequeue] Failed to include content preference in prequeue scope (non-fatal): %v", err)
 		}
@@ -1927,7 +1941,7 @@ func (h *PrequeueHandler) runPrequeueWorker(prequeueID, titleID, titleName, imdb
 	}
 	var choice prequeueResolutionChoice
 	var resolveErr error
-	triedLocalFirst := h.localPlaybackPreferred(userID) && len(localCandidates) > 0
+	triedLocalFirst := h.localPlaybackPreferredFor(userID, titleID, targetEpisode) && len(localCandidates) > 0
 	if triedLocalFirst {
 		choice, resolveErr = tryLocal()
 		// An unavailable local preference must not consume the normal search budget.

@@ -187,6 +187,7 @@ type PrequeueEntry struct {
 	Year             int                      `json:"year,omitempty"`
 	UserID           string                   `json:"userId"`
 	SettingsScopeKey string                   `json:"settingsScopeKey,omitempty"`
+	ReuseDisabled    bool                     `json:"reuseDisabled,omitempty"` // Retain active playback/report context without offering the old preparation again.
 	MediaType        string                   `json:"mediaType"`
 	TargetEpisode    *models.EpisodeReference `json:"targetEpisode,omitempty"`
 	Reason           string                   `json:"reason"`
@@ -538,9 +539,16 @@ func (s *PrequeueStore) loadFromDisk(ctx context.Context) error {
 		if now.After(e.ExpiresAt) || e.Status != PrequeueStatusReady || e.StreamPath == "" {
 			continue
 		}
+		// HTTP preference updates can retire an entry while this file snapshot
+		// is being decoded. Never restore its older reusable state over that.
+		if current, ok := s.entries[e.ID]; ok && current.ReuseDisabled {
+			e.ReuseDisabled = true
+		}
 		s.entries[e.ID] = e
 		key := titleUserKey(e.TitleID, e.UserID, e.SettingsScopeKey)
-		s.byTitleUser[key] = e.ID
+		if !e.ReuseDisabled {
+			s.byTitleUser[key] = e.ID
+		}
 		restored++
 	}
 	if restored > 0 {
@@ -597,6 +605,14 @@ func (s *PrequeueStore) loadFromDB(parent context.Context) error {
 			continue
 		}
 
+		if current, ok := s.entries[e.ID]; ok && current.ReuseDisabled {
+			e.ReuseDisabled = true
+		}
+		if e.ReuseDisabled {
+			s.entries[e.ID] = &e
+			restored++
+			continue
+		}
 		key := titleUserKey(e.TitleID, e.UserID, e.SettingsScopeKey)
 		// A request may have created a newer in-memory entry after the HTTP
 		// listener opened but before this background restore completed.
@@ -979,7 +995,11 @@ func (s *PrequeueStore) getByTitleUserScope(titleID, userID, settingsScopeKey st
 		return nil, false
 	}
 
-	return s.get(id, forPlayback)
+	entry, ok := s.get(id, forPlayback)
+	if !ok || entry.ReuseDisabled {
+		return nil, false
+	}
+	return entry, true
 }
 
 func (s *PrequeueStore) validateReadyEntry(entry readyValidationSnapshot, validator StreamPathValidator) bool {

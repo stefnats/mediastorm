@@ -204,6 +204,7 @@ func hasReusablePreparation(entry *playback.PrequeueEntry) bool {
 
 func prequeueReadyForWarmReuse(entry *playback.PrequeueEntry) bool {
 	return entry != nil &&
+		!entry.ReuseDisabled &&
 		entry.Status == playback.PrequeueStatusReady &&
 		strings.TrimSpace(entry.StreamPath) != "" &&
 		hasReusablePreparation(entry)
