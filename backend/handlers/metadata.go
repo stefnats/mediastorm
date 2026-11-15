@@ -26,6 +26,7 @@ import (
 	"novastream/services/trakt"
 
 	"golang.org/x/sync/errgroup"
+	"novastream/services/reminders"
 )
 
 type metadataService interface {
@@ -196,6 +197,7 @@ type MetadataHandler struct {
 	PostPlayHidden     postPlayHiddenItems
 	Taste              tasteOnboardingService
 	TitleRatings       titleRatingService
+	Reminders          *reminders.Service
 	SourceAvailability sourceAvailabilityService
 	Interests          interestService
 	CustomLists        recommendationLists

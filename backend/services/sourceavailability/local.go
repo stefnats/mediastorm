@@ -73,8 +73,8 @@ func (s *Service) checkedLocal(ctx context.Context, item request, selected Selec
 		value.State = "found"
 	}
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	if s.neededUntilLocked(requestID(item)).IsZero() {
+		s.mu.Unlock()
 		return false
 	}
 	if s.localRecords == nil {
@@ -89,6 +89,10 @@ func (s *Service) checkedLocal(ctx context.Context, item request, selected Selec
 			}
 		}
 		delete(s.localRecords, oldest)
+	}
+	s.mu.Unlock()
+	if value.State == "found" {
+		s.publishReminder(ctx, item)
 	}
 	return value.State == "found"
 }

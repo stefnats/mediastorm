@@ -20,6 +20,7 @@ import (
 	"novastream/config"
 	"novastream/internal/datastore"
 	"novastream/models"
+	"novastream/services/reminders"
 )
 
 // BackupType indicates how the backup was created
@@ -143,11 +144,18 @@ func (s *Service) CreateBackup(backupType BackupType) (*BackupInfo, error) {
 	}
 
 	// Select file list based on storage mode
-	filesToBackup := backupFiles
+	filesToBackup := append([]string(nil), backupFiles...)
 	if s.useDB() {
 		filesToBackup = backupFilesDB
 	}
 
+	if !s.useDB() {
+		names, err := s.reminderBackupFiles()
+		if err != nil {
+			return nil, err
+		}
+		filesToBackup = append(filesToBackup, names...)
+	}
 	// Add files to backup
 	for _, filename := range filesToBackup {
 		srcPath := s.sourcePath(filename)
@@ -483,6 +491,10 @@ func (s *Service) RestoreBackupUpload(reader io.Reader, sourceName string) error
 }
 
 func (s *Service) restoreBackupFile(backupPath, sourceName string) error {
+	if !s.useDB() {
+		unlock := reminders.LockFileRestore()
+		defer unlock()
+	}
 	// Read and validate manifest
 	manifest, err := s.readManifest(backupPath)
 	if err != nil {
@@ -579,6 +591,16 @@ func (s *Service) restoreBackupFile(backupPath, sourceName string) error {
 			return fmt.Errorf("checksum mismatch for %s", file.Name)
 		}
 
+		if isReminderBackupFile(file.Name) {
+			if err := sanitizeRestoredReminderFile(tmpPath); err != nil {
+				os.Remove(tmpPath)
+				return err
+			}
+			if err := os.Chmod(filepath.Dir(destPath), 0700); err != nil {
+				os.Remove(tmpPath)
+				return err
+			}
+		}
 		// Atomic rename
 		if err := os.Rename(tmpPath, destPath); err != nil {
 			os.Remove(tmpPath)
@@ -594,6 +616,9 @@ func (s *Service) restoreBackupFile(backupPath, sourceName string) error {
 }
 
 func isRestorableBackupFile(name string) bool {
+	if isReminderBackupFile(name) {
+		return true
+	}
 	if name == "database.json" {
 		return true
 	}
@@ -827,6 +852,7 @@ type localMediaItemExport struct {
 // Global app settings (scheduled tasks / automations / scrapers / indexers / etc.)
 // live in settings.json and are backed up as a separate archive member.
 type databaseExport struct {
+	Reminders                map[string]models.ReminderProfileState `json:"reminders,omitempty"`
 	Version                  string                                 `json:"version"`
 	ExportedAt               time.Time                              `json:"exportedAt"`
 	Accounts                 []models.AccountStorage                `json:"accounts"`
@@ -866,6 +892,7 @@ type customListExport struct {
 // databaseExportSections lists durable database sections expected in modern backups.
 // Used by tests to prevent silent coverage regressions.
 var databaseExportSections = []string{
+	"reminders",
 	"accounts",
 	"users",
 	"sessions",
@@ -1103,9 +1130,19 @@ func (s *Service) exportDatabaseBytes() ([]byte, error) {
 	}
 	export.Recordings = recordings
 
+	export.Reminders = map[string]models.ReminderProfileState{}
 	export.ContentPreferences = make(map[string][]models.ContentPreference)
 	export.CustomLists = make(map[string][]customListExport)
 	for _, u := range users {
+		reminderState, err := s.store.Reminders().Get(ctx, u.ID)
+		if err != nil {
+			return nil, fmt.Errorf("export reminders: %w", err)
+		}
+		reminderState.EventKeys = map[string]string{}
+		for _, event := range reminderState.Events {
+			reminderState.EventKeys[event.ID] = event.MilestoneKey
+		}
+		export.Reminders[u.ID] = reminderState
 		prefs, err := s.store.ContentPreferences().ListByUser(ctx, u.ID)
 		if err != nil {
 			return nil, fmt.Errorf("export content preferences for %s: %w", u.ID, err)
@@ -1140,8 +1177,14 @@ func (s *Service) importDatabaseBytes(data []byte) error {
 		return fmt.Errorf("unmarshal database export: %w", err)
 	}
 
+	if err := sanitizeRestoredReminders(&export); err != nil {
+		return err
+	}
 	ctx := context.Background()
 	err = s.store.WithTx(ctx, func(tx *datastore.Tx) error {
+		if err := tx.LockRemindersForRestore(ctx); err != nil {
+			return err
+		}
 		// Clear durable data that does not cascade from users/accounts first.
 		if err := clearNonCascadedBackupTables(ctx, tx); err != nil {
 			return err
@@ -1181,6 +1224,11 @@ func (s *Service) importDatabaseBytes(data []byte) error {
 			u := models.User(export.Users[i])
 			if err := tx.Users().Create(ctx, &u); err != nil {
 				return fmt.Errorf("restore user %s: %w", u.ID, err)
+			}
+		}
+		for profile, state := range export.Reminders {
+			if err := tx.RestoreReminders(ctx, profile, state); err != nil {
+				return fmt.Errorf("restore reminders: %w", err)
 			}
 		}
 		for i := range export.NumbersStationProgress {

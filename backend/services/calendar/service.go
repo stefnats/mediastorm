@@ -111,22 +111,23 @@ type Status struct {
 
 // Service manages pre-populated calendar data for all users.
 type Service struct {
-	mu              sync.RWMutex
-	cache           map[string]*userCalendar
-	building        map[string]chan struct{}
-	liteCache       map[string]*userCalendar
-	liteBuilding    map[string]chan struct{}
-	stale           map[string]*userCalendar // pre-invalidation calendar, Home fallback while rebuilding
-	store           Store                    // optional persistence of built calendars
-	metadata        MetadataService
-	watchlist       WatchlistService
-	history         HistoryService
-	userSettings    UserSettingsService
-	users           UsersService
-	stopCh          chan struct{}
-	maxDays         int // how far ahead to look (default 90)
-	refreshInterval time.Duration
-	releaseObserver ReleaseObserver
+	mu               sync.RWMutex
+	cache            map[string]*userCalendar
+	building         map[string]chan struct{}
+	liteCache        map[string]*userCalendar
+	liteBuilding     map[string]chan struct{}
+	stale            map[string]*userCalendar // pre-invalidation calendar, Home fallback while rebuilding
+	store            Store                    // optional persistence of built calendars
+	metadata         MetadataService
+	watchlist        WatchlistService
+	history          HistoryService
+	userSettings     UserSettingsService
+	users            UsersService
+	stopCh           chan struct{}
+	maxDays          int // how far ahead to look (default 90)
+	refreshInterval  time.Duration
+	releaseObserver  ReleaseObserver
+	reminderObserver func(string, []models.CalendarItem)
 
 	// Status tracking
 	statusMu      sync.RWMutex
@@ -177,6 +178,22 @@ func (s *Service) SetReleaseObserver(observer ReleaseObserver) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.releaseObserver = observer
+}
+
+// SetReminderObserver consumes only successful normal calendar builds. It does
+// not add watchlist/trending requirements or change metadata demand.
+func (s *Service) SetReminderObserver(observer func(string, []models.CalendarItem)) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.reminderObserver = observer
+}
+func (s *Service) observeReminderSnapshot(userID string, items []models.CalendarItem) {
+	s.mu.RLock()
+	observer := s.reminderObserver
+	s.mu.RUnlock()
+	if observer != nil {
+		observer(userID, append([]models.CalendarItem(nil), items...))
+	}
 }
 
 // StartBackgroundRefresh begins async population on startup and periodic refresh.
@@ -605,6 +622,7 @@ func (s *Service) buildAndCacheUserCalendarWith(userID string, force bool, md Me
 		snapshot := append([]models.CalendarItem(nil), items...)
 		go s.observeReleases(userID, snapshot, observer)
 	}
+	go s.observeReminderSnapshot(userID, items)
 	log.Printf("[calendar] build complete user=%s items=%d elapsed=%s", userID, len(items), time.Since(start).Round(time.Millisecond))
 
 	return uc
@@ -709,6 +727,7 @@ func (s *Service) buildAndCacheLiteUserCalendar(userID string, force bool, md Me
 	if completeCh != nil {
 		close(completeCh)
 	}
+	go s.observeReminderSnapshot(userID, items)
 	log.Printf("[calendar-lite] build complete user=%s items=%d elapsed=%s", userID, len(items), time.Since(start).Round(time.Millisecond))
 
 	return uc

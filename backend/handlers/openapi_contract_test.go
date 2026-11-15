@@ -1087,6 +1087,8 @@ func TestOpenAPIContract(t *testing.T) {
 			body: map[string]string{"sourceId": "xtream"}}, h.CheckProviderCapacity, 403)
 	})
 
+	t.Run("title_reminders", func(t *testing.T) { reminderOpenAPIContract(t, v) })
+
 	t.Run("coverage", func(t *testing.T) {
 		covered := v.Covered()
 		var missing []string
