@@ -1942,6 +1942,17 @@ paths:
                     type: array
                     items:
                       type: integer
+        '403':
+          description: Profile access denied or takeover authority changed while waiting.
+          content:
+            application/json:
+              schema:
+                oneOf:
+                  - $ref: '#/components/schemas/Error'
+                  - $ref: '#/components/schemas/LiveCapacityError'
+            text/plain:
+              schema:
+                type: string
         '409':
           description: Recording confirmation required, expired confirmation, or incomplete handoff.
           content:
@@ -1961,7 +1972,14 @@ paths:
               schema:
                 $ref: '#/components/schemas/LiveCapacityError'
         default:
-          $ref: '#/components/responses/Error'
+          description: Invalid or unavailable live source, or failed authentication.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+            text/plain:
+              schema:
+                type: string
 
   /account/api/profiles/live-permissions:
     put:

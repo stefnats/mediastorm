@@ -1012,6 +1012,22 @@ func TestOpenAPIContract(t *testing.T) {
 		if stops != 1 {
 			t.Fatal("explicit retry did not stop exactly the selected recording")
 		}
+		for _, refusal := range []struct {
+			err    error
+			status int
+		}{
+			{livecapacity.ErrPermission, 403},
+			{livecapacity.ErrConfirmationExpired, 409},
+			{context.DeadlineExceeded, 409},
+			{livecapacity.ErrTakenOver, 410},
+			{livecapacity.ErrLimit, 429},
+		} {
+			exercise(t, v, call, func(w http.ResponseWriter, _ *http.Request) {
+				if !writeLiveAdmissionError(w, liveStreamTarget{}, refusal.err) {
+					t.Fatal("unhandled admission refusal")
+				}
+			}, refusal.status)
+		}
 	})
 
 	t.Run("coverage", func(t *testing.T) {
