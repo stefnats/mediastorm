@@ -3138,6 +3138,39 @@ components:
         `unreleased`.
       enum: [released, theatrical, coming_soon, unreleased]
 
+    LocalMediaCertificationProjection:
+      type: object
+      additionalProperties: true
+      description: Existing local media group projection. Other library fields are unchanged; the additive provider evidence is explicitly described here.
+      required: [id, title]
+      properties:
+        id: {type: string}
+        title: {type: string}
+        certification: {type: string}
+        certificationEvidence:
+          type: array
+          maxItems: 256
+          items: {$ref: '#/components/schemas/CertificationEvidence'}
+    CertificationEvidence:
+      type: object
+      additionalProperties: false
+      required: [country, value, source, sourceType, sourceTitleId, scope, retrievedAt]
+      properties:
+        country: {type: string, pattern: '^[A-Z]{2}$'}
+        value: {type: string, minLength: 1, maxLength: 64}
+        source: {type: string, enum: [tmdb]}
+        sourceType: {type: string, enum: [metadata]}
+        sourceTitleId: {type: string, pattern: '^tmdb:(movie|series):[1-9][0-9]*$'}
+        scope: {type: string, enum: [movie_release, series]}
+        retrievedAt: {type: string, format: date-time}
+        expiresAt:
+          type: string
+          format: date-time
+          description: Conservative source cache expiry when available. Missing expiry must remain unknown to any future authorizer. Copying cached evidence does not renew it.
+        releaseType: {type: integer, minimum: 1, maximum: 6}
+        releaseDate: {type: string, maxLength: 40}
+        language: {type: string, maxLength: 16}
+        note: {type: string, maxLength: 512}
     SourceAvailability:
       type: object
       required: [state, complete]
@@ -3267,6 +3300,13 @@ components:
           type: boolean
         certification:
           type: string
+          description: Legacy display/filtering value. This unqualified string is not regional certification evidence.
+        certificationEvidence:
+          type: array
+          maxItems: 256
+          description: Raw regional provider metadata only; no official registry verification or playback authorization. Movie release rows do not identify the played edition; series metadata establishes no episode classification. Old caches may omit this field.
+          items:
+            $ref: '#/components/schemas/CertificationEvidence'
         primaryTrailer:
           $ref: '#/components/schemas/Trailer'
         trailers:

@@ -58,10 +58,12 @@ func localHintEpisode(request sourceavailability.LocalRequest) *models.EpisodeRe
 }
 func localHintFingerprint(item models.LocalMediaItem) string {
 	cert := ""
+	var evidence []models.CertificationEvidence
 	if item.Metadata != nil {
 		cert = item.Metadata.Certification
+		evidence = item.Metadata.CertificationEvidence
 	}
-	data, _ := json.Marshal([]any{item.ID, item.LibraryID, item.LibraryType, item.FilePath, item.FileName, item.MatchedTitleID, item.MatchStatus, item.SeasonNumber, item.EpisodeNumber, item.IsMissing, item.SizeBytes, item.ExternalIDs, cert})
+	data, _ := json.Marshal([]any{item.ID, item.LibraryID, item.LibraryType, item.FilePath, item.FileName, item.MatchedTitleID, item.MatchStatus, item.SeasonNumber, item.EpisodeNumber, item.IsMissing, item.SizeBytes, item.ExternalIDs, cert, evidence})
 	sum := sha256.Sum256(data)
 	return hex.EncodeToString(sum[:])
 }

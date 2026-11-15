@@ -1135,13 +1135,13 @@ func (s *Service) exportDatabaseBytes() ([]byte, error) {
 
 // importDatabaseBytes parses JSON data and restores all tables in a transaction.
 func (s *Service) importDatabaseBytes(data []byte) error {
-	var export databaseExport
-	if err := json.Unmarshal(data, &export); err != nil {
+	export, err := decodeDatabaseExport(data)
+	if err != nil {
 		return fmt.Errorf("unmarshal database export: %w", err)
 	}
 
 	ctx := context.Background()
-	err := s.store.WithTx(ctx, func(tx *datastore.Tx) error {
+	err = s.store.WithTx(ctx, func(tx *datastore.Tx) error {
 		// Clear durable data that does not cascade from users/accounts first.
 		if err := clearNonCascadedBackupTables(ctx, tx); err != nil {
 			return err

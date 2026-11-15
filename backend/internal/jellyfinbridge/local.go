@@ -131,7 +131,7 @@ func (s *Server) localMovieItem(u *userState, libraryID string, g models.LocalMe
 	file := g.Items[0]
 	t := titleInfo{
 		MediaType: "movie", ID: firstNonEmpty(file.MatchedTitleID, "localmedia:"+file.ID), Name: firstNonEmpty(g.Title, file.DetectedTitle, file.FileName),
-		Overview: g.Overview, Year: g.Year, ExternalIDs: groupExternalIDs(g), Certification: g.Certification,
+		Overview: g.Overview, Year: g.Year, ExternalIDs: groupExternalIDs(g), Certification: g.Certification, CertificationEvidence: models.CopyCertificationEvidence(g.CertificationEvidence),
 		Poster: groupImage(g.Poster, g.TextPoster), Backdrop: groupImage(g.Backdrop, g.TextBackdrop),
 	}
 	if g.LatestCreatedAt != nil {
@@ -164,7 +164,7 @@ func fileExt(name string) string {
 func (s *Server) localSeriesInfo(g models.LocalMediaItemGroup) titleInfo {
 	t := titleInfo{
 		MediaType: "series", ID: "localseries:" + g.ID, Name: g.Title, Overview: g.Overview, Year: g.Year,
-		ExternalIDs: groupExternalIDs(g), Certification: g.Certification,
+		ExternalIDs: groupExternalIDs(g), Certification: g.Certification, CertificationEvidence: models.CopyCertificationEvidence(g.CertificationEvidence),
 		Poster: groupImage(g.Poster, g.TextPoster), Backdrop: groupImage(g.Backdrop, g.TextBackdrop),
 	}
 	if g.LatestCreatedAt != nil {

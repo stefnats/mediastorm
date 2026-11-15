@@ -49,6 +49,7 @@ func (s *Service) rememberDelivered(profile, client string, title models.Title) 
 		return
 	}
 	projection := models.Title{ID: title.ID, Name: title.Name, OriginalName: title.OriginalName, MediaType: titleCoordinate(title).MediaType, Year: title.Year, Language: title.Language, IMDBID: title.IMDBID, TVDBID: title.TVDBID, TMDBID: title.TMDBID, Certification: title.Certification, IsDaily: title.IsDaily}
+	projection.CertificationEvidence = models.CopyCertificationEvidence(title.CertificationEvidence)
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.delivered == nil {
@@ -80,7 +81,9 @@ func (s *Service) ResolveDeliveredTitles(profile, client string, coordinates []T
 				delete(s.delivered, id)
 				continue
 			}
-			result = append(result, entry.Title)
+			title := entry.Title
+			title.CertificationEvidence = models.CopyCertificationEvidence(title.CertificationEvidence)
+			result = append(result, title)
 		}
 	}
 	return result

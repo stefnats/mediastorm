@@ -179,31 +179,32 @@ type LocalMediaEpisodeGroup struct {
 }
 
 type LocalMediaItemGroup struct {
-	ID               string                  `json:"id"`
-	GroupType        string                  `json:"groupType"`
-	LibraryType      LocalMediaLibraryType   `json:"libraryType"`
-	Title            string                  `json:"title"`
-	Overview         string                  `json:"overview,omitempty"`
-	Certification    string                  `json:"certification,omitempty"` // MPAA/TV content rating from matched metadata
-	Year             int                     `json:"year,omitempty"`
-	TMDBID           int64                   `json:"tmdbId,omitempty"`
-	TVDBID           int64                   `json:"tvdbId,omitempty"`
-	IMDBID           string                  `json:"imdbId,omitempty"`
-	Poster           *Image                  `json:"poster,omitempty"`
-	TextPoster       *Image                  `json:"textPoster,omitempty"`
-	Backdrop         *Image                  `json:"backdrop,omitempty"`
-	TextBackdrop     *Image                  `json:"textBackdrop,omitempty"`
-	ItemCount        int                     `json:"itemCount"`
-	MissingCount     int                     `json:"missingCount"`
-	MatchStatus      LocalMediaMatchStatus   `json:"matchStatus"`
-	ConfidenceMin    float64                 `json:"confidenceMin"`
-	ConfidenceMax    float64                 `json:"confidenceMax"`
-	TotalSizeBytes   int64                   `json:"totalSizeBytes"`
-	LatestModifiedAt *time.Time              `json:"latestModifiedAt,omitempty"`
-	LatestUpdatedAt  *time.Time              `json:"latestUpdatedAt,omitempty"`
-	LatestCreatedAt  *time.Time              `json:"latestCreatedAt,omitempty"`
-	Items            []LocalMediaItem        `json:"items,omitempty"`
-	Seasons          []LocalMediaSeasonGroup `json:"seasons,omitempty"`
+	ID                    string                  `json:"id"`
+	GroupType             string                  `json:"groupType"`
+	LibraryType           LocalMediaLibraryType   `json:"libraryType"`
+	Title                 string                  `json:"title"`
+	Overview              string                  `json:"overview,omitempty"`
+	Certification         string                  `json:"certification,omitempty"` // MPAA/TV content rating from matched metadata
+	CertificationEvidence []CertificationEvidence `json:"certificationEvidence,omitempty"`
+	Year                  int                     `json:"year,omitempty"`
+	TMDBID                int64                   `json:"tmdbId,omitempty"`
+	TVDBID                int64                   `json:"tvdbId,omitempty"`
+	IMDBID                string                  `json:"imdbId,omitempty"`
+	Poster                *Image                  `json:"poster,omitempty"`
+	TextPoster            *Image                  `json:"textPoster,omitempty"`
+	Backdrop              *Image                  `json:"backdrop,omitempty"`
+	TextBackdrop          *Image                  `json:"textBackdrop,omitempty"`
+	ItemCount             int                     `json:"itemCount"`
+	MissingCount          int                     `json:"missingCount"`
+	MatchStatus           LocalMediaMatchStatus   `json:"matchStatus"`
+	ConfidenceMin         float64                 `json:"confidenceMin"`
+	ConfidenceMax         float64                 `json:"confidenceMax"`
+	TotalSizeBytes        int64                   `json:"totalSizeBytes"`
+	LatestModifiedAt      *time.Time              `json:"latestModifiedAt,omitempty"`
+	LatestUpdatedAt       *time.Time              `json:"latestUpdatedAt,omitempty"`
+	LatestCreatedAt       *time.Time              `json:"latestCreatedAt,omitempty"`
+	Items                 []LocalMediaItem        `json:"items,omitempty"`
+	Seasons               []LocalMediaSeasonGroup `json:"seasons,omitempty"`
 }
 
 type LocalMediaGroupListResult struct {

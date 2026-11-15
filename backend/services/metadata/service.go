@@ -4326,6 +4326,7 @@ func (s *Service) tmdbSeriesDetailsFallback(ctx context.Context, req models.Seri
 	cacheID := cacheKey("tmdb", "series", "details-fallback", "v4", s.client.language, strconv.FormatInt(req.TMDBID, 10))
 	var cached models.SeriesDetails
 	if ok, _ := s.cache.get(cacheID, &cached); ok && strings.TrimSpace(cached.Title.Name) != "" {
+		s.hydrateCachedCertificationEvidence(&cached.Title)
 		normalizeSeriesDetailsReleaseStatus(&cached)
 		cacheUpdated, _ := applyDateBasedSeriesClassification(&cached.Title)
 		for index := range cached.Seasons {
@@ -4416,6 +4417,7 @@ func (s *Service) tmdbSeriesDetailsFallback(ctx context.Context, req models.Seri
 	if contentRatingLoaded && details.Title.Certification == "" {
 		details.Title.Certification = contentRatingTitle.Certification
 	}
+	details.Title.CertificationEvidence = models.MergeCertificationEvidence(contentRatingTitle.CertificationEvidence, details.Title.CertificationEvidence)
 	if details.Seasons == nil {
 		details.Seasons = []models.SeriesSeason{}
 	}
@@ -4534,6 +4536,7 @@ func (s *Service) SeriesDetails(ctx context.Context, req models.SeriesDetailsQue
 			enrichGenres       []string
 			enrichCertOK       bool
 			enrichCert         string
+			enrichCertEvidence []models.CertificationEvidence
 			seasonTranslations map[int64]struct {
 				name     string
 				overview string
@@ -4583,6 +4586,7 @@ func (s *Service) SeriesDetails(ctx context.Context, req models.SeriesDetailsQue
 					enrichCertOK = true
 					enrichCert = titleCopy.Certification
 				}
+				enrichCertEvidence = models.CopyCertificationEvidence(titleCopy.CertificationEvidence)
 			}()
 		}
 
@@ -4641,6 +4645,11 @@ func (s *Service) SeriesDetails(ctx context.Context, req models.SeriesDetailsQue
 
 		// Apply results and do a single cache write
 		cacheUpdated := false
+		s.hydrateCachedCertificationEvidence(&cached.Title)
+		if len(enrichCertEvidence) > 0 {
+			cached.Title.CertificationEvidence = models.MergeCertificationEvidence(enrichCertEvidence, cached.Title.CertificationEvidence)
+			cacheUpdated = true
+		}
 		if enrichCredits != nil {
 			cached.Title.Credits = enrichCredits
 			log.Printf("[metadata] credits added to cached series: %d cast members", len(enrichCredits.Cast))
@@ -4658,6 +4667,7 @@ func (s *Service) SeriesDetails(ctx context.Context, req models.SeriesDetailsQue
 		}
 		if enrichCertOK {
 			cached.Title.Certification = enrichCert
+			cached.Title.CertificationEvidence = models.MergeCertificationEvidence(enrichCertEvidence, cached.Title.CertificationEvidence)
 			log.Printf("[metadata] content rating added to cached series tmdbId=%d rating=%s", cachedTMDBID, enrichCert)
 			cacheUpdated = true
 		}
@@ -5170,7 +5180,7 @@ func (s *Service) SeriesDetails(ctx context.Context, req models.SeriesDetailsQue
 		seriesImagesErr                     error
 		seriesGenres                        []string
 		seriesGenresErr                     error
-		contentRatingTitle                  = models.Title{Certification: seriesTitle.Certification}
+		contentRatingTitle                  = models.Title{Certification: seriesTitle.Certification, CertificationEvidence: models.CopyCertificationEvidence(seriesTitle.CertificationEvidence)}
 		contentRatingChanged                bool
 		episodesMs, ratingsMs, creditsMs    int64
 		imagesMs, genresMs, contentRatingMs int64
@@ -5299,8 +5309,11 @@ func (s *Service) SeriesDetails(ctx context.Context, req models.SeriesDetailsQue
 	}
 
 	// TV content rating from TMDB
+	seriesTitle.CertificationEvidence = models.MergeCertificationEvidence(contentRatingTitle.CertificationEvidence, seriesTitle.CertificationEvidence)
+	details.Title.CertificationEvidence = models.CopyCertificationEvidence(seriesTitle.CertificationEvidence)
 	if tmdbEnrichment && contentRatingChanged {
 		seriesTitle.Certification = contentRatingTitle.Certification
+		seriesTitle.CertificationEvidence = models.MergeCertificationEvidence(contentRatingTitle.CertificationEvidence, seriesTitle.CertificationEvidence)
 		log.Printf("[metadata] fetched content rating for series tmdbId=%d rating=%s", tmdbIDForEnrichment, seriesTitle.Certification)
 		details.Title = seriesTitle
 	}
@@ -6157,6 +6170,9 @@ func extractTitleFields(full *models.Title, fields []string) models.Title {
 			out.AirsTimezone = full.AirsTimezone
 		case "certification":
 			out.Certification = full.Certification
+			out.CertificationEvidence = models.CopyCertificationEvidence(full.CertificationEvidence)
+		case "certificationevidence", "certification_evidence":
+			out.CertificationEvidence = models.CopyCertificationEvidence(full.CertificationEvidence)
 		case "language":
 			out.Language = full.Language
 		case "popularity":
@@ -7962,8 +7978,9 @@ func (s *Service) maybeHydrateOverviewFromTMDB(ctx context.Context, title *model
 
 // cachedReleasesWithCert is the cached structure for movie releases including certification
 type cachedReleasesWithCert struct {
-	Releases      []models.Release `json:"releases"`
-	Certification string           `json:"certification"`
+	Releases              []models.Release               `json:"releases"`
+	Certification         string                         `json:"certification"`
+	CertificationEvidence []models.CertificationEvidence `json:"certificationEvidence,omitempty"`
 }
 
 func (s *Service) enrichMovieReleases(ctx context.Context, title *models.Title, tmdbID int64) bool {
@@ -7975,6 +7992,7 @@ func (s *Service) enrichMovieReleases(ctx context.Context, title *models.Title, 
 	cacheID := cacheKey("tmdb", "movie", "releases", "v2", strconv.FormatInt(tmdbID, 10))
 	var cached cachedReleasesWithCert
 	if ok, _ := s.cache.get(cacheID, &cached); ok {
+		title.CertificationEvidence = models.MergeCertificationEvidence(cached.CertificationEvidence, title.CertificationEvidence)
 		// Negative cache hit: TMDB had no release data for this movie; don't retry.
 		if len(cached.Releases) == 0 {
 			if strings.EqualFold(title.MediaType, "movie") && strings.TrimSpace(title.Status) == "" {
@@ -7984,17 +8002,21 @@ func (s *Service) enrichMovieReleases(ctx context.Context, title *models.Title, 
 		}
 		title.Releases = append([]models.Release(nil), cached.Releases...)
 		title.Certification = cached.Certification
+		title.CertificationEvidence = models.MergeCertificationEvidence(cached.CertificationEvidence, title.CertificationEvidence)
 		s.ensureMovieReleasePointers(title)
 		return true
 	}
 
 	result, err := s.fetchMovieReleasesWithCert(ctx, tmdbID)
+	if err == nil && result != nil {
+		title.CertificationEvidence = models.MergeCertificationEvidence(result.CertificationEvidence, title.CertificationEvidence)
+	}
 	if err != nil || len(result.Releases) == 0 {
 		if err != nil {
 			log.Printf("[metadata] WARN: tmdb release dates fetch failed tmdbId=%d err=%v", tmdbID, err)
 		} else {
 			// No release data on TMDB; negatively cache so we don't retry on every enrichment cycle.
-			_ = s.cache.set(cacheID, cachedReleasesWithCert{})
+			_ = s.cache.set(cacheID, cachedReleasesWithCert{CertificationEvidence: models.CopyCertificationEvidence(title.CertificationEvidence)})
 		}
 		if strings.EqualFold(title.MediaType, "movie") && strings.TrimSpace(title.Status) == "" {
 			title.Status = models.MovieReleaseStatusUnknown
@@ -8004,10 +8026,12 @@ func (s *Service) enrichMovieReleases(ctx context.Context, title *models.Title, 
 
 	title.Releases = append([]models.Release(nil), result.Releases...)
 	title.Certification = result.Certification
+	title.CertificationEvidence = models.MergeCertificationEvidence(result.CertificationEvidence, title.CertificationEvidence)
 	s.ensureMovieReleasePointers(title)
 	_ = s.cache.set(cacheID, cachedReleasesWithCert{
-		Releases:      title.Releases,
-		Certification: title.Certification,
+		Releases:              title.Releases,
+		Certification:         title.Certification,
+		CertificationEvidence: models.CopyCertificationEvidence(title.CertificationEvidence),
 	})
 
 	return true
@@ -8023,7 +8047,7 @@ func (s *Service) fetchMovieReleasesWithCert(ctx context.Context, tmdbID int64) 
 		if _, err := s.tmdb.movieDetails(ctx, tmdbID); err == nil {
 			var cached cachedReleasesWithCert
 			if ok, _ := s.tmdb.cache.get(cacheID, &cached); ok {
-				return &movieReleaseDatesResult{Releases: cached.Releases, Certification: cached.Certification}, nil
+				return &movieReleaseDatesResult{Releases: cached.Releases, Certification: cached.Certification, CertificationEvidence: models.CopyCertificationEvidence(cached.CertificationEvidence)}, nil
 			}
 		} else if ctx.Err() != nil || isTMDBNotFound(err) {
 			return nil, err
@@ -8038,6 +8062,7 @@ func (s *Service) enrichTVContentRating(ctx context.Context, title *models.Title
 		return false
 	}
 	if title.Certification != "" {
+		s.hydrateCachedTVCertificationEvidence(title, tmdbID)
 		return false // Already has a rating
 	}
 
@@ -8045,6 +8070,7 @@ func (s *Service) enrichTVContentRating(ctx context.Context, title *models.Title
 	var cached string
 	if ok, _ := s.cache.get(cacheID, &cached); ok {
 		title.Certification = cached
+		s.hydrateCachedTVCertificationEvidence(title, tmdbID)
 		return cached != ""
 	}
 
@@ -8052,6 +8078,9 @@ func (s *Service) enrichTVContentRating(ctx context.Context, title *models.Title
 	var rating string
 	if details, err := s.tmdb.seriesDetails(ctx, tmdbID); err == nil && details != nil {
 		rating = details.Certification
+		if allowsSeriesCertificationEvidence(title) {
+			title.CertificationEvidence = models.MergeCertificationEvidence(details.CertificationEvidence, title.CertificationEvidence)
+		}
 	} else {
 		log.Printf("[metadata] WARN: tmdb tv content rating fetch failed tmdbId=%d err=%v", tmdbID, err)
 		return false
@@ -8066,6 +8095,7 @@ func (s *Service) enrichTVContentRating(ctx context.Context, title *models.Title
 // enrichTitleCertification populates a single title's certification (content
 // rating) when it is missing, resolving the TMDB ID from an IMDB ID if needed.
 func (s *Service) enrichTitleCertification(ctx context.Context, title *models.Title) {
+	s.hydrateCachedCertificationEvidence(title)
 	if title == nil || title.Certification != "" {
 		return
 	}
@@ -8102,6 +8132,7 @@ func (s *Service) EnrichSearchCertifications(ctx context.Context, results []mode
 	var wg sync.WaitGroup
 
 	for i := range results {
+		s.hydrateCachedCertificationEvidence(&results[i].Title)
 		if results[i].Title.Certification != "" {
 			continue // Already has a rating
 		}
@@ -8130,6 +8161,7 @@ func (s *Service) EnrichTrendingCertifications(ctx context.Context, items []mode
 	var wg sync.WaitGroup
 
 	for i := range items {
+		s.hydrateCachedCertificationEvidence(&items[i].Title)
 		if items[i].Title.Certification != "" {
 			continue
 		}
@@ -8156,6 +8188,7 @@ func (s *Service) EnrichTitleCertifications(ctx context.Context, titles []models
 	var wg sync.WaitGroup
 
 	for i := range titles {
+		s.hydrateCachedCertificationEvidence(&titles[i])
 		if titles[i].Certification != "" {
 			continue
 		}
@@ -10416,9 +10449,11 @@ func (s *Service) enrichCustomListItem(ctx context.Context, item mdblistItem, li
 			customWg.Wait()
 
 			// Merge results back into title
+			title.CertificationEvidence = models.MergeCertificationEvidence(relTitle.CertificationEvidence, title.CertificationEvidence)
 			if relOK {
 				title.Releases = relTitle.Releases
 				title.Certification = relTitle.Certification
+				title.CertificationEvidence = models.MergeCertificationEvidence(relTitle.CertificationEvidence, title.CertificationEvidence)
 				title.Status = relTitle.Status
 				title.Releases = relTitle.Releases
 				title.HomeRelease = relTitle.HomeRelease
