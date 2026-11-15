@@ -409,6 +409,7 @@ func (s *Server) enrichCertifications(ctx context.Context, titles []titleInfo) {
 	s.deps.Metadata.EnrichTitleCertifications(ctx, lookup)
 	for j, i := range missing {
 		titles[i].Certification = lookup[j].Certification
+		titles[i].CertificationEvidence = models.CopyCertificationEvidence(lookup[j].CertificationEvidence)
 	}
 }
 

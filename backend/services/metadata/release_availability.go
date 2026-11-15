@@ -62,6 +62,7 @@ func (s *Service) hydrateCachedMovieReleaseWindows(titles []*models.Title) {
 		if title == nil || !strings.EqualFold(strings.TrimSpace(title.MediaType), "movie") || title.TMDBID <= 0 {
 			continue
 		}
+		s.hydrateCachedCertificationEvidence(title)
 		if len(title.Releases) > 0 || title.Theatrical != nil || title.HomeRelease != nil {
 			continue
 		}
@@ -79,6 +80,7 @@ func (s *Service) hydrateCachedMovieReleaseWindows(titles []*models.Title) {
 		if title.Certification == "" {
 			title.Certification = cached.Certification
 		}
+		title.CertificationEvidence = models.MergeCertificationEvidence(cached.CertificationEvidence, title.CertificationEvidence)
 		s.ensureMovieReleasePointers(title)
 	}
 	s.warmMovieReleasesAsync(misses)

@@ -293,6 +293,7 @@ type tmdbVideo struct {
 }
 
 type tmdbReleaseDatesResponse struct {
+	ID      int64                `json:"id"`
 	Results []tmdbReleaseCountry `json:"results"`
 }
 
@@ -1397,8 +1398,7 @@ func (c *tmdbClient) seriesDetails(ctx context.Context, tmdbID int64) (*models.T
 			return nil, e.err
 		}
 		// Callers adjust the returned title; hand each waiter its own copy.
-		copied := *e.result
-		return &copied, e.err
+		return copyTitleCertificationEvidence(e.result), e.err
 	}
 	result, err := c.seriesDetailsFetch(ctx, tmdbID)
 	if err == nil && result != nil && cacheID != "" {
@@ -1408,7 +1408,7 @@ func (c *tmdbClient) seriesDetails(ctx context.Context, tmdbID int64) (*models.T
 	entry.err = err
 	close(entry.done)
 	c.seriesCache.Delete(tmdbID)
-	return result, err
+	return copyTitleCertificationEvidence(result), err
 }
 
 func (c *tmdbClient) seriesDetailsFetch(ctx context.Context, tmdbID int64) (*models.Title, error) {
@@ -1422,24 +1422,19 @@ func (c *tmdbClient) seriesDetailsFetch(ctx context.Context, tmdbID int64) (*mod
 	}
 
 	var payload struct {
-		ContentRatings struct {
-			Results []struct {
-				Country string `json:"iso_3166_1"`
-				Rating  string `json:"rating"`
-			} `json:"results"`
-		} `json:"content_ratings"`
-		ID               int64    `json:"id"`
-		Name             string   `json:"name"`
-		OriginalName     string   `json:"original_name"`
-		Overview         string   `json:"overview"`
-		OriginalLanguage string   `json:"original_language"`
-		FirstAirDate     string   `json:"first_air_date"`
-		PosterPath       string   `json:"poster_path"`
-		BackdropPath     string   `json:"backdrop_path"`
-		Status           string   `json:"status"`
-		Popularity       float64  `json:"popularity"`
-		VoteAverage      float64  `json:"vote_average"`
-		OriginCountry    []string `json:"origin_country"`
+		ContentRatings   tmdbContentRatingsResponse `json:"content_ratings"`
+		ID               int64                      `json:"id"`
+		Name             string                     `json:"name"`
+		OriginalName     string                     `json:"original_name"`
+		Overview         string                     `json:"overview"`
+		OriginalLanguage string                     `json:"original_language"`
+		FirstAirDate     string                     `json:"first_air_date"`
+		PosterPath       string                     `json:"poster_path"`
+		BackdropPath     string                     `json:"backdrop_path"`
+		Status           string                     `json:"status"`
+		Popularity       float64                    `json:"popularity"`
+		VoteAverage      float64                    `json:"vote_average"`
+		OriginCountry    []string                   `json:"origin_country"`
 		Genres           []struct {
 			ID   int    `json:"id"`
 			Name string `json:"name"`
@@ -1479,6 +1474,11 @@ func (c *tmdbClient) seriesDetailsFetch(ctx context.Context, tmdbID int64) (*mod
 			title.Certification = strings.TrimSpace(rating.Rating)
 			break
 		}
+	}
+	retrievedAt := time.Now().UTC()
+	title.CertificationEvidence = parseTMDBSeriesCertificationEvidence(payload.ContentRatings, payload.ID, retrievedAt, c.certificationExpiry(retrievedAt))
+	if c.cache != nil && payload.ID > 0 {
+		_ = c.cache.set(tvCertificationEvidenceCacheKey(payload.ID), title.CertificationEvidence)
 	}
 	if title.Name == "" {
 		title.Name = title.OriginalName
@@ -2268,7 +2268,7 @@ func (c *tmdbClient) movieDetails(ctx context.Context, tmdbID int64) (*models.Ti
 			return nil, ctx.Err()
 		case <-e.done:
 		}
-		return e.result, e.err
+		return copyTitleCertificationEvidence(e.result), e.err
 	}
 	// We won the race — fetch and populate
 	result, err := c.movieDetailsFetch(ctx, tmdbID)
@@ -2279,7 +2279,7 @@ func (c *tmdbClient) movieDetails(ctx context.Context, tmdbID int64) (*models.Ti
 	entry.err = err
 	close(entry.done)
 	c.movieCache.Delete(tmdbID)
-	return result, err
+	return copyTitleCertificationEvidence(result), err
 }
 
 func (c *tmdbClient) movieDetailsFetch(ctx context.Context, tmdbID int64) (*models.Title, error) {
@@ -2341,19 +2341,25 @@ func (c *tmdbClient) movieDetailsFetch(ctx context.Context, tmdbID int64) (*mode
 		return nil, err
 	}
 
-	if movie.ReleaseDates != nil && c.cache != nil {
+	var certificationEvidence []models.CertificationEvidence
+	if movie.ReleaseDates != nil {
 		release := parseTMDBMovieReleases(*movie.ReleaseDates)
-		_ = c.cache.set(cacheKey("tmdb", "movie", "releases", "v2", strconv.FormatInt(tmdbID, 10)), cachedReleasesWithCert{Releases: release.Releases, Certification: release.Certification})
+		retrievedAt := time.Now().UTC()
+		certificationEvidence = parseTMDBMovieCertificationEvidence(*movie.ReleaseDates, movie.ID, retrievedAt, c.certificationExpiry(retrievedAt))
+		if c.cache != nil {
+			_ = c.cache.set(cacheKey("tmdb", "movie", "releases", "v2", strconv.FormatInt(tmdbID, 10)), cachedReleasesWithCert{Releases: release.Releases, Certification: release.Certification, CertificationEvidence: certificationEvidence})
+		}
 	}
 
 	title := &models.Title{
-		ID:             fmt.Sprintf("tmdb:movie:%d", movie.ID),
-		Name:           movie.Title,
-		Overview:       movie.Overview,
-		MediaType:      "movie",
-		TMDBID:         movie.ID,
-		IMDBID:         movie.IMDBId,
-		RuntimeMinutes: movie.Runtime,
+		ID:                    fmt.Sprintf("tmdb:movie:%d", movie.ID),
+		Name:                  movie.Title,
+		Overview:              movie.Overview,
+		MediaType:             "movie",
+		TMDBID:                movie.ID,
+		IMDBID:                movie.IMDBId,
+		RuntimeMinutes:        movie.Runtime,
+		CertificationEvidence: certificationEvidence,
 	}
 	if originalTitle := strings.TrimSpace(movie.OriginalTitle); originalTitle != "" && !strings.EqualFold(originalTitle, movie.Title) {
 		title.OriginalName = originalTitle
@@ -2662,8 +2668,9 @@ func (c *tmdbClient) fetchTVShowTotalEpisodes(ctx context.Context, tmdbID int64)
 
 // movieReleaseDatesResult contains releases and the US certification
 type movieReleaseDatesResult struct {
-	Releases      []models.Release
-	Certification string // US MPAA rating (G, PG, PG-13, R, NC-17)
+	Releases              []models.Release
+	Certification         string // US MPAA rating (G, PG, PG-13, R, NC-17)
+	CertificationEvidence []models.CertificationEvidence
 }
 
 func (c *tmdbClient) movieReleaseDates(ctx context.Context, tmdbID int64) ([]models.Release, error) {
@@ -2697,7 +2704,10 @@ func (c *tmdbClient) movieReleaseDatesWithCert(ctx context.Context, tmdbID int64
 	if err := c.doGET(ctx, req.URL.String(), &payload); err != nil {
 		return nil, err
 	}
-	return parseTMDBMovieReleases(payload), nil
+	result := parseTMDBMovieReleases(payload)
+	retrievedAt := time.Now().UTC()
+	result.CertificationEvidence = parseTMDBMovieCertificationEvidence(payload, payload.ID, retrievedAt, c.certificationExpiry(retrievedAt))
+	return result, nil
 }
 
 func parseTMDBMovieReleases(payload tmdbReleaseDatesResponse) *movieReleaseDatesResult {

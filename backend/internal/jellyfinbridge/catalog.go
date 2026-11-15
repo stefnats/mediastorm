@@ -19,23 +19,24 @@ import (
 // whichever mediastorm record is at hand (metadata Title, watchlist entry,
 // progress row, ...).
 type titleInfo struct {
-	MediaType      string // movie | series
-	ID             string // mediastorm title ID as given by the source
-	Name           string
-	Overview       string
-	Year           int
-	ExternalIDs    map[string]string
-	Poster         string
-	Backdrop       string
-	Logo           string
-	Genres         []string
-	RuntimeMinutes int
-	Certification  string
-	ReleaseDate    string
-	Rating         float64
-	Status         string
-	Network        string // series network, when the metadata knows it
-	AddedAt        time.Time
+	MediaType             string // movie | series
+	ID                    string // mediastorm title ID as given by the source
+	Name                  string
+	Overview              string
+	Year                  int
+	ExternalIDs           map[string]string
+	Poster                string
+	Backdrop              string
+	Logo                  string
+	Genres                []string
+	RuntimeMinutes        int
+	Certification         string
+	CertificationEvidence []models.CertificationEvidence
+	ReleaseDate           string
+	Rating                float64
+	Status                string
+	Network               string // series network, when the metadata knows it
+	AddedAt               time.Time
 	// trusted marks values from the metadata service (as opposed to
 	// user-supplied watchlist/list records); only trusted values may replace
 	// what the shared ID index already holds.
@@ -44,19 +45,20 @@ type titleInfo struct {
 
 func titleFromMetadata(t models.Title) titleInfo {
 	info := titleInfo{
-		MediaType:      normalizeMediaType(t.MediaType),
-		ID:             t.ID,
-		Name:           t.Name,
-		Overview:       t.Overview,
-		Year:           t.Year,
-		ExternalIDs:    titleExternalIDs(t),
-		Genres:         t.Genres,
-		RuntimeMinutes: t.RuntimeMinutes,
-		Certification:  t.Certification,
-		ReleaseDate:    t.ReleaseDate,
-		Status:         t.LifecycleStatus,
-		Network:        strings.TrimSpace(t.Network),
-		trusted:        true,
+		MediaType:             normalizeMediaType(t.MediaType),
+		ID:                    t.ID,
+		Name:                  t.Name,
+		Overview:              t.Overview,
+		Year:                  t.Year,
+		ExternalIDs:           titleExternalIDs(t),
+		Genres:                t.Genres,
+		RuntimeMinutes:        t.RuntimeMinutes,
+		Certification:         t.Certification,
+		CertificationEvidence: models.CopyCertificationEvidence(t.CertificationEvidence),
+		ReleaseDate:           t.ReleaseDate,
+		Status:                t.LifecycleStatus,
+		Network:               strings.TrimSpace(t.Network),
+		trusted:               true,
 	}
 	if t.Poster != nil {
 		info.Poster = t.Poster.URL
@@ -795,6 +797,7 @@ func (s *Server) enrich(ctx context.Context, t titleInfo) titleInfo {
 	rich.Logo = firstNonEmpty(rich.Logo, t.Logo)
 	rich.ReleaseDate = firstNonEmpty(rich.ReleaseDate, t.ReleaseDate)
 	rich.Certification = firstNonEmpty(rich.Certification, t.Certification)
+	rich.CertificationEvidence = models.MergeCertificationEvidence(rich.CertificationEvidence, t.CertificationEvidence)
 	rich.Status = firstNonEmpty(rich.Status, t.Status)
 	rich.Network = firstNonEmpty(rich.Network, t.Network)
 	if rich.Year == 0 {

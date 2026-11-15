@@ -786,6 +786,9 @@ func localMediaGroupKey(item models.LocalMediaItem) (string, string) {
 }
 
 func updateLocalMediaGroupSummary(group *models.LocalMediaItemGroup, item models.LocalMediaItem) {
+	if item.Metadata != nil {
+		group.CertificationEvidence = models.MergeCertificationEvidence(group.CertificationEvidence, item.Metadata.CertificationEvidence)
+	}
 	if group.Title == "" {
 		group.Title = localMediaResolvedTitle(item)
 	}
@@ -1289,7 +1292,7 @@ func (s *Service) UpdateItemMatch(ctx context.Context, itemID string, input mode
 	if item.MatchStatus == "" {
 		item.MatchStatus = models.LocalMediaMatchStatusManual
 	}
-	item.Metadata = input.Metadata
+	item.Metadata = models.WithoutCertificationEvidence(input.Metadata)
 	item.UpdatedAt = time.Now().UTC()
 
 	if err := s.repo.UpsertItem(ctx, item); err != nil {
