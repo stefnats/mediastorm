@@ -95,6 +95,29 @@ func TestUserSettingsHandler_GetSettings_Success(t *testing.T) {
 	}
 }
 
+func TestUserSettingsAutomaticLibraryCapabilityIsResponseOnly(t *testing.T) {
+	service := &fakeUserSettingsService{getWithDefaultsVal: models.UserSettings{Playback: models.PlaybackSettings{PreferredPlayer: "native"}}}
+	h := handlers.NewUserSettingsHandler(service, &fakeUserExistsService{exists: true}, config.NewManager(t.TempDir()+"/settings.json"))
+	w := httptest.NewRecorder()
+	h.GetSettings(w, userSettingsRequest(http.MethodGet, "/", nil, map[string]string{"userID": "u1"}))
+	var response map[string]any
+	if err := json.Unmarshal(w.Body.Bytes(), &response); err != nil || response["automaticLibrarySelectionSupported"] != true {
+		t.Fatal("server capability was not advertised")
+	}
+	if !reflect.DeepEqual(service.updatedSettings, models.UserSettings{}) {
+		t.Fatal("GET persisted a settings update")
+	}
+	w = httptest.NewRecorder()
+	h.PutSettings(w, userSettingsRequest(http.MethodPut, "/", response, map[string]string{"userID": "u1"}))
+	if w.Code != http.StatusOK {
+		t.Fatalf("settings roundtrip: %d %s", w.Code, w.Body.String())
+	}
+	stored, err := json.Marshal(service.updatedSettings)
+	if err != nil || bytes.Contains(stored, []byte("automaticLibrarySelectionSupported")) {
+		t.Fatal("response capability was persisted as a preference")
+	}
+}
+
 func TestUserSettingsHandler_GetSettings_ProjectsGlobalSpoilerDefaults(t *testing.T) {
 	settingsSvc := &fakeUserSettingsService{}
 	cfgMgr := config.NewManager(t.TempDir() + "/settings.json")

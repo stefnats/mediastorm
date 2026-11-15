@@ -51,14 +51,14 @@ func (s *Service) Report(req ReportRequest) (Entry, error) {
 	if strings.TrimSpace(ctx.TitleID) == "" || strings.TrimSpace(ctx.ProfileID) == "" || strings.TrimSpace(req.ReporterID) == "" || NormalizeReleaseName(req.Result.Title) == "" {
 		return Entry{}, errors.New("a verified title, profile and selected release are required")
 	}
-	scope := ReportScope{TitleID: strings.ToLower(strings.TrimSpace(ctx.TitleID)), ProfileID: ctx.ProfileID}
+	scope := ReportScope{TitleID: reportTitleIdentity(ctx.TitleID), ProfileID: ctx.ProfileID}
 	if ctx.Episode != nil {
 		season, episode := ctx.Episode.SeasonNumber, ctx.Episode.EpisodeNumber
 		if season < 0 || episode <= 0 {
 			return Entry{}, errors.New("a valid episode is required")
 		}
 		scope.SeasonNumber, scope.EpisodeNumber = &season, &episode
-		scope.NumberingKey = models.EpisodeNumberingKey(ctx.Episode.Numbering)
+		scope.NumberingKey = reportNumberingIdentity(models.EpisodeNumberingKey(ctx.Episode.Numbering))
 	}
 	if req.Shared {
 		scope.ProfileID = ""
@@ -150,10 +150,10 @@ func (s *Service) MatchFor(result models.NZBResult, ctx PlaybackContext) *Entry 
 		if scope == nil || (entry.ExpiresAt != nil && !entry.ExpiresAt.After(time.Now())) {
 			continue
 		}
-		if scope.TitleID != strings.ToLower(strings.TrimSpace(ctx.TitleID)) || (scope.ProfileID != "" && scope.ProfileID != ctx.ProfileID) {
+		if reportTitleIdentity(scope.TitleID) != reportTitleIdentity(ctx.TitleID) || (scope.ProfileID != "" && scope.ProfileID != ctx.ProfileID) {
 			continue
 		}
-		if scope.SeasonNumber != nil && (ctx.Episode == nil || scope.EpisodeNumber == nil || ctx.Episode.SeasonNumber != *scope.SeasonNumber || ctx.Episode.EpisodeNumber != *scope.EpisodeNumber || scope.NumberingKey != models.EpisodeNumberingKey(ctx.Episode.Numbering)) {
+		if scope.SeasonNumber != nil && (ctx.Episode == nil || scope.EpisodeNumber == nil || ctx.Episode.SeasonNumber != *scope.SeasonNumber || ctx.Episode.EpisodeNumber != *scope.EpisodeNumber || reportNumberingIdentity(scope.NumberingKey) != reportNumberingIdentity(models.EpisodeNumberingKey(ctx.Episode.Numbering))) {
 			continue
 		}
 		if scope.SeasonNumber == nil && ctx.Episode != nil {
@@ -194,11 +194,13 @@ func (s *Service) MatchFor(result models.NZBResult, ctx PlaybackContext) *Entry 
 }
 
 func contentIdentity(result models.NZBResult) string {
-	if strings.HasPrefix(result.Link, "localmedia:") {
-		id := strings.SplitN(strings.TrimPrefix(result.Link, "localmedia:"), "/", 2)[0]
-		if id != "" {
-			sum := sha256.Sum256([]byte(id))
-			return "local:" + hex.EncodeToString(sum[:])
+	for _, provider := range []string{"local", "plex", "jellyfin"} {
+		if strings.HasPrefix(result.Link, provider+"media:") {
+			id := strings.SplitN(strings.TrimPrefix(result.Link, provider+"media:"), "/", 2)[0]
+			if id != "" {
+				sum := sha256.Sum256([]byte(id))
+				return provider + ":" + hex.EncodeToString(sum[:])
+			}
 		}
 	}
 	for _, key := range []string{"infoHash", "info_hash", "infohash"} {

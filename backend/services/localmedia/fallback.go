@@ -37,6 +37,9 @@ func (s *Service) FindPlaybackCandidates(ctx context.Context, query models.Local
 			return nil, err
 		}
 		for _, item := range items {
+			if err := ctx.Err(); err != nil {
+				return nil, err
+			}
 			if item.IsMissing || item.LibraryID != library.ID || item.LibraryType != libraryType || (item.MatchStatus != models.LocalMediaMatchStatusMatched && item.MatchStatus != models.LocalMediaMatchStatusManual) {
 				continue
 			}
@@ -52,6 +55,9 @@ func (s *Service) FindPlaybackCandidates(ctx context.Context, query models.Local
 	}
 	// Catalog ordering is not stable across database implementations.
 	sort.Slice(candidates, func(i, j int) bool { return candidates[i].ID < candidates[j].ID })
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	return candidates, nil
 }
 

@@ -20,7 +20,7 @@ func SameEpisodeNumbering(a, b *EpisodeNumbering) bool {
 		}
 		return s
 	}
-	return a.SeriesID == b.SeriesID && order(a.Ordering) == order(b.Ordering)
+	return CanonicalSeriesIdentity(a.SeriesID) == CanonicalSeriesIdentity(b.SeriesID) && order(a.Ordering) == order(b.Ordering)
 }
 
 // StampEpisodeNumbering also upgrades metadata read from older cache entries.

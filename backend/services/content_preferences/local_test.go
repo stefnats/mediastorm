@@ -28,7 +28,7 @@ func TestContentLocalPreferenceHierarchyAndExplicitFalse(t *testing.T) {
 		}
 	}
 	title := "tmdb:tv:123"
-	episode := &models.EpisodeReference{SeasonNumber: 2, EpisodeNumber: 3}
+	episode := &models.EpisodeReference{Numbering: &models.EpisodeNumbering{SeriesID: "tmdb:tv:123", Ordering: "official"}, SeasonNumber: 2, EpisodeNumber: 3}
 	check := func(profile string, ep *models.EpisodeReference, fallback, want bool) {
 		t.Helper()
 		got, err := s.ResolveLocalPreference(profile, title, ep, fallback)
@@ -41,10 +41,10 @@ func TestContentLocalPreferenceHierarchyAndExplicitFalse(t *testing.T) {
 	check("viewer", episode, false, true)
 	set(title+":season:2", models.BoolPtr(false))
 	check("viewer", episode, true, false)
-	check("viewer", &models.EpisodeReference{SeasonNumber: 1, EpisodeNumber: 3}, false, true)
+	check("viewer", &models.EpisodeReference{Numbering: &models.EpisodeNumbering{SeriesID: "tmdb:tv:123", Ordering: "official"}, SeasonNumber: 1, EpisodeNumber: 3}, false, true)
 	set(title+":season:2:episode:3", models.BoolPtr(true))
 	check("viewer", episode, false, true)
-	check("viewer", &models.EpisodeReference{SeasonNumber: 2, EpisodeNumber: 4}, true, false)
+	check("viewer", &models.EpisodeReference{Numbering: &models.EpisodeNumbering{SeriesID: "tmdb:tv:123", Ordering: "official"}, SeasonNumber: 2, EpisodeNumber: 4}, true, false)
 	set(title+":season:2:episode:3", nil)
 	check("viewer", episode, true, false)
 	set(title+":season:2", nil)
@@ -54,7 +54,7 @@ func TestContentLocalPreferenceHierarchyAndExplicitFalse(t *testing.T) {
 	check("viewer", episode, true, true)
 	check("other", episode, false, false)
 	set(title+":season:0", models.BoolPtr(true))
-	check("viewer", &models.EpisodeReference{SeasonNumber: 0, EpisodeNumber: 1}, false, true)
+	check("viewer", &models.EpisodeReference{Numbering: &models.EpisodeNumbering{SeriesID: "tmdb:tv:123", Ordering: "official"}, SeasonNumber: 0, EpisodeNumber: 1}, false, true)
 }
 
 func TestContentLocalPreferencePersistencePreservesThreeStates(t *testing.T) {

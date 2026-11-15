@@ -351,20 +351,27 @@ type RemoteMediaItem struct {
 	EpisodeNumber   int                    `json:"episodeNumber,omitempty"`
 	EpisodeTitle    string                 `json:"episodeTitle,omitempty"`
 	ExternalIDs     *LocalMediaExternalIDs `json:"externalIds,omitempty"`
-	PosterURL       string                 `json:"posterUrl,omitempty"`
-	BackdropURL     string                 `json:"backdropUrl,omitempty"`
-	EpisodeImageURL string                 `json:"episodeImageUrl,omitempty"`
-	FileName        string                 `json:"fileName,omitempty"`
-	VersionLabel    string                 `json:"versionLabel,omitempty"`
-	Container       string                 `json:"container,omitempty"`
-	VideoCodec      string                 `json:"videoCodec,omitempty"`
-	AudioCodec      string                 `json:"audioCodec,omitempty"`
-	Width           int                    `json:"width,omitempty"`
-	Height          int                    `json:"height,omitempty"`
-	HDRFormat       string                 `json:"hdrFormat,omitempty"`
-	DurationSeconds float64                `json:"durationSeconds,omitempty"`
-	SizeBytes       int64                  `json:"sizeBytes,omitempty"`
-	StreamPath      string                 `json:"streamPath"`
+
+	// Automatic selection keeps episode tags separate from parent series tags.
+	SeriesExternalIDs  *LocalMediaExternalIDs `json:"seriesExternalIds,omitempty"`
+	EpisodeExternalIDs *LocalMediaExternalIDs `json:"episodeExternalIds,omitempty"`
+	SinglePart         bool                   `json:"singlePart,omitempty"`
+	AudioLanguages     []string               `json:"audioLanguages,omitempty"`
+
+	PosterURL       string  `json:"posterUrl,omitempty"`
+	BackdropURL     string  `json:"backdropUrl,omitempty"`
+	EpisodeImageURL string  `json:"episodeImageUrl,omitempty"`
+	FileName        string  `json:"fileName,omitempty"`
+	VersionLabel    string  `json:"versionLabel,omitempty"`
+	Container       string  `json:"container,omitempty"`
+	VideoCodec      string  `json:"videoCodec,omitempty"`
+	AudioCodec      string  `json:"audioCodec,omitempty"`
+	Width           int     `json:"width,omitempty"`
+	Height          int     `json:"height,omitempty"`
+	HDRFormat       string  `json:"hdrFormat,omitempty"`
+	DurationSeconds float64 `json:"durationSeconds,omitempty"`
+	SizeBytes       int64   `json:"sizeBytes,omitempty"`
+	StreamPath      string  `json:"streamPath"`
 	// ProviderData holds provider-specific stream keys (e.g. Plex partKey). Must be
 	// serialized so backup/restore does not wipe playback paths (json:"-" did that).
 	ProviderData   map[string]string `json:"providerData,omitempty"`

@@ -323,7 +323,7 @@ func NormalizeProvider(value string) string {
 func normalizeServiceType(value string) string {
 	value = strings.ToLower(strings.TrimSpace(value))
 	switch value {
-	case "usenet", "debrid", "local":
+	case "usenet", "debrid", "local", "plex", "jellyfin":
 		return value
 	default:
 		return ""

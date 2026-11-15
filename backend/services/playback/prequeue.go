@@ -61,6 +61,8 @@ type ScopedPrequeueWorkerFunc func(ctx context.Context, titleID, titleName, imdb
 
 // PrequeueRequest represents an incoming prequeue request
 type PrequeueRequest struct {
+	AutomaticLibrarySelection bool `json:"automaticLibrarySelection,omitempty"`
+
 	Numbering *models.EpisodeNumbering `json:"numbering,omitempty"`
 	TitleID   string                   `json:"titleId"`
 	TitleName string                   `json:"titleName"` // The actual title name for search queries
@@ -74,6 +76,7 @@ type PrequeueRequest struct {
 	// For series: episode info (determined by backend based on watch history)
 	SeasonNumber          int     `json:"seasonNumber,omitempty"`
 	EpisodeNumber         int     `json:"episodeNumber,omitempty"`
+	EpisodeID             string  `json:"episodeId,omitempty"`
 	AbsoluteEpisodeNumber int     `json:"absoluteEpisodeNumber,omitempty"` // Release absolute number; excludes season-zero specials.
 	StartOffset           float64 `json:"startOffset,omitempty"`           // Resume position in seconds for subtitle extraction
 	// Prequeue reason: "details", "next_episode", or "manual" (kept until explicitly removed)
@@ -111,6 +114,8 @@ type SubtitleTrackInfo struct {
 
 // PrequeueStatusResponse is the full status of a prequeue entry
 type PrequeueStatusResponse struct {
+	AutomaticLibrarySelection bool `json:"automaticLibrarySelection,omitempty"`
+
 	PrequeueID         string                   `json:"prequeueId"`
 	Status             PrequeueStatus           `json:"status"`
 	UserID             string                   `json:"userId,omitempty"` // The user who created this prequeue
@@ -123,12 +128,14 @@ type PrequeueStatusResponse struct {
 	ProgressTotal      int                      `json:"progressTotal,omitempty"`
 
 	// When ready:
-	StreamPath     string `json:"streamPath,omitempty"`
-	DisplayName    string `json:"displayName,omitempty"` // For display instead of extracting from path
-	ServiceType    string `json:"serviceType,omitempty"`
-	DebridProvider string `json:"debridProvider,omitempty"`
-	FileSize       int64  `json:"fileSize,omitempty"`
-	HealthStatus   string `json:"healthStatus,omitempty"`
+	StreamPath        string `json:"streamPath,omitempty"`
+	DisplayName       string `json:"displayName,omitempty"` // For display instead of extracting from path
+	ServiceType       string `json:"serviceType,omitempty"`
+	DebridProvider    string `json:"debridProvider,omitempty"`
+	FileSize          int64  `json:"fileSize,omitempty"`
+	HealthStatus      string `json:"healthStatus,omitempty"`
+	LibraryItemID     string `json:"libraryItemId,omitempty"`
+	LibrarySourceType string `json:"librarySourceType,omitempty"`
 
 	// HDR detection results
 	HasDolbyVision           bool                             `json:"hasDolbyVision,omitempty"`
@@ -181,6 +188,12 @@ type PrequeueStatusResponse struct {
 
 // PrequeueEntry is the internal state of a prequeue item
 type PrequeueEntry struct {
+	AutomaticLibrarySelection bool   `json:"automaticLibrarySelection,omitempty"`
+	LibraryItemID             string `json:"libraryItemId,omitempty"`
+	LibrarySourceType         string `json:"librarySourceType,omitempty"`
+	LibraryIdentity           string `json:"libraryIdentity,omitempty"`
+	LibraryEpisodeVerified    bool   `json:"libraryEpisodeVerified,omitempty"`
+
 	ID               string                   `json:"id"`
 	TitleID          string                   `json:"titleId"`
 	TitleName        string                   `json:"titleName"`
@@ -285,6 +298,7 @@ func (s *PrequeueStore) CreateReportReplacement(previousID, clientScope string) 
 		previous.cancelFunc = nil
 	}
 	next, _ := s.createScopedLocked(previous.TitleID, previous.TitleName, previous.UserID, previous.MediaType, previous.Year, previous.TargetEpisode, ManualPrequeueReason, clientScope)
+	next.AutomaticLibrarySelection = previous.AutomaticLibrarySelection
 	previous.reportReplacementID = next.ID
 	return copyPrequeueEntryForRead(next), true, nil
 }
@@ -811,10 +825,14 @@ func IsPrequeueInProgress(status PrequeueStatus) bool {
 }
 
 // CreateScoped creates a prequeue entry for a specific effective settings scope.
-func (s *PrequeueStore) CreateScoped(titleID, titleName, userID, mediaType string, year int, targetEpisode *models.EpisodeReference, reason, settingsScopeKey string) (*PrequeueEntry, bool) {
+func (s *PrequeueStore) CreateScoped(titleID, titleName, userID, mediaType string, year int, targetEpisode *models.EpisodeReference, reason, settingsScopeKey string, automaticLibrarySelection ...bool) (*PrequeueEntry, bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return s.createScopedLocked(titleID, titleName, userID, mediaType, year, targetEpisode, reason, settingsScopeKey)
+	entry, created := s.createScopedLocked(titleID, titleName, userID, mediaType, year, targetEpisode, reason, settingsScopeKey)
+	if len(automaticLibrarySelection) == 1 {
+		entry.AutomaticLibrarySelection = automaticLibrarySelection[0]
+	}
+	return entry, created
 }
 
 // CreateScopedUnlessInProgress is CreateScoped for background callers
@@ -1560,42 +1578,45 @@ func (e *PrequeueEntry) ToResponse() *PrequeueStatusResponse {
 		debridProvider, _ = parseDebridStreamPath(e.StreamPath)
 	}
 	return &PrequeueStatusResponse{
-		PrequeueID:               e.ID,
-		Status:                   e.Status,
-		UserID:                   e.UserID,
-		TargetEpisode:            e.TargetEpisode,
-		ProgressStage:            e.ProgressStage,
-		ProgressDetail:           e.ProgressDetail,
-		ProgressCurrent:          e.ProgressCurrent,
-		ProgressCurrentMin:       e.ProgressCurrentMin,
-		ProgressCurrentMax:       e.ProgressCurrentMax,
-		ProgressTotal:            e.ProgressTotal,
-		StreamPath:               e.StreamPath,
-		ServiceType:              serviceType,
-		DebridProvider:           debridProvider,
-		FileSize:                 e.FileSize,
-		HealthStatus:             e.HealthStatus,
-		HasDolbyVision:           e.HasDolbyVision,
-		HasHDR10:                 e.HasHDR10,
-		DolbyVisionProfile:       e.DolbyVisionProfile,
-		DolbyVisionConfiguration: e.DolbyVisionConfiguration,
-		NeedsAudioTranscode:      e.NeedsAudioTranscode,
-		HLSSessionID:             e.HLSSessionID,
-		HLSPlaylistURL:           e.HLSPlaylistURL,
-		Duration:                 e.Duration,
-		FrameRate:                e.FrameRate,
-		SelectedAudioTrack:       e.SelectedAudioTrack,
-		SelectedSubtitleTrack:    e.SelectedSubtitleTrack,
-		TrackSelection:           e.TrackSelection,
-		AudioTracks:              e.AudioTracks,
-		SubtitleTracks:           e.SubtitleTracks,
-		SubtitleSessions:         e.SubtitleSessions,
-		PassthroughName:          e.PassthroughName,
-		PassthroughDescription:   e.PassthroughDescription,
-		ResultAttributes:         e.ResultAttributes,
-		SelectedResult:           e.SelectedResult,
-		SelectedResultIndex:      e.SelectedResultIndex,
-		MigrationCandidates:      e.MigrationCandidates,
-		Error:                    e.Error,
+		AutomaticLibrarySelection: e.AutomaticLibrarySelection,
+		PrequeueID:                e.ID,
+		Status:                    e.Status,
+		UserID:                    e.UserID,
+		TargetEpisode:             e.TargetEpisode,
+		ProgressStage:             e.ProgressStage,
+		ProgressDetail:            e.ProgressDetail,
+		ProgressCurrent:           e.ProgressCurrent,
+		ProgressCurrentMin:        e.ProgressCurrentMin,
+		ProgressCurrentMax:        e.ProgressCurrentMax,
+		ProgressTotal:             e.ProgressTotal,
+		StreamPath:                e.StreamPath,
+		ServiceType:               serviceType,
+		DebridProvider:            debridProvider,
+		FileSize:                  e.FileSize,
+		HealthStatus:              e.HealthStatus,
+		LibraryItemID:             e.LibraryItemID,
+		LibrarySourceType:         e.LibrarySourceType,
+		HasDolbyVision:            e.HasDolbyVision,
+		HasHDR10:                  e.HasHDR10,
+		DolbyVisionProfile:        e.DolbyVisionProfile,
+		DolbyVisionConfiguration:  e.DolbyVisionConfiguration,
+		NeedsAudioTranscode:       e.NeedsAudioTranscode,
+		HLSSessionID:              e.HLSSessionID,
+		HLSPlaylistURL:            e.HLSPlaylistURL,
+		Duration:                  e.Duration,
+		FrameRate:                 e.FrameRate,
+		SelectedAudioTrack:        e.SelectedAudioTrack,
+		SelectedSubtitleTrack:     e.SelectedSubtitleTrack,
+		TrackSelection:            e.TrackSelection,
+		AudioTracks:               e.AudioTracks,
+		SubtitleTracks:            e.SubtitleTracks,
+		SubtitleSessions:          e.SubtitleSessions,
+		PassthroughName:           e.PassthroughName,
+		PassthroughDescription:    e.PassthroughDescription,
+		ResultAttributes:          e.ResultAttributes,
+		SelectedResult:            e.SelectedResult,
+		SelectedResultIndex:       e.SelectedResultIndex,
+		MigrationCandidates:       e.MigrationCandidates,
+		Error:                     e.Error,
 	}
 }

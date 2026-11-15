@@ -840,6 +840,29 @@ func TestOpenAPIContract(t *testing.T) {
 		}
 	})
 
+	t.Run("automatic library preparation", func(t *testing.T) {
+		h, _, _ := newAutomaticLibraryWorker(t, "plex", &fallbackSearch{})
+		h.users = fallbackProfiles{models.User{ID: "profile", AccountID: contractAccountID}}
+		ready := runAutomaticLibraryWorker(t, h)
+		if ready.Status != playback.PrequeueStatusReady {
+			t.Fatalf("fixture preparation failed: %s", ready.Error)
+		}
+		rec := exercise(t, v, contractCall{method: http.MethodGet, target: "/api/playback/prequeue/" + ready.ID, vars: map[string]string{"prequeueID": ready.ID}}, h.GetStatus, http.StatusOK)
+		status := decodeContract[playback.PrequeueStatusResponse](t, rec)
+		if !status.AutomaticLibrarySelection || status.LibraryItemID != "version-1" || status.LibrarySourceType != "plex" || status.SelectedAudioTrack != 4 {
+			t.Fatalf("library status contract lost fields: %+v", status)
+		}
+		title := "tmdb:series:456"
+		scope := automaticLibraryScope(h.prequeueSettingsScopeKey("profile", contractClientID, title), true)
+		pending, _ := h.store.CreateScoped(title, "Synthetic Series", "profile", "series", 2024, &models.EpisodeReference{SeasonNumber: 1, EpisodeNumber: 1, EpisodeID: "tmdb:episode:789"}, "details", scope)
+		h.store.Update(pending.ID, func(e *playback.PrequeueEntry) {
+			e.AutomaticLibrarySelection = true
+			e.Status = playback.PrequeueStatusSearching
+		})
+		exercise(t, v, contractCall{method: http.MethodPost, target: "/api/playback/prequeue", body: playback.PrequeueRequest{TitleID: title, TitleName: "Synthetic Series", UserID: "profile", ClientID: contractClientID, MediaType: "series", SeasonNumber: 1, EpisodeNumber: 1, EpisodeID: "tmdb:episode:789", AutomaticLibrarySelection: true}}, h.Prequeue, http.StatusOK)
+		exercise(t, v, contractCall{method: http.MethodGet, target: "/api/playback/prequeue/" + pending.ID, vars: map[string]string{"prequeueID": pending.ID}}, h.GetStatus, http.StatusOK)
+	})
+
 	t.Run("clients", func(t *testing.T) {
 		dir := t.TempDir()
 		usersSvc, err := users.NewService(dir)
@@ -876,7 +899,16 @@ func TestOpenAPIContract(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		h := NewUserSettingsHandler(settingsSvc, usersSvc, nil)
+		h := NewUserSettingsHandler(settingsSvc, usersSvc, config.NewManager(filepath.Join(dir, "settings.json")))
+		settingsRec := exercise(t, v, contractCall{method: http.MethodGet,
+			target: "/api/users/" + profile.ID + "/settings", vars: map[string]string{"userID": profile.ID},
+		}, h.GetSettings, http.StatusOK)
+		var capabilities struct {
+			Supported bool `json:"automaticLibrarySelectionSupported"`
+		}
+		if err := json.Unmarshal(settingsRec.Body.Bytes(), &capabilities); err != nil || !capabilities.Supported {
+			t.Fatal("automatic library capability missing")
+		}
 		exercise(t, v, contractCall{method: http.MethodPatch,
 			target: "/api/users/" + profile.ID + "/settings/skipping",
 			vars:   map[string]string{"userID": profile.ID}, body: map[string]bool{"intro": true, "recap": false},

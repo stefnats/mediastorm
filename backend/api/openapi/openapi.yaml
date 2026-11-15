@@ -760,6 +760,32 @@ paths:
         '501': {$ref: '#/components/responses/Error'}
         '502': {$ref: '#/components/responses/Error'}
 
+  /api/users/{userId}/settings:
+    get:
+      operationId: getEffectiveProfileSettings
+      summary: Get effective profile settings and server playback capabilities
+      parameters:
+        - name: userId
+          in: path
+          required: true
+          schema: {type: string}
+      responses:
+        '200':
+          description: Effective settings. Capability markers are response-only and never persisted.
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+                required: [automaticLibrarySelectionSupported]
+                properties:
+                  automaticLibrarySelectionSupported:
+                    type: boolean
+                    enum: [true]
+                    readOnly: true
+        '404':
+          $ref: '#/components/responses/Error'
+
   /api/users/{userId}/settings/skipping:
     patch:
       operationId: patchProfileSkipping
@@ -4373,7 +4399,7 @@ components:
             type: string
         serviceType:
           type: string
-          enum: [usenet, debrid]
+          enum: [usenet, debrid, local, plex, jellyfin]
         episodeCount:
           type: integer
           description: Episodes in a pack; 0 when not a pack.
@@ -4460,6 +4486,10 @@ components:
       required: [titleId, titleName, userId]
       description: Strict; the server rejects unknown fields.
       properties:
+        automaticLibrarySelection:
+          type: boolean
+          default: false
+          description: Opt in to validated automatic local, Plex and Jellyfin selection through the same preparation lifecycle. Omission preserves legacy selection.
         numbering:
           $ref: '#/components/schemas/EpisodeNumbering'
         titleId:
@@ -4487,6 +4517,9 @@ components:
           type: integer
         episodeNumber:
           type: integer
+        episodeId:
+          type: string
+          description: Optional exact metadata episode leaf ID, distinct from a watch-progress item ID. Current server metadata must confirm the tuple before automatic library adoption.
         absoluteEpisodeNumber:
           type: integer
         startOffset:
@@ -4666,6 +4699,15 @@ components:
       type: object
       required: [prequeueId, status]
       properties:
+        automaticLibrarySelection:
+          type: boolean
+          description: True only for preparations created with automatic library selection.
+        libraryItemId:
+          type: string
+          description: Stable library version identifier when a validated library candidate wins.
+        librarySourceType:
+          type: string
+          enum: [local, plex, jellyfin]
         prequeueId:
           type: string
         status:

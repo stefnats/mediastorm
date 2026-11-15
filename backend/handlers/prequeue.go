@@ -100,6 +100,7 @@ type PrequeueHandler struct {
 	badStreamsSvc         *badstreams.Service
 	externalURLValidator  func(context.Context, string) error
 	localFallback         prequeueLocalMedia
+	remoteFallback        prequeueRemoteMedia
 	localAccess           prequeueLibraryAccess
 	localFallbackWait     time.Duration
 	users                 prequeueOwnershipService
@@ -161,6 +162,12 @@ func canonicalPrequeueTitleID(mediaType, titleID, imdbID, tmdbID, tvdbID string)
 	})
 	if canonical == "" {
 		return titleID
+	}
+	// Metadata uses modern series IDs for per-title preferences. Preserve that
+	// exact identity when the older canonicalizer only changes its type alias.
+	supplied := strings.ToLower(strings.TrimSpace(titleID))
+	if (strings.HasPrefix(supplied, "tmdb:series:") || strings.HasPrefix(supplied, "tvdb:series:")) && models.CanonicalSeriesIdentity(supplied) == models.CanonicalSeriesIdentity(canonical) {
+		return supplied
 	}
 	return canonical
 }
@@ -1001,6 +1008,14 @@ func (h *PrequeueHandler) Prequeue(w http.ResponseWriter, r *http.Request) {
 	// was opened from. Different entry points hand us different provider forms
 	// (bare TMDB number, tmdb:tv:N, tvdb:series:N, imdb:ttN); without this the
 	// store lookup misses and we needlessly re-resolve a stream we already have.
+	if req.AutomaticLibrarySelection && !prequeueSuppliedIdentityConsistent(req) {
+		http.Error(w, "conflicting title identifiers", http.StatusBadRequest)
+		return
+	}
+	historyTitleID := mediaidentity.CanonicalTitleID(mediaType, req.TitleID, map[string]string{"imdb": req.ImdbID, "tmdb": req.TmdbID, "tvdb": req.TvdbID})
+	if historyTitleID == "" {
+		historyTitleID = req.TitleID
+	}
 	if canonical := canonicalPrequeueTitleID(mediaType, req.TitleID, req.ImdbID, req.TmdbID, req.TvdbID); canonical != req.TitleID {
 		log.Printf("[prequeue] Canonicalized titleId %q -> %q (imdb=%q tmdb=%q tvdb=%q)", req.TitleID, canonical, req.ImdbID, req.TmdbID, req.TvdbID)
 		req.TitleID = canonical
@@ -1026,6 +1041,7 @@ func (h *PrequeueHandler) Prequeue(w http.ResponseWriter, r *http.Request) {
 				Numbering:             req.Numbering,
 				SeasonNumber:          req.SeasonNumber,
 				EpisodeNumber:         req.EpisodeNumber,
+				EpisodeID:             strings.TrimSpace(req.EpisodeID),
 				AbsoluteEpisodeNumber: req.AbsoluteEpisodeNumber,
 			}
 			if req.AbsoluteEpisodeNumber > 0 {
@@ -1035,7 +1051,7 @@ func (h *PrequeueHandler) Prequeue(w http.ResponseWriter, r *http.Request) {
 			}
 		} else if h.historySvc != nil {
 			// Try to get next episode from watch history
-			watchState, err := h.historySvc.GetSeriesWatchState(req.UserID, req.TitleID)
+			watchState, err := h.historySvc.GetSeriesWatchState(req.UserID, historyTitleID)
 			if err == nil && watchState != nil && watchState.NextEpisode != nil {
 				// Exclude season 0 (specials)
 				if watchState.NextEpisode.SeasonNumber > 0 {
@@ -1067,6 +1083,7 @@ func (h *PrequeueHandler) Prequeue(w http.ResponseWriter, r *http.Request) {
 
 	throughput := adaptiveThroughputFromRequest(r)
 	settingsScopeKey, adaptiveCaps := h.prequeueSettingsScope(req.UserID, clientID, req.TitleID, throughput)
+	settingsScopeKey = automaticLibraryScope(settingsScopeKey, req.AutomaticLibrarySelection)
 	log.Printf("[prequeue] Effective settings scope for title=%s user=%s client=%s: %s", req.TitleID, req.UserID, clientID, settingsScopeKey)
 
 	// Warm references may share settings across profiles, but preparation IDs
@@ -1081,9 +1098,9 @@ func (h *PrequeueHandler) Prequeue(w http.ResponseWriter, r *http.Request) {
 				} else if err := h.validateReadyEntryForRequest(r, warmEntry, req); err != nil {
 					log.Printf("[prequeue] Ignoring pre-warmed entry %s: stale external stream (%v), resolving fresh",
 						warm.PrequeueID, err)
-					h.store.Delete(warm.PrequeueID)
+					h.store.RetireSourceSelection(warm.PrequeueID)
 				} else {
-					if prequeueEpisodeMatches(targetEpisode, warmEntry.TargetEpisode) {
+					if prequeueEpisodeMatchesForMode(targetEpisode, warmEntry.TargetEpisode, req.AutomaticLibrarySelection) {
 						if req.Reason == playback.ManualPrequeueReason {
 							h.store.MakePersistent(warmEntry.ID)
 							h.prewarmSvc.AdoptEntry(warmEntry.ID)
@@ -1116,8 +1133,10 @@ func (h *PrequeueHandler) Prequeue(w http.ResponseWriter, r *http.Request) {
 
 	// Check for existing entry in the store (covers both prewarm and regular prequeues).
 	if existing, ok := h.store.GetByTitleUserScopeForPlayback(req.TitleID, req.UserID, settingsScopeKey); ok {
-		episodeMatch := prequeueEpisodeMatches(targetEpisode, existing.TargetEpisode)
-		if !episodeMatch {
+		episodeMatch := prequeueEpisodeMatchesForMode(targetEpisode, existing.TargetEpisode, req.AutomaticLibrarySelection)
+		if existing.AutomaticLibrarySelection != req.AutomaticLibrarySelection {
+			log.Printf("[prequeue] Existing entry %s source selection mode changed, resolving fresh", existing.ID)
+		} else if !episodeMatch {
 			log.Printf("[prequeue] Existing entry %s episode mismatch (cached=%v, requested=%v), resolving fresh",
 				existing.ID, existing.TargetEpisode, targetEpisode)
 		} else if existing.Status == playback.PrequeueStatusReady {
@@ -1128,7 +1147,7 @@ func (h *PrequeueHandler) Prequeue(w http.ResponseWriter, r *http.Request) {
 				} else if err := h.validateReadyEntryForRequest(r, existing, req); err != nil {
 					log.Printf("[prequeue] Discarding ready entry %s: stale external stream (%v), resolving fresh",
 						existing.ID, err)
-					h.store.Delete(existing.ID)
+					h.store.RetireSourceSelection(existing.ID)
 				} else {
 					if req.Reason == playback.ManualPrequeueReason {
 						h.store.MakePersistent(existing.ID)
@@ -1175,10 +1194,13 @@ func (h *PrequeueHandler) Prequeue(w http.ResponseWriter, r *http.Request) {
 		} else {
 			log.Printf("[prequeue] Existing entry %s status=%s not reusable, resolving fresh", existing.ID, existing.Status)
 		}
+		if (existing.AutomaticLibrarySelection || req.AutomaticLibrarySelection) && existing.Status == playback.PrequeueStatusReady {
+			h.store.RetireSourceSelection(existing.ID)
+		}
 	}
 
 	// Create prequeue entry
-	entry, _ := h.store.CreateScoped(req.TitleID, titleName, req.UserID, mediaType, req.Year, targetEpisode, req.Reason, settingsScopeKey)
+	entry, _ := h.store.CreateScoped(req.TitleID, titleName, req.UserID, mediaType, req.Year, targetEpisode, req.Reason, settingsScopeKey, req.AutomaticLibrarySelection)
 	h.latencyTracker.NotePrequeueRequested(entry.ID, req.TitleID, req.UserID, titleName, mediaType)
 	h.latencyTracker.NotePrequeueMetadata(entry.ID, req.ImdbID, req.Year)
 
@@ -1188,7 +1210,7 @@ func (h *PrequeueHandler) Prequeue(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Start background worker with all the info needed for search
-	go h.runPrequeueWorker(entry.ID, req.TitleID, titleName, req.ImdbID, mediaType, req.Year, req.UserID, clientID, throughput, targetEpisode, req.StartOffset, req.SkipHLS, prequeueWorkerInteractive, prequeueLocalScope{accountID: auth.GetAccountID(r), master: auth.IsMaster(r), tmdbID: req.TmdbID, tvdbID: req.TvdbID})
+	go h.runPrequeueWorker(entry.ID, req.TitleID, titleName, req.ImdbID, mediaType, req.Year, req.UserID, clientID, throughput, targetEpisode, req.StartOffset, req.SkipHLS, prequeueWorkerInteractive, prequeueLocalScope{accountID: auth.GetAccountID(r), master: auth.IsMaster(r), tmdbID: req.TmdbID, tvdbID: req.TvdbID, automaticLibrarySelection: req.AutomaticLibrarySelection})
 
 	// Return response
 	resp := playback.PrequeueResponse{
@@ -1264,7 +1286,7 @@ func (h *PrequeueHandler) manualPrequeueEntry(r *http.Request) (*playback.Preque
 		query.Get("tvdbId"),
 	)
 	for _, entry := range h.store.ListAll() {
-		if entry != nil && entry.Persistent && entry.UserID == userID && entry.TitleID == canonicalID {
+		if entry != nil && entry.Persistent && entry.UserID == userID && models.CanonicalSeriesIdentity(entry.TitleID) == models.CanonicalSeriesIdentity(canonicalID) {
 			return entry, userID, true
 		}
 	}
@@ -1671,7 +1693,11 @@ func (h *PrequeueHandler) runPrequeueWorker(prequeueID, titleID, titleName, imdb
 		observe := h.sourceAvailability.ObservePlaybackStart(userID, clientID, titleID, mediaType)
 		defer func() {
 			entry, ok := h.store.Get(prequeueID)
-			observe(ok && entry.Status == playback.PrequeueStatusReady && entry.StreamPath != "" && !strings.HasPrefix(entry.StreamPath, "localmedia:"))
+			library := false
+			if ok {
+				_, _, library = libraryStreamIdentity(entry.StreamPath)
+			}
+			observe(ok && entry.Status == playback.PrequeueStatusReady && entry.StreamPath != "" && !library)
 		}()
 	}
 	// Create cancellable context
@@ -1702,7 +1728,8 @@ func (h *PrequeueHandler) runPrequeueWorker(prequeueID, titleID, titleName, imdb
 
 	playbackCtx := ctx
 	localCandidates := h.findLocalFallbackCandidates(ctx, localScopes, userID, models.LocalMediaMatchQuery{TitleID: titleID, IMDBID: imdbID, MediaType: mediaType}, targetEpisode)
-	if len(localCandidates) > 0 {
+	remoteCandidates := h.findRemoteFallbackCandidates(ctx, localScopes, userID, models.LocalMediaMatchQuery{TitleID: titleID, IMDBID: imdbID, MediaType: mediaType}, targetEpisode)
+	if len(localCandidates)+len(remoteCandidates) > 0 {
 		wait := h.localFallbackWait
 		if wait <= 0 {
 			wait = 20 * time.Second
@@ -1727,6 +1754,13 @@ func (h *PrequeueHandler) runPrequeueWorker(prequeueID, titleID, titleName, imdb
 	var alternateTitles []string
 	if mediaType == "series" && h.metadataSvc != nil {
 		seriesMeta := h.createEpisodeResolverAndLookupAbsoluteEp(ctx, titleID, titleName, year, imdbID, targetEpisode)
+		if len(localScopes) == 1 && localScopes[0].automaticLibrarySelection && targetEpisode != nil && targetEpisode.EpisodeID != "" && seriesMeta.TargetEpisode != nil && seriesMeta.TargetEpisode.EpisodeID != "" && seriesMeta.TargetEpisode.EpisodeID != targetEpisode.EpisodeID {
+			h.failPrequeue(prequeueID, "Episode identity changed; reload the title before playing")
+			return
+		}
+		if len(localScopes) == 1 {
+			localScopes[0].libraryEpisodeVerified = seriesMeta.LibraryEpisodeVerified
+		}
 		episodeResolver = seriesMeta.EpisodeResolver
 		targetEpisode = seriesMeta.TargetEpisode
 		isDaily = seriesMeta.IsDaily
@@ -1749,6 +1783,7 @@ func (h *PrequeueHandler) runPrequeueWorker(prequeueID, titleID, titleName, imdb
 		h.store.UpdateWorker(prequeueID, func(e *playback.PrequeueEntry) {
 			e.TargetEpisode = targetEpisode
 			e.Year = year
+			e.LibraryEpisodeVerified = seriesMeta.LibraryEpisodeVerified
 		})
 		if episodeResolver != nil {
 			log.Printf("[prequeue] Episode resolver created: %d total episodes, %d seasons", episodeResolver.TotalEpisodes, len(episodeResolver.SeasonEpisodeCounts))
@@ -1761,8 +1796,9 @@ func (h *PrequeueHandler) runPrequeueWorker(prequeueID, titleID, titleName, imdb
 
 	// Metadata can normalize episode coordinates and add provider IDs. Re-read
 	// the catalog for that final identity before using any earlier candidate.
-	hadLocalCandidate := len(localCandidates) > 0
+	hadLocalCandidate := len(localCandidates)+len(remoteCandidates) > 0
 	localCandidates = h.findLocalFallbackCandidates(playbackCtx, localScopes, userID, models.LocalMediaMatchQuery{TitleID: titleID, IMDBID: imdbID, TVDBID: positiveIDString(tvdbID), MediaType: mediaType}, targetEpisode)
+	remoteCandidates = h.findRemoteFallbackCandidates(playbackCtx, localScopes, userID, models.LocalMediaMatchQuery{TitleID: titleID, IMDBID: imdbID, TVDBID: positiveIDString(tvdbID), MediaType: mediaType}, targetEpisode)
 	if isDaily {
 		filtered := localCandidates[:0]
 		for _, item := range localCandidates {
@@ -1771,11 +1807,13 @@ func (h *PrequeueHandler) runPrequeueWorker(prequeueID, titleID, titleName, imdb
 			}
 		}
 		localCandidates = filtered
+		// Daily episode catalogs without exact air-date identity stay manual.
+		remoteCandidates = nil
 	}
-	if len(localCandidates) == 0 {
+	if len(localCandidates)+len(remoteCandidates) == 0 {
 		ctx = playbackCtx
 	}
-	if !hadLocalCandidate && len(localCandidates) > 0 {
+	if !hadLocalCandidate && len(localCandidates)+len(remoteCandidates) > 0 {
 		wait := h.localFallbackWait
 		if wait <= 0 {
 			wait = 20 * time.Second
@@ -1932,16 +1970,22 @@ func (h *PrequeueHandler) runPrequeueWorker(prequeueID, titleID, titleName, imdb
 	resolveStart := time.Now()
 	tryLocal := func() (prequeueResolutionChoice, error) {
 		_, localAdaptiveCaps, localFilter := h.prequeueSettingsScopeDetails(userID, clientID, titleID, throughput)
-		h.updatePrequeueProgress(prequeueID, "local_fallback", "Checking an existing library file", 0, len(localCandidates))
+		h.updatePrequeueProgress(prequeueID, "local_fallback", "Checking existing library media", 0, len(localCandidates)+len(remoteCandidates))
 		return h.resolveLocalFallback(playbackCtx, prequeueID, localCandidates, prequeueResolutionOptions{
 			excludedResult: excludedResult, mediaType: mediaType, targetEpisode: targetEpisode, userID: userID, clientID: clientID, hdrDVPolicy: hdrDVPolicy,
 			unknownTrackPolicy: unknownTrackPolicy, needsDVCheck: needsDVCheck, needsUnknownTrackCheck: needsUnknownTrackCheck,
 			workerStart: workerStart, localScope: &localScopes[0], adaptiveCaps: localAdaptiveCaps, localFilter: localFilter,
-		})
+		}, remoteCandidates)
 	}
 	var choice prequeueResolutionChoice
 	var resolveErr error
-	triedLocalFirst := h.localPlaybackPreferredFor(userID, titleID, targetEpisode) && len(localCandidates) > 0
+	preferenceEpisode := targetEpisode
+	if len(localScopes) == 1 && localScopes[0].automaticLibrarySelection && !localScopes[0].libraryEpisodeVerified && targetEpisode != nil {
+		copy := *targetEpisode
+		copy.Numbering = nil
+		preferenceEpisode = &copy
+	}
+	triedLocalFirst := h.localPlaybackPreferredFor(userID, titleID, preferenceEpisode) && len(localCandidates)+len(remoteCandidates) > 0
 	if triedLocalFirst {
 		choice, resolveErr = tryLocal()
 		// An unavailable local preference must not consume the normal search budget.
@@ -2062,7 +2106,7 @@ func (h *PrequeueHandler) runPrequeueWorker(prequeueID, titleID, titleName, imdb
 		}()
 	}
 	ctx = playbackCtx
-	if choice.resolution == nil && !triedLocalFirst && len(localCandidates) > 0 && ctx.Err() == nil {
+	if choice.resolution == nil && !triedLocalFirst && len(localCandidates)+len(remoteCandidates) > 0 && ctx.Err() == nil {
 		choice, resolveErr = tryLocal()
 	}
 	if triedLocalFirst && choice.resolution == nil && ctx.Err() == nil {
@@ -2096,6 +2140,11 @@ func (h *PrequeueHandler) runPrequeueWorker(prequeueID, titleID, titleName, imdb
 		e.DebridProvider = resolution.DebridProvider
 		if selectedResult != nil {
 			e.ServiceType = string(selectedResult.ServiceType)
+			if e.AutomaticLibrarySelection {
+				if provider, id, ok := libraryStreamIdentity(resolution.WebDAVPath); ok {
+					e.LibraryItemID, e.LibrarySourceType, e.LibraryIdentity = id, provider, selectedResult.Attributes["libraryIdentity"]
+				}
+			}
 		}
 		e.FileSize = resolution.FileSize
 		if e.FileSize == 0 && selectedResult != nil && selectedResult.SizeBytes > 0 {
@@ -2136,7 +2185,7 @@ func (h *PrequeueHandler) runPrequeueWorker(prequeueID, titleID, titleName, imdb
 	selectedSubtitleTrack := -1
 	probeStart := time.Now()
 
-	if h.metadataProber != nil && h.userSettingsSvc != nil {
+	if (h.metadataProber != nil && h.userSettingsSvc != nil) || (len(localScopes) == 1 && localScopes[0].automaticLibrarySelection && cachedProbeResult != nil) {
 		h.updatePrequeueProgress(prequeueID, "selecting_tracks", "", 0, 0)
 		log.Printf("[prequeue] TIMING: starting probe/track selection (elapsed: %v)", time.Since(workerStart))
 		// Effective track preferences: global < profile < client < per-title.
@@ -2239,6 +2288,15 @@ func (h *PrequeueHandler) runPrequeueWorker(prequeueID, titleID, titleName, imdb
 				}
 			}
 			trackSelection = trackselect.Select(audioStreams, subtitleStreams, trackPrefs)
+			if len(localScopes) == 1 && localScopes[0].automaticLibrarySelection {
+				if _, _, library := libraryStreamIdentity(resolution.WebDAVPath); library {
+					trackSelection = selectLibraryTracks(audioStreams, subtitleStreams, trackPrefs)
+					if trackSelection == nil {
+						h.failPrequeue(prequeueID, "Requested library audio is unavailable")
+						return
+					}
+				}
+			}
 			if trackSelection.Audio == nil && len(audioStreams) > 0 && len(audioStreams) < len(originalAudio) && trackPrefs.AudioLanguage == "" && len(trackPrefs.AllowedLanguages) == 0 {
 				trackSelection.Audio = trackselect.DescribeAudioTrack(audioStreams, audioStreams[0].Index)
 			}
@@ -2436,6 +2494,7 @@ type prequeueResolutionOptions struct {
 	clientID               string
 	workerStart            time.Time
 	localItems             map[string]models.LocalMediaItem
+	remoteItems            map[string]models.RemoteMediaItem
 	localScope             *prequeueLocalScope
 	adaptiveCaps           models.AdaptiveCaps
 	localFilter            models.FilterSettings
@@ -3116,6 +3175,8 @@ func (h *PrequeueHandler) resolveCandidates(ctx context.Context, prequeueID stri
 		var resolveErr error
 		if item, ok := opts.localItems[result.Link]; ok {
 			resolution, resolveErr = h.resolveLocalItem(raceCtx, item, opts)
+		} else if item, ok := opts.remoteItems[result.Link]; ok {
+			resolution, resolveErr = h.resolveRemoteItem(raceCtx, item, opts)
 		} else if h.playbackSvc != nil {
 			resolution, resolveErr = h.playbackSvc.Resolve(raceCtx, result)
 		} else {
@@ -3220,9 +3281,17 @@ func (h *PrequeueHandler) resolveCandidates(ctx context.Context, prequeueID stri
 		}
 
 		if probeResult != nil {
-			_, unusable := filterReportedAudio(h.badStreamsSvc, result, reportCtx, probeResult.AudioStreams)
+			streams, unusable := filterReportedAudio(h.badStreamsSvc, result, reportCtx, probeResult.AudioStreams)
 			if unusable {
 				return nil, nil, errors.New("reported audio tracks leave no usable requested language")
+			}
+			if opts.localScope != nil && opts.localScope.automaticLibrarySelection {
+				if _, _, library := libraryStreamIdentity(resolution.WebDAVPath); library {
+					prefs := h.trackPreferenceResolver().Resolve(opts.userID, opts.clientID, reportCtx.TitleID).Normalized()
+					if strictLibraryAudio(streams, prefs) == nil || (prefs.AudioLanguage == "" && len(prefs.AllowedLanguages) == 0 && len(streams) < len(probeResult.AudioStreams)) {
+						return nil, nil, errors.New("library media does not prove healthy requested audio")
+					}
+				}
 			}
 		}
 		if opts.needsUnknownTrackCheck && probeResult == nil && h.metadataProber != nil {
@@ -4033,19 +4102,20 @@ func padNumber(n int) string {
 
 // SeriesMetadataResult holds series-specific metadata needed for search and file matching
 type SeriesMetadataResult struct {
-	EpisodeResolver    *filter.SeriesEpisodeResolver
-	TargetEpisode      *models.EpisodeReference
-	IsDaily            bool   // True for daily shows (talk shows, news) that use date-based naming
-	TargetAirDate      string // Air date from TVDB in YYYY-MM-DD format
-	EpisodeAirYear     int    // Year the target episode aired, used to allow later-season year tags
-	SeasonPremiereYear int    // Premiere year of the requested season only.
-	EpisodeReleased    bool   // True only when metadata confirms the target episode has aired
-	IsAnime            bool   // True for anime content - requires waiting for Nyaa scraper
-	Year               int    // Series premiere year from metadata (used when frontend doesn't provide it)
-	IMDBID             string // Resolved IMDb ID used by ID-aware search providers
-	TVDBID             int64  // Resolved TVDB ID used by structured Newznab TV searches
-	CountryCode        string // Original production country used to disambiguate regional remakes
-	OriginalLanguage   string // Original spoken language; an audio preference matching it needs no pin
+	EpisodeResolver        *filter.SeriesEpisodeResolver
+	TargetEpisode          *models.EpisodeReference
+	IsDaily                bool   // True for daily shows (talk shows, news) that use date-based naming
+	TargetAirDate          string // Air date from TVDB in YYYY-MM-DD format
+	EpisodeAirYear         int    // Year the target episode aired, used to allow later-season year tags
+	SeasonPremiereYear     int    // Premiere year of the requested season only.
+	EpisodeReleased        bool   // True only when metadata confirms the target episode has aired
+	IsAnime                bool   // True for anime content - requires waiting for Nyaa scraper
+	Year                   int    // Series premiere year from metadata (used when frontend doesn't provide it)
+	IMDBID                 string // Resolved IMDb ID used by ID-aware search providers
+	TVDBID                 int64  // Resolved TVDB ID used by structured Newznab TV searches
+	CountryCode            string // Original production country used to disambiguate regional remakes
+	OriginalLanguage       string // Original spoken language; an audio preference matching it needs no pin
+	LibraryEpisodeVerified bool   // An unambiguous current official metadata episode owns these coordinates.
 }
 
 // createEpisodeResolverAndLookupAbsoluteEp fetches series metadata, creates an episode resolver,
@@ -4221,6 +4291,7 @@ func (h *PrequeueHandler) createEpisodeResolverAndLookupAbsoluteEp(ctx context.C
 			updatedEpisode.AbsoluteEpisodeNumber = targetEpisode.AbsoluteEpisodeNumber
 		}
 		result.TargetEpisode = updatedEpisode
+		result.LibraryEpisodeVerified = verifiedLibraryEpisode(titleID, details, updatedEpisode)
 	}
 
 	if result.TargetEpisode != nil {

@@ -182,6 +182,7 @@ func (h *PrequeueHandler) releaseAction(w http.ResponseWriter, r *http.Request, 
 		}
 		h.store.CancelWork(entry.ID)
 		scope, _ := h.prequeueSettingsScope(entry.UserID, client, entry.TitleID, adaptiveThroughputFromRequest(r))
+		scope = automaticLibraryScope(scope, entry.AutomaticLibrarySelection)
 		next, created, createErr := h.store.CreateReportReplacement(entry.ID, scope)
 		if createErr != nil {
 			http.Error(w, "could not prepare an alternative", http.StatusServiceUnavailable)
@@ -189,7 +190,7 @@ func (h *PrequeueHandler) releaseAction(w http.ResponseWriter, r *http.Request, 
 		}
 		h.latencyTracker.NotePrequeueRequested(next.ID, entry.TitleID, entry.UserID, entry.TitleName, entry.MediaType)
 		if created {
-			go h.runPrequeueWorker(next.ID, entry.TitleID, entry.TitleName, "", entry.MediaType, entry.Year, entry.UserID, client, adaptiveThroughputFromRequest(r), entry.TargetEpisode, offset, req.SkipHLS, prequeueWorkerInteractive, prequeueLocalScope{accountID: auth.GetAccountID(r), master: auth.IsMaster(r), excludedResult: func() *models.NZBResult {
+			go h.runPrequeueWorker(next.ID, entry.TitleID, entry.TitleName, "", entry.MediaType, entry.Year, entry.UserID, client, adaptiveThroughputFromRequest(r), entry.TargetEpisode, offset, req.SkipHLS, prequeueWorkerInteractive, prequeueLocalScope{accountID: auth.GetAccountID(r), master: auth.IsMaster(r), automaticLibrarySelection: entry.AutomaticLibrarySelection, excludedResult: func() *models.NZBResult {
 				if reporting {
 					return nil
 				}
