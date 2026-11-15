@@ -1,0 +1,290 @@
+{
+  "checked_at": "2026-11-15T09:10:53.368599+01:00",
+  "repositories": {
+    "mediastorm": {
+      "tip": "43fae17782b56175b35c0d3668b1852a8820dd21",
+      "upstream": "8b278f9e00ed8c100839e3abf3b9b0f688c2dfe0",
+      "pulls": [
+        {
+          "number": 102,
+          "head": "43fae17782b56175b35c0d3668b1852a8820dd21",
+          "branch": "codex/profile-post-play",
+          "present_in_preserved_tip": true,
+          "fork_branch_matches": true
+        },
+        {
+          "number": 101,
+          "head": "26d4987b372c09ef2f73d450851f1bd08e68020a",
+          "branch": "codex/profile-episode-autoplay",
+          "present_in_preserved_tip": true,
+          "fork_branch_matches": true
+        },
+        {
+          "number": 100,
+          "head": "28442cf7eb13d0e2e5aecdd3f0946de741219646",
+          "branch": "codex/profile-personal-area",
+          "present_in_preserved_tip": true,
+          "fork_branch_matches": true
+        },
+        {
+          "number": 99,
+          "head": "b98fa90a3f3e23e3873592c7e086b041a5c861d8",
+          "branch": "codex/profile-taste-onboarding",
+          "present_in_preserved_tip": true,
+          "fork_branch_matches": true
+        },
+        {
+          "number": 98,
+          "head": "57e5f8d019d9b1913f0f05f88136af02d76f31ae",
+          "branch": "codex/profile-title-ratings",
+          "present_in_preserved_tip": true,
+          "fork_branch_matches": true
+        },
+        {
+          "number": 97,
+          "head": "52edf11fe62c7ade82de56834d0b7bcccc25d237",
+          "branch": "codex/family-source-integration",
+          "present_in_preserved_tip": true,
+          "fork_branch_matches": true
+        },
+        {
+          "number": 96,
+          "head": "2f772452ab0bad47afda45fb41f6887d8bb1a887",
+          "branch": "codex/profile-bound-prewarm",
+          "present_in_preserved_tip": true,
+          "fork_branch_matches": true
+        },
+        {
+          "number": 95,
+          "head": "86bcc28cdeae71af03e86d67e2af6ff6d9cb1f0b",
+          "branch": "codex/debrid-race-test",
+          "present_in_preserved_tip": true,
+          "fork_branch_matches": true
+        },
+        {
+          "number": 94,
+          "head": "3f01ff3533ea1467cb9461905fe17616d59d65d7",
+          "branch": "codex/history-cleanup-test",
+          "present_in_preserved_tip": true,
+          "fork_branch_matches": true
+        },
+        {
+          "number": 93,
+          "head": "d9464549ee7d9dfc789cc0002d6fd070fc5b6668",
+          "branch": "codex/recording-stop-cause",
+          "present_in_preserved_tip": true,
+          "fork_branch_matches": true
+        },
+        {
+          "number": 92,
+          "head": "a5427aa085b7327da66fa3f66a2857ca74baefef",
+          "branch": "codex/manual-source-recheck",
+          "present_in_preserved_tip": true,
+          "fork_branch_matches": true
+        },
+        {
+          "number": 91,
+          "head": "3e40ff54fb2a3a56525a6a4520f293a0fb29b8ed",
+          "branch": "codex/local-source-hints",
+          "present_in_preserved_tip": true,
+          "fork_branch_matches": true
+        },
+        {
+          "number": 90,
+          "head": "2faa5be6c24973379af2320bb94549ace6fac343",
+          "branch": "codex/visible-title-source-hints",
+          "present_in_preserved_tip": true,
+          "fork_branch_matches": true
+        },
+        {
+          "number": 89,
+          "head": "dcf0673c1e20e3179ae10862b17c44165beee874",
+          "branch": "codex/episode-source-hints",
+          "present_in_preserved_tip": true,
+          "fork_branch_matches": true
+        },
+        {
+          "number": 88,
+          "head": "bf35f120b4cd82f299cd18ce214209e923cf4193",
+          "branch": "codex/scoped-source-availability",
+          "present_in_preserved_tip": true,
+          "fork_branch_matches": true
+        },
+        {
+          "number": 87,
+          "head": "4675137e7ad71d6df556b3589c8d5523273df6ef",
+          "branch": "codex/web-prepared-replacements",
+          "present_in_preserved_tip": true,
+          "fork_branch_matches": true
+        },
+        {
+          "number": 86,
+          "head": "708fbb67327835d1810d4ca7b05dbc1da0600ab3",
+          "branch": "codex/scoped-release-reports",
+          "present_in_preserved_tip": true,
+          "fork_branch_matches": true
+        },
+        {
+          "number": 85,
+          "head": "aaac2269109a634f7fd2db7cba250d45d238e624",
+          "branch": "codex/local-playback-fallback",
+          "present_in_preserved_tip": true,
+          "fork_branch_matches": true
+        },
+        {
+          "number": 84,
+          "head": "fbf83ade63b6461b817f134e879e74e57cf65ee8",
+          "branch": "codex/live-station-failover",
+          "present_in_preserved_tip": true,
+          "fork_branch_matches": true
+        },
+        {
+          "number": 83,
+          "head": "a1e660830c98d5b6edb1d524d4f0c913bc39bc56",
+          "branch": "codex/iptv-capacity",
+          "present_in_preserved_tip": true,
+          "fork_branch_matches": true
+        },
+        {
+          "number": 82,
+          "head": "150d831128f668152b7d1004570456678505d285",
+          "branch": "codex/live-hls-test-cleanup",
+          "present_in_preserved_tip": true,
+          "fork_branch_matches": true
+        },
+        {
+          "number": 81,
+          "head": "72c4e347da9a49a75ff5fd6ec8eda88a09277712",
+          "branch": "codex/watchparty-media-lifecycle",
+          "present_in_preserved_tip": true,
+          "fork_branch_matches": true
+        },
+        {
+          "number": 80,
+          "head": "68db2b17d7b2147b2513306d80afd692fe02a06f",
+          "branch": "codex/recommendation-interest-seeds",
+          "present_in_preserved_tip": true,
+          "fork_branch_matches": true
+        },
+        {
+          "number": 79,
+          "head": "45184cbdbfda3dad3670dd3b030a382de25a8fe2",
+          "branch": "codex/source-availability-overviews",
+          "present_in_preserved_tip": true,
+          "fork_branch_matches": true
+        }
+      ]
+    },
+    "mediastorm-androidtv": {
+      "tip": "660a9de6bd3c65f08d9c96b296c3d1fb28036083",
+      "upstream": "44a80756a4c95685fdc23fa4aeece9477f72b725",
+      "pulls": [
+        {
+          "number": 18,
+          "head": "660a9de6bd3c65f08d9c96b296c3d1fb28036083",
+          "branch": "codex/live-station-groups",
+          "present_in_preserved_tip": true,
+          "fork_branch_matches": true
+        },
+        {
+          "number": 17,
+          "head": "064bc5b48d2053bfb966a30c8862f2239e2602eb",
+          "branch": "codex/profile-request-context",
+          "present_in_preserved_tip": true,
+          "fork_branch_matches": true
+        },
+        {
+          "number": 16,
+          "head": "d119e56cd2cc17eaa618da1d5f0f10b4bcbeff53",
+          "branch": "codex/profile-post-play-controls",
+          "present_in_preserved_tip": true,
+          "fork_branch_matches": true
+        },
+        {
+          "number": 15,
+          "head": "c299806b05c9b9f378cba0215d297d4bea96a5c0",
+          "branch": "codex/profile-episode-autoplay-controls",
+          "present_in_preserved_tip": true,
+          "fork_branch_matches": true
+        },
+        {
+          "number": 14,
+          "head": "ad131004009d0bf6144739d0648b698f6bf95dce",
+          "branch": "codex/profile-personal-area-controls",
+          "present_in_preserved_tip": true,
+          "fork_branch_matches": true
+        },
+        {
+          "number": 13,
+          "head": "0863445803586e669e9e231f2c272fc470fab4fd",
+          "branch": "codex/profile-list-load-isolation",
+          "present_in_preserved_tip": true,
+          "fork_branch_matches": true
+        },
+        {
+          "number": 12,
+          "head": "845471ca931dfcbfdb6475dad9306b14e262cdcc",
+          "branch": "codex/profile-taste-onboarding-controls",
+          "present_in_preserved_tip": true,
+          "fork_branch_matches": true
+        },
+        {
+          "number": 11,
+          "head": "59fe2d5c743369f2d0db7dd7b30e8f5c554ca513",
+          "branch": "codex/profile-rating-controls",
+          "present_in_preserved_tip": true,
+          "fork_branch_matches": true
+        },
+        {
+          "number": 10,
+          "head": "4188f9c6983018cb7af5f8fc51192d9c26d11453",
+          "branch": "codex/source-recheck-controls",
+          "present_in_preserved_tip": true,
+          "fork_branch_matches": true
+        },
+        {
+          "number": 9,
+          "head": "22ce3ef8f68ea7349aada4cb4c37ca6c0b3cd821",
+          "branch": "codex/local-source-labels",
+          "present_in_preserved_tip": true,
+          "fork_branch_matches": true
+        },
+        {
+          "number": 8,
+          "head": "8295e8370b812978cf4aeb12ba749acb6f42e7ae",
+          "branch": "codex/visible-title-hints",
+          "present_in_preserved_tip": true,
+          "fork_branch_matches": true
+        },
+        {
+          "number": 7,
+          "head": "31815127c37423a27a14c0879453e79a4373ba70",
+          "branch": "codex/visible-episode-hints",
+          "present_in_preserved_tip": true,
+          "fork_branch_matches": true
+        },
+        {
+          "number": 6,
+          "head": "b854f2b0838975b0053a0bfc3a59ef9f8c0418db",
+          "branch": "codex/native-source-hints",
+          "present_in_preserved_tip": true,
+          "fork_branch_matches": true
+        },
+        {
+          "number": 5,
+          "head": "0255a8b7f8f6d822a92f8c03e8350597d4134617",
+          "branch": "codex/audio-recovery-suggestions",
+          "present_in_preserved_tip": true,
+          "fork_branch_matches": true
+        },
+        {
+          "number": 4,
+          "head": "f1eedc7d9b0097a5d380dad1817e13766b1feb54",
+          "branch": "codex/native-release-reports",
+          "present_in_preserved_tip": true,
+          "fork_branch_matches": true
+        }
+      ]
+    }
+  }
+}

@@ -1,0 +1,34 @@
+{
+  "test_reliability": {
+    "passed": true,
+    "tests": {
+      "pass": 3282,
+      "skip": 7
+    },
+    "packages": [
+      {
+        "package": "handlers",
+        "result": "pass"
+      },
+      {
+        "package": "services/history",
+        "result": "pass"
+      },
+      {
+        "package": "services/debrid",
+        "result": "pass"
+      }
+    ]
+  },
+  "head": "f24fa1b9c82d23544401a160752f7a9dc81ac210",
+  "upstream": "8b278f9e00ed8c100839e3abf3b9b0f688c2dfe0",
+  "only_test_files_changed": true,
+  "changed_files": [
+    "backend/handlers/video_live_usage_test.go",
+    "backend/services/debrid/torrent_preflight_test.go",
+    "backend/services/history/service_test.go"
+  ],
+  "three_original_patches_preserved_exactly": true,
+  "production_code_unchanged": true,
+  "package_names_relative_to_backend": true
+}
