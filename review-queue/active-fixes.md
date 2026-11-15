@@ -1,4 +1,6 @@
-# Active corrections
+# Merged independent corrections
+
+PRs [81](https://github.com/godver3/mediastorm/pull/81), [82](https://github.com/godver3/mediastorm/pull/82) and [96](https://github.com/godver3/mediastorm/pull/96) were merged by the maintainer on 15 November 2026 at 19:30 Europe/Berlin. No own upstream PR is open in either repository. Deferred features remain in the forks pending scope discussion.
 
 All three source heads remain unchanged. Their common upstream base is `8b278f9e00ed8c100839e3abf3b9b0f688c2dfe0`. There is no required merge order and no deferred feature dependency. Test counts include subtests where recorded.
 
