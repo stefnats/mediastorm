@@ -60,6 +60,7 @@ type JellyfinItem struct {
 	OfficialRating    string                `json:"OfficialRating,omitempty"`
 	RunTimeTicks      int64                 `json:"RunTimeTicks,omitempty"`
 	SeriesID          string                `json:"SeriesId,omitempty"`
+	PartCount         *int                  `json:"PartCount,omitempty"`
 	ImageTags         map[string]string     `json:"ImageTags,omitempty"`
 	BackdropImageTags []string              `json:"BackdropImageTags,omitempty"`
 	MediaSources      []JellyfinMediaSource `json:"MediaSources,omitempty"`
@@ -77,6 +78,7 @@ type JellyfinMediaStream struct {
 	Width      int    `json:"Width,omitempty"`
 	Height     int    `json:"Height,omitempty"`
 	VideoRange string `json:"VideoRange,omitempty"`
+	Language   string `json:"Language,omitempty"`
 }
 
 type JellyfinMediaSource struct {
@@ -184,7 +186,7 @@ func (c *Client) GetLibraryItems(serverURL, token, userID, libraryID, collection
 		"EnableImages": {"true"}, "EnableTotalRecordCount": {"true"},
 	}
 	if strings.EqualFold(collectionType, "tvshows") {
-		params.Set("IncludeItemTypes", "Episode")
+		params.Set("IncludeItemTypes", "Series,Episode")
 	} else if strings.EqualFold(collectionType, "movies") {
 		params.Set("IncludeItemTypes", "Movie")
 	} else {

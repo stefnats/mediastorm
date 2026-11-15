@@ -29,7 +29,7 @@ func (s *Service) RevisionFor(ctx PlaybackContext) string {
 			if entry.ExpiresAt != nil && !entry.ExpiresAt.After(now) {
 				continue
 			}
-			if ctx.TitleID != "" && scope.TitleID != strings.ToLower(strings.TrimSpace(ctx.TitleID)) ||
+			if ctx.TitleID != "" && reportTitleIdentity(scope.TitleID) != reportTitleIdentity(ctx.TitleID) ||
 				scope.ProfileID != "" && scope.ProfileID != ctx.ProfileID ||
 				scope.ClientID != "" && scope.ClientID != ctx.ClientID ||
 				ctx.TitleID != "" && scope.AudioLanguage != "" && language.NormalizeToCode(ctx.AudioLanguage) != scope.AudioLanguage {
@@ -37,7 +37,7 @@ func (s *Service) RevisionFor(ctx PlaybackContext) string {
 			}
 			if ctx.TitleID != "" && scope.SeasonNumber != nil && (ctx.Episode == nil || scope.EpisodeNumber == nil ||
 				ctx.Episode.SeasonNumber != *scope.SeasonNumber || ctx.Episode.EpisodeNumber != *scope.EpisodeNumber ||
-				models.EpisodeNumberingKey(ctx.Episode.Numbering) != scope.NumberingKey) {
+				reportNumberingIdentity(models.EpisodeNumberingKey(ctx.Episode.Numbering)) != reportNumberingIdentity(scope.NumberingKey)) {
 				continue
 			}
 			if ctx.TitleID != "" && scope.SeasonNumber == nil && ctx.Episode != nil {

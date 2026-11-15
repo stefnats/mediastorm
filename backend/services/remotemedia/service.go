@@ -432,7 +432,22 @@ func (s *Service) fetch(ctx context.Context, library *models.RemoteMediaLibrary)
 func normalizeJellyfin(library *models.RemoteMediaLibrary, source []jellyfin.JellyfinItem) []models.RemoteMediaItem {
 	now := time.Now().UTC()
 	result := []models.RemoteMediaItem{}
+	parents := make(map[string]*models.LocalMediaExternalIDs)
+	ambiguous := make(map[string]bool)
 	for _, item := range source {
+		if item.Type != "Series" || item.ID == "" {
+			continue
+		}
+		ids := jellyfinExternalIDs(item.ProviderIDs)
+		if previous, ok := parents[item.ID]; ok && *previous != *ids {
+			ambiguous[item.ID] = true
+		}
+		parents[item.ID] = ids
+	}
+	for _, item := range source {
+		if item.Type == "Series" {
+			continue
+		}
 		createdAt := now
 		if item.DateCreated != nil && !item.DateCreated.IsZero() {
 			createdAt = item.DateCreated.UTC()
@@ -445,10 +460,14 @@ func normalizeJellyfin(library *models.RemoteMediaLibrary, source []jellyfin.Jel
 			title = item.SeriesName
 			episodeTitle = item.Name
 		}
-		exts := &models.LocalMediaExternalIDs{IMDB: item.ProviderIDs["imdb"], TMDB: item.ProviderIDs["tmdb"], TVDB: item.ProviderIDs["tvdb"]}
+		exts := jellyfinExternalIDs(item.ProviderIDs)
 		sources := item.MediaSources
 		if len(sources) == 0 {
 			sources = []jellyfin.JellyfinMediaSource{{ID: item.ID, Name: item.Name}}
+		}
+		sourceIDs := make(map[string]int, len(sources))
+		for _, media := range sources {
+			sourceIDs[media.ID]++
 		}
 		for _, media := range sources {
 			durationTicks := media.RunTimeTicks
@@ -460,6 +479,17 @@ func normalizeJellyfin(library *models.RemoteMediaLibrary, source []jellyfin.Jel
 				SeasonNumber: item.SeasonNum, EpisodeNumber: item.EpisodeNum, EpisodeTitle: episodeTitle, ExternalIDs: exts,
 				FileName: filepath.Base(media.Path), Container: media.Container, DurationSeconds: float64(durationTicks) / 10_000_000, SizeBytes: media.Size, CreatedAt: createdAt, UpdatedAt: now,
 				ProviderData: map[string]string{"itemId": item.ID, "mediaSourceId": media.ID}}
+			// Jellyfin intentionally omits PartCount for an ordinary single-part
+			// Movie/Episode DTO. Only recognized complete source payloads may use
+			// that omission; missing MediaSources, paths or duplicate IDs cannot.
+			completeDTO := item.Type == "Movie" && library.Type == models.LocalMediaLibraryTypeMovie || item.Type == "Episode" && library.Type == models.LocalMediaLibraryTypeShow
+			v.SinglePart = completeDTO && media.ID != "" && sourceIDs[media.ID] == 1 && media.Path != "" && (item.PartCount == nil || *item.PartCount >= 0 && *item.PartCount <= 1)
+			if item.Type == "Episode" {
+				v.EpisodeExternalIDs = exts
+				if !ambiguous[item.SeriesID] {
+					v.SeriesExternalIDs = parents[item.SeriesID]
+				}
+			}
 			for _, stream := range media.MediaStreams {
 				if stream.Type == "Video" {
 					v.VideoCodec = stream.Codec
@@ -470,6 +500,9 @@ func normalizeJellyfin(library *models.RemoteMediaLibrary, source []jellyfin.Jel
 				if stream.Type == "Audio" && v.AudioCodec == "" {
 					v.AudioCodec = stream.Codec
 				}
+				if stream.Type == "Audio" && strings.TrimSpace(stream.Language) != "" {
+					v.AudioLanguages = append(v.AudioLanguages, strings.TrimSpace(stream.Language))
+				}
 			}
 			v.VersionLabel = versionLabel(v.Height, v.VideoCodec, v.HDRFormat, media.Name)
 			v.StreamPath = "jellyfinmedia:" + v.ID
@@ -477,6 +510,10 @@ func normalizeJellyfin(library *models.RemoteMediaLibrary, source []jellyfin.Jel
 		}
 	}
 	return result
+}
+
+func jellyfinExternalIDs(ids map[string]string) *models.LocalMediaExternalIDs {
+	return &models.LocalMediaExternalIDs{IMDB: ids["imdb"], TMDB: ids["tmdb"], TVDB: ids["tvdb"]}
 }
 
 func normalizePlex(library *models.RemoteMediaLibrary, source []plex.PlexLibraryItem) []models.RemoteMediaItem {
@@ -519,6 +556,12 @@ func normalizePlex(library *models.RemoteMediaLibrary, source []plex.PlexLibrary
 					FileName: filepath.Base(part.File), Container: part.Container, VideoCodec: media.VideoCodec, AudioCodec: media.AudioCodec,
 					Width: media.Width, Height: media.Height, HDRFormat: media.VideoDynamicRange, DurationSeconds: float64(item.Duration) / 1000, SizeBytes: part.Size, CreatedAt: createdAt, UpdatedAt: now,
 					ProviderData: map[string]string{"partKey": part.Key, "posterPath": posterPath, "backdropPath": backdropPath}}
+				completeDTO := item.Type == "movie" && library.Type == models.LocalMediaLibraryTypeMovie || item.Type == "episode" && library.Type == models.LocalMediaLibraryTypeShow
+				v.SinglePart = completeDTO && len(media.Part) == 1 && part.ID > 0 && part.Key != ""
+				if item.Type == "episode" {
+					v.SeriesExternalIDs = plexExternalIDs(item.GrandparentGuid)
+					v.EpisodeExternalIDs = plexExternalIDs(item.Guid)
+				}
 				v.VersionLabel = versionLabel(v.Height, v.VideoCodec, v.HDRFormat, media.VideoResolution)
 				v.StreamPath = "plexmedia:" + v.ID
 				result = append(result, v)

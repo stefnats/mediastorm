@@ -272,7 +272,7 @@ func TestContentLocalPreferenceSeasonFingerprintAndRemoteReadyInvalidation(t *te
 	}
 	h.SetContentPreferencesService(prefs)
 	title := "tmdb:tv:123"
-	ep := &models.EpisodeReference{SeasonNumber: 2, EpisodeNumber: 4}
+	ep := &models.EpisodeReference{Numbering: &models.EpisodeNumbering{SeriesID: title, Ordering: "official"}, SeasonNumber: 2, EpisodeNumber: 4}
 	before := h.prequeueSettingsScopeKey("profile", "", title)
 	if err := prefs.Set("profile", models.ContentPreference{ContentID: title + ":season:2", ContentType: "series", PreferLocalFiles: models.BoolPtr(true)}); err != nil {
 		t.Fatal(err)

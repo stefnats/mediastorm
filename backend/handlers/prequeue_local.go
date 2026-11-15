@@ -26,11 +26,13 @@ type prequeueLibraryAccess interface {
 }
 
 type prequeueLocalScope struct {
-	excludedResult *models.NZBResult
-	accountID      string
-	master         bool
-	tmdbID         string
-	tvdbID         string
+	excludedResult            *models.NZBResult
+	accountID                 string
+	master                    bool
+	tmdbID                    string
+	tvdbID                    string
+	automaticLibrarySelection bool
+	libraryEpisodeVerified    bool
 }
 
 func (h *PrequeueHandler) SetLocalFallback(service prequeueLocalMedia, access prequeueLibraryAccess) {
@@ -98,6 +100,9 @@ func (h *PrequeueHandler) findLocalFallbackCandidates(ctx context.Context, scope
 		return nil
 	}
 	scope := scopes[0]
+	if scope.automaticLibrarySelection && query.MediaType != "movie" && !scope.libraryEpisodeVerified {
+		return nil
+	}
 	if scope.tmdbID != "" {
 		query.TMDBID = scope.tmdbID
 	}
@@ -110,7 +115,7 @@ func (h *PrequeueHandler) findLocalFallbackCandidates(ctx context.Context, scope
 		allowed, err := h.localAccess.CanAccess(checkCtx, libraryID, scope.accountID, userID, scope.master)
 		return err == nil && allowed
 	})
-	if err != nil {
+	if err != nil || checkCtx.Err() != nil {
 		return nil
 	}
 	filtered := items[:0]
@@ -136,6 +141,10 @@ func (h *PrequeueHandler) resolveLocalItem(ctx context.Context, item models.Loca
 	if current.LibraryID != item.LibraryID || current.MatchedTitleID != item.MatchedTitleID || current.SeasonNumber != item.SeasonNumber || current.EpisodeNumber != item.EpisodeNumber || current.IsMissing || current.MatchStatus != item.MatchStatus || !reflect.DeepEqual(current.ExternalIDs, item.ExternalIDs) {
 		return nil, errors.New("local library match changed; start playback again")
 	}
+	automatic := opts.localScope != nil && opts.localScope.automaticLibrarySelection
+	if automatic && localHintFingerprint(*current) != localHintFingerprint(item) {
+		return nil, errors.New("local library identity changed; start playback again")
+	}
 	if opts.localScope == nil || h.localAccess == nil || !h.localItemAllowed(*current, opts.userID) {
 		return nil, errors.New("local library file unavailable")
 	}
@@ -154,6 +163,30 @@ func (h *PrequeueHandler) resolveLocalItem(ctx context.Context, item models.Loca
 		return nil, errors.New("local library file exceeds the current playback size limit")
 	}
 	path := localmedia.BuildStreamPath(*current)
+	if automatic {
+		if err := validateLibrarySize(current.SizeBytes, opts); err != nil {
+			return nil, err
+		}
+		if err := validateLibraryTerms(current.FileName, opts.localFilter); err != nil {
+			return nil, err
+		}
+		probe, err := h.probeLibraryItem(ctx, path)
+		if err != nil {
+			return nil, err
+		}
+		if err := validateLocalFallbackQuality(probe, opts.localFilter); err != nil {
+			return nil, err
+		}
+		after, err := h.localFallback.GetFallbackItem(ctx, current.ID)
+		if err != nil || after == nil || localHintFingerprint(*after) != localHintFingerprint(*current) || !h.localItemAllowed(*after, opts.userID) {
+			return nil, errors.New("local library identity changed during validation")
+		}
+		allowed, err := h.localAccess.CanAccess(ctx, after.LibraryID, opts.localScope.accountID, opts.userID, opts.localScope.master)
+		if err != nil || !allowed {
+			return nil, errors.New("local library file unavailable")
+		}
+		return &models.PlaybackResolution{WebDAVPath: path, FileSize: current.SizeBytes, HealthStatus: "healthy", Probe: probe}, nil
+	}
 	select {
 	case localFallbackProbes <- struct{}{}:
 	case <-ctx.Done():
@@ -183,7 +216,7 @@ func (h *PrequeueHandler) resolveLocalItem(ctx context.Context, item models.Loca
 	}
 }
 
-func (h *PrequeueHandler) resolveLocalFallback(ctx context.Context, prequeueID string, items []models.LocalMediaItem, opts prequeueResolutionOptions) (prequeueResolutionChoice, error) {
+func (h *PrequeueHandler) resolveLocalFallback(ctx context.Context, prequeueID string, items []models.LocalMediaItem, opts prequeueResolutionOptions, remoteItems ...[]models.RemoteMediaItem) (prequeueResolutionChoice, error) {
 	localCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
 	opts.localItems = make(map[string]models.LocalMediaItem, len(items))
@@ -191,7 +224,18 @@ func (h *PrequeueHandler) resolveLocalFallback(ctx context.Context, prequeueID s
 	for _, item := range items {
 		path := localmedia.BuildStreamPath(item)
 		opts.localItems[path] = item
-		results = append(results, models.NZBResult{Title: item.FileName, Link: path, SizeBytes: item.SizeBytes, ServiceType: models.ContentServiceType("local"), Attributes: map[string]string{"localLibraryId": item.LibraryID, "profileId": opts.userID}})
+		results = append(results, models.NZBResult{Title: item.FileName, Link: path, SizeBytes: item.SizeBytes, ServiceType: models.ContentServiceType("local"), Attributes: map[string]string{"localLibraryId": item.LibraryID, "profileId": opts.userID, "libraryItemId": item.ID, "libraryIdentity": localHintFingerprint(item)}})
+	}
+	if len(remoteItems) == 1 {
+		opts.remoteItems = make(map[string]models.RemoteMediaItem, len(remoteItems[0]))
+		for _, item := range remoteItems[0] {
+			provider, _, ok := libraryStreamIdentity(item.StreamPath)
+			if !ok || provider == "local" {
+				continue
+			}
+			opts.remoteItems[item.StreamPath] = item
+			results = append(results, models.NZBResult{Title: item.FileName, Link: item.StreamPath, SizeBytes: item.SizeBytes, ServiceType: models.ContentServiceType(provider), Attributes: map[string]string{"localLibraryId": item.LibraryID, "profileId": opts.userID, "provider": provider, "libraryItemId": item.ID, "libraryIdentity": remoteLibraryIdentity(item)}})
+		}
 	}
 	choice, err := h.resolveCandidates(localCtx, prequeueID, newSliceCandidateSource(results), opts)
 	// Local catalog entries cannot be handed to the Usenet/debrid migration API.
@@ -223,6 +267,12 @@ func validateLocalFallbackQuality(probe *VideoFullResult, settings models.Filter
 }
 
 func (h *PrequeueHandler) localEntryAllowed(r *http.Request, entry *playback.PrequeueEntry) bool {
+	if entry == nil {
+		return false
+	}
+	if provider, id, ok := libraryStreamIdentity(entry.StreamPath); ok && provider != "local" {
+		return h.remoteEntryAllowed(r, entry, id)
+	}
 	itemID, local := localmedia.ParseStreamPath(entry.StreamPath)
 	if !local {
 		return true
@@ -236,11 +286,20 @@ func (h *PrequeueHandler) localEntryAllowed(r *http.Request, entry *playback.Pre
 	if err != nil || item == nil || !h.localItemAllowed(*item, entry.UserID) {
 		return false
 	}
+	if entry.AutomaticLibrarySelection && (entry.LibraryIdentity == "" || localHintFingerprint(*item) != entry.LibraryIdentity) {
+		return false
+	}
 	allowed, err := h.localAccess.CanAccess(ctx, item.LibraryID, auth.GetAccountID(r), entry.UserID, auth.IsMaster(r))
 	return err == nil && allowed
 }
 
 func (h *PrequeueHandler) validateReadyEntryForRequest(r *http.Request, entry *playback.PrequeueEntry, requests ...playback.PrequeueRequest) error {
+	if entry == nil {
+		return errors.New("preparation unavailable")
+	}
+	if len(requests) == 1 && entry.AutomaticLibrarySelection != requests[0].AutomaticLibrarySelection {
+		return errors.New("source selection mode changed")
+	}
 	if entry != nil && entry.SelectedResult != nil {
 		ctx := h.reportContextForPrequeue(entry.ID, entry.UserID, normalizeClientID(r.Header.Get("X-Client-ID")), entry.TargetEpisode)
 		ctx.AudioTrackIndex = &entry.SelectedAudioTrack
@@ -251,14 +310,14 @@ func (h *PrequeueHandler) validateReadyEntryForRequest(r *http.Request, entry *p
 	if !h.localEntryAllowed(r, entry) {
 		return errors.New("local library file unavailable")
 	}
-	if _, local := localmedia.ParseStreamPath(entry.StreamPath); !local && h.localPlaybackPreferredFor(entry.UserID, entry.TitleID, entry.TargetEpisode) {
+	if _, _, library := libraryStreamIdentity(entry.StreamPath); !library && h.localPlaybackPreferredFor(entry.UserID, entry.TitleID, entry.TargetEpisode) {
 		query := models.LocalMediaMatchQuery{TitleID: entry.TitleID, MediaType: entry.MediaType}
-		scope := prequeueLocalScope{accountID: auth.GetAccountID(r), master: auth.IsMaster(r)}
+		scope := prequeueLocalScope{accountID: auth.GetAccountID(r), master: auth.IsMaster(r), automaticLibrarySelection: entry.AutomaticLibrarySelection, libraryEpisodeVerified: entry.LibraryEpisodeVerified}
 		if len(requests) == 1 {
 			query.IMDBID = requests[0].ImdbID
 			scope.tmdbID, scope.tvdbID = requests[0].TmdbID, requests[0].TvdbID
 		}
-		if len(h.findLocalFallbackCandidates(r.Context(), []prequeueLocalScope{scope}, entry.UserID, query, entry.TargetEpisode)) > 0 {
+		if len(h.findLocalFallbackCandidates(r.Context(), []prequeueLocalScope{scope}, entry.UserID, query, entry.TargetEpisode))+len(h.findRemoteFallbackCandidates(r.Context(), []prequeueLocalScope{scope}, entry.UserID, query, entry.TargetEpisode)) > 0 {
 			return errors.New("local preference requires a fresh source selection")
 		}
 	}

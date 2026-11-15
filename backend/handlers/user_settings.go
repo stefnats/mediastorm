@@ -82,7 +82,10 @@ func (h *UserSettingsHandler) GetSettings(w http.ResponseWriter, r *http.Request
 
 	scopeUserLiveSettings(&settings, h.ConfigManager, userID, auth.GetAccountID(r), auth.IsMaster(r))
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(settings)
+	json.NewEncoder(w).Encode(struct {
+		models.UserSettings
+		AutomaticLibrarySelectionSupported bool `json:"automaticLibrarySelectionSupported"`
+	}{settings, true})
 }
 
 // GetFrontendSettingState reports which exposed fields are stored as profile

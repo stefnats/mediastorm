@@ -2,6 +2,7 @@ package models
 
 import (
 	"fmt"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -44,7 +45,7 @@ func ContentPreferenceSourceIDs(titleID string, episode *EpisodeReference) []str
 		return nil
 	}
 	ids := make([]string, 0, 3)
-	if episode != nil && episode.SeasonNumber >= 0 {
+	if OfficialEpisodeCoordinates(titleID, episode) {
 		seasonID := fmt.Sprintf("%s:season:%d", titleID, episode.SeasonNumber)
 		if episode.EpisodeNumber > 0 {
 			ids = append(ids, fmt.Sprintf("%s:episode:%d", seasonID, episode.EpisodeNumber))
@@ -52,4 +53,42 @@ func ContentPreferenceSourceIDs(titleID string, episode *EpisodeReference) []str
 		ids = append(ids, seasonID)
 	}
 	return append(ids, titleID)
+}
+
+// CanonicalSeriesIdentity folds only known historical series aliases. It does
+// not infer relationships between different metadata providers.
+func CanonicalSeriesIdentity(id string) string {
+	raw := strings.TrimSpace(id)
+	parts := strings.Split(strings.ToLower(raw), ":")
+	positive := func(value string) bool { n, err := strconv.ParseInt(value, 10, 64); return err == nil && n > 0 }
+	if len(parts) == 3 && positive(parts[2]) && (parts[1] == "series" || parts[0] == "tmdb" && parts[1] == "tv") && (parts[0] == "tmdb" || parts[0] == "tvdb") {
+		return parts[0] + ":series:" + parts[2]
+	}
+	if len(parts) == 2 && parts[0] == "tvdb" && positive(parts[1]) {
+		return "tvdb:series:" + parts[1]
+	}
+	return raw
+}
+
+// OfficialEpisodeCoordinates requires provenance for child-specific rules.
+// verifiedSeriesIDs must come from trusted metadata, not client-supplied aliases.
+// Unproven legacy coordinates retain title inheritance.
+func OfficialEpisodeCoordinates(titleID string, episode *EpisodeReference, verifiedSeriesIDs ...string) bool {
+	if episode == nil || episode.Numbering == nil || episode.SeasonNumber < 0 || episode.EpisodeNumber <= 0 {
+		return false
+	}
+	order := strings.ToLower(strings.TrimSpace(episode.Numbering.Ordering))
+	if order != "" && order != "official" {
+		return false
+	}
+	owner := CanonicalSeriesIdentity(episode.Numbering.SeriesID)
+	if owner == "" {
+		return false
+	}
+	for _, id := range append([]string{titleID}, verifiedSeriesIDs...) {
+		if owner == CanonicalSeriesIdentity(id) {
+			return true
+		}
+	}
+	return false
 }

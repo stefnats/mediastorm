@@ -1,0 +1,18 @@
+{
+  "titleId": "tmdb:series:41",
+  "titleName": "Synthetic series",
+  "mediaType": "series",
+  "userId": "synthetic-profile",
+  "clientId": "synthetic-client",
+  "reason": "details",
+  "skipHLS": true,
+  "automaticLibrarySelection": true,
+  "tmdbId": "41",
+  "seasonNumber": 1,
+  "episodeNumber": 1,
+  "episodeId": "tvdb:episode:123",
+  "numbering": {
+    "seriesId": "tvdb:series:74852",
+    "ordering": "dvd"
+  }
+}

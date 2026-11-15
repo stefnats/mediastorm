@@ -1,0 +1,10 @@
+{
+  "titleId": "tmdb:movie:41",
+  "titleName": "Synthetic",
+  "mediaType": "movie",
+  "userId": "synthetic-profile",
+  "clientId": "synthetic-client",
+  "reason": "details",
+  "skipHLS": true,
+  "automaticLibrarySelection": true
+}

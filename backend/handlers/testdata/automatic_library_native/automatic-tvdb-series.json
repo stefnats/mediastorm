@@ -1,0 +1,18 @@
+{
+  "titleId": "tvdb:series:74852",
+  "titleName": "Synthetic series",
+  "mediaType": "series",
+  "userId": "synthetic-profile",
+  "clientId": "synthetic-client",
+  "reason": "details",
+  "skipHLS": true,
+  "automaticLibrarySelection": true,
+  "tvdbId": "74852",
+  "seasonNumber": 1,
+  "episodeNumber": 1,
+  "episodeId": "tvdb:episode:123",
+  "numbering": {
+    "seriesId": "tvdb:series:74852",
+    "ordering": "official"
+  }
+}
