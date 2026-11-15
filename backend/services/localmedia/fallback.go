@@ -69,6 +69,24 @@ func fallbackIdentityMatches(item models.LocalMediaItem, query models.LocalMedia
 			}
 		}
 	}
+	// Confirmed historical series anchors remain useful without optional cached
+	// metadata. Fold only known aliases from the same provider and media kind;
+	// library rights and the exact episode are still checked by the caller.
+	matched := strings.ToLower(strings.TrimSpace(localMediaResolvedTitleID(item)))
+	requested := strings.ToLower(strings.TrimSpace(query.TitleID))
+	canonical := models.CanonicalSeriesIdentity(matched)
+	if item.LibraryType == models.LocalMediaLibraryTypeShow && normalizeLookupLibraryType(query.MediaType) == models.LocalMediaLibraryTypeShow &&
+		canonical == models.CanonicalSeriesIdentity(requested) && (canonical != matched || canonical != requested) {
+		for _, anchor := range []struct{ prefix, supplied string }{{"tmdb:series:", query.TMDBID}, {"tvdb:series:", query.TVDBID}} {
+			if strings.HasPrefix(canonical, anchor.prefix) {
+				if supplied := strings.TrimSpace(anchor.supplied); supplied != "" && supplied != strings.TrimPrefix(canonical, anchor.prefix) {
+					return false
+				}
+				query.TitleID = localMediaResolvedTitleID(item)
+				break
+			}
+		}
+	}
 	return localMediaItemMatchesLookup(item, query)
 }
 
