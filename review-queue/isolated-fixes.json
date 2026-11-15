@@ -1,0 +1,103 @@
+{
+  "passed": true,
+  "watchparty": {
+    "head": "72c4e347da9a49a75ff5fd6ec8eda88a09277712",
+    "changed_files": 8,
+    "services": {
+      "passed": true,
+      "tests": {
+        "pass": 56
+      },
+      "packages": [
+        {
+          "path": "services/sessions",
+          "result": "pass"
+        },
+        {
+          "path": "services/watchrooms",
+          "result": "pass"
+        }
+      ]
+    },
+    "handler": {
+      "passed": true,
+      "tests": {
+        "pass": 1
+      },
+      "packages": [
+        {
+          "path": "handlers",
+          "result": "pass"
+        }
+      ]
+    },
+    "requires_deferred_features": false
+  },
+  "profile_preparation": {
+    "head": "2f772452ab0bad47afda45fb41f6887d8bb1a887",
+    "changed_files": 2,
+    "services": {
+      "passed": true,
+      "tests": {
+        "pass": 195
+      },
+      "packages": [
+        {
+          "path": "services/playback",
+          "result": "pass"
+        },
+        {
+          "path": "services/prewarm",
+          "result": "pass"
+        }
+      ]
+    },
+    "handler": {
+      "passed": true,
+      "tests": {
+        "pass": 7
+      },
+      "packages": [
+        {
+          "path": "handlers",
+          "result": "pass"
+        }
+      ]
+    },
+    "requires_deferred_features": false
+  },
+  "test_reliability": {
+    "test_reliability": {
+      "passed": true,
+      "tests": {
+        "pass": 3282,
+        "skip": 7
+      },
+      "packages": [
+        {
+          "package": "handlers",
+          "result": "pass"
+        },
+        {
+          "package": "services/history",
+          "result": "pass"
+        },
+        {
+          "package": "services/debrid",
+          "result": "pass"
+        }
+      ]
+    },
+    "head": "f24fa1b9c82d23544401a160752f7a9dc81ac210",
+    "upstream": "8b278f9e00ed8c100839e3abf3b9b0f688c2dfe0",
+    "only_test_files_changed": true,
+    "changed_files": [
+      "backend/handlers/video_live_usage_test.go",
+      "backend/services/debrid/torrent_preflight_test.go",
+      "backend/services/history/service_test.go"
+    ],
+    "three_original_patches_preserved_exactly": true,
+    "production_code_unchanged": true
+  },
+  "package_names_relative_to_backend": true
+}

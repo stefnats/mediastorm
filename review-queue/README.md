@@ -32,7 +32,7 @@ The source branches and original test evidence remain available. Grouping below 
 
 The last combined backend verification passed 8,204 Go cases at the preserved backend product source. The latest native verification passed 882 tests and built both APKs. These are historical checks of those exact feature trees; they do not replace isolated validation for future proposals. Native device acceptance remains pending. No upstream merge or production deployment is part of this reorganization.
 
-[Test-package validation](test-reliability.json) and [preservation checks for every original head](original-pr-preservation.json) are recorded alongside this plan.
+[Test-package validation](test-reliability.json), [isolated checks of all three review branches](isolated-fixes.json) and [preservation checks for every original head](original-pr-preservation.json) are recorded alongside this plan.
 
 ## Original requests and branches
 
