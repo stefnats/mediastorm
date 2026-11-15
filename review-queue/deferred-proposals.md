@@ -1,6 +1,6 @@
 # Deferred proposals
 
-PRs [81](https://github.com/godver3/mediastorm/pull/81), [82](https://github.com/godver3/mediastorm/pull/82) and [96](https://github.com/godver3/mediastorm/pull/96) were merged by the maintainer on 15 November 2026 at 19:30 Europe/Berlin. No own upstream PR is open in either repository. Deferred features remain in the forks pending scope discussion. Successive fork-only entries below retain the review status at the time of each package.
+PRs [81](https://github.com/godver3/mediastorm/pull/81), [82](https://github.com/godver3/mediastorm/pull/82) and [96](https://github.com/godver3/mediastorm/pull/96) were merged by the maintainer on 15 November 2026 at 19:30 Europe/Berlin. At that check, no own upstream PR was open in either repository. A later independently created draft [103](https://github.com/godver3/mediastorm/pull/103), opened on 16 November at 00:07 Europe/Berlin, concerns opt-in NZB download policy and remains untouched by this work. Deferred features remain in the forks pending scope discussion. Successive fork-only entries below retain the review status at the time of each package.
 
 These are candidate review boundaries for discussion. All listed feature PRs are closed; their source remains in the forks. Their original histories contain stacked changes, so neither an old PR diff nor a group below is ready to be resubmitted as a single review unit. No new isolation, extraction or test run is claimed here.
 
@@ -208,3 +208,23 @@ backend cases with 38 explicit opt-in skips, including the seven automatic and
 Its built binary has matching clean commit metadata. Packages remain separately
 reviewable fork branches; no upstream PR, deployment or application activation
 was performed by this work package.
+
+
+## Exact fork review deltas
+
+These are development deltas against inherited fork bases, not independent
+upstream submissions. The combined branch is verification evidence. Any later
+proposal still needs extraction onto an agreed upstream base and its own checks.
+
+| Package | Exact reviewed delta |
+| --- | --- |
+| Automatic library backend | [69cc67ac to 8e9eeebd](https://github.com/stefnats/mediastorm/compare/69cc67ac7d41628be4a2a9eaa8705a65f3c9c5e3...8e9eeebda2fb13bba0e1ef2461cdb0dc6b99638b) |
+| Automatic library TV/phone | [70e01fcb to d1250c19](https://github.com/stefnats/mediastorm-androidtv/compare/70e01fcb0ace7cfd9ba345ec946e3695f7a2a2b2...d1250c19fc5cee529aaecc12e03c3b457798da1a) |
+| Local historical series aliases | [1d74f9e6 to ccffcfc2](https://github.com/stefnats/mediastorm/compare/1d74f9e6cf4a49445c9f10be5ac67c91b26f20a0...ccffcfc24c1440918bfa619c5da7ab08eb34c31b) |
+
+The two-file alias follow-up recognizes only known numeric same-provider series
+anchors without optional cached metadata. It retains exact-episode, current
+library access and conflicting-ID checks. Its full localmedia package and
+13 new table cases pass; independent review is clean. This follow-up is not part
+of the earlier 8,722-case run. It is queued for the next combined verification.
+No upstream PR or deployment was made.
