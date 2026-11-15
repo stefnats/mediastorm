@@ -105,5 +105,24 @@ quality, rights, report revisions and expiry without new search/probe work.
 Validation: 162 source/report cases passed, one explicit skip; 87 repeated race
 cases, the full OpenAPI contract suite and real local HTTP title/episode responses.
 Two independent source reviews completed without remaining concrete findings.
-Native display and combined integration verification are in progress. No migration,
-deployment or new upstream proposal.
+Native display is complete in [feature/partial-series-hints](https://github.com/stefnats/mediastorm-androidtv/tree/feature/partial-series-hints): 969 tests and both APKs passed after an independent review found and corrected stale aggregate hints. Twelve native serializer examples match the backend schema. Physical rendering, focus and touch remain untested. No migration, deployment or new upstream proposal.
+
+## Fork-only split kids-rating API routing
+
+[feature/kids-rating-api-routes](https://github.com/stefnats/mediastorm/tree/feature/kids-rating-api-routes)
+registers the existing movie and TV cap handlers in the regular profile API.
+The existing protected router retains ownership, profile PIN and fresh parental
+authorization. The legacy combined route and admin/account web routes are unchanged.
+
+Validation: 62 API cases including 21 real-router regressions, plus 35 existing
+parent-authorization cases. Two source files changed; no regional policy enabled.
+
+## Combined development verification
+
+[feature/integrated-requirements](https://github.com/stefnats/mediastorm/tree/feature/integrated-requirements)
+retains the separate source packages and combines rule forecasts, scoped local
+preferences and partial-series coverage. The combined baseline at
+`ab8035022f69fa3832f6b4d1d6046d36ed9a784c` passed 8,477 backend cases with 38
+explicit skips, including synthetic PostgreSQL and authenticated browser fixtures.
+The separately tested split-rating routing fix is included in the current branch.
+This is a development integration branch, not a new upstream proposal or deployment.
