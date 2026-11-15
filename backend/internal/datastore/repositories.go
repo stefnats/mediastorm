@@ -37,6 +37,12 @@ type UserRepository interface {
 	Count(ctx context.Context) (int64, error)
 }
 
+// ReminderRepository atomically changes one profile's subscriptions and inbox.
+type ReminderRepository interface {
+	Get(context.Context, string) (models.ReminderProfileState, error)
+	Update(context.Context, string, func(*models.ReminderProfileState) error) error
+}
+
 // NotificationRepository manages profile notification destinations and release observations.
 type NotificationRepository interface {
 	GetChannel(ctx context.Context, id string) (*models.NotificationChannel, error)

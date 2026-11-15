@@ -33,6 +33,7 @@ type DetailsBundleHandler struct {
 	userSettings      userSettingsProvider
 	watchlist         watchlistMembership
 	catalogueObserver func(*http.Request, []models.Title)
+	reminderObserver  func(*http.Request, *models.Title, *models.SeriesDetails)
 }
 
 // movieWatchState answers "is this movie marked watched?" across ID forms.
@@ -87,7 +88,14 @@ func (h *DetailsBundleHandler) SetCatalogueObserver(observer func(*http.Request,
 	h.catalogueObserver = observer
 }
 
+func (h *DetailsBundleHandler) SetReminderObserver(observer func(*http.Request, *models.Title, *models.SeriesDetails)) {
+	h.reminderObserver = observer
+}
+
 func (h *DetailsBundleHandler) observeCatalogue(w http.ResponseWriter, r *http.Request, movie *models.Title, series *models.SeriesDetails, similar []models.Title) {
+	if h.reminderObserver != nil {
+		h.reminderObserver(r, movie, series)
+	}
 	if h.catalogueObserver == nil {
 		return
 	}

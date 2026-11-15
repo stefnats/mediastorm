@@ -87,6 +87,7 @@ import (
 	"github.com/gorilla/mux"
 	"golang.org/x/time/rate"
 	"gopkg.in/natefinch/lumberjack.v2"
+	"novastream/services/reminders"
 )
 
 func main() {
@@ -724,6 +725,28 @@ func main() {
 	metadataHandler.Interests = interestService
 	titleRatingsService := titleratings.New(store.TitleRatings())
 	metadataHandler.TitleRatings = titleRatingsService
+	var reminderRepo reminders.Repository
+	if store != nil {
+		reminderRepo = store.Reminders()
+	} else {
+		var reminderErr error
+		reminderRepo, reminderErr = reminders.NewFileRepository(filepath.Join(settings.Cache.Directory, "reminders"))
+		if reminderErr != nil {
+			log.Fatalf("initialize reminder storage: %v", reminderErr)
+		}
+	}
+	reminderService := reminders.New(reminderRepo, func(profileID string) bool {
+		profile, ok := userService.Get(profileID)
+		if !ok || profile.IsKidsProfile {
+			return false
+		}
+		account, ok := accountsService.Get(profile.AccountID)
+		return ok && !account.IsExpired()
+	})
+	reminderService.SetSourceCheck(availabilityService.CurrentReminderEvidence)
+	availabilityService.SetReminderObserver(reminderService.ObserveSource)
+	metadataHandler.Reminders = reminderService
+
 	tasteOnboardingService := tasteonboarding.New(store.TasteOnboarding())
 	metadataHandler.Taste = tasteOnboardingService
 
@@ -823,6 +846,7 @@ func main() {
 	detailsBundleHandler.SetUserSettingsProvider(userSettingsService)
 	detailsBundleHandler.SetWatchlistService(watchlistService)
 	detailsBundleHandler.SetCatalogueObserver(metadataHandler.ObserveDetailsCatalogue)
+	detailsBundleHandler.SetReminderObserver(metadataHandler.ObserveReminderDetails)
 
 	// Calendar service provides upcoming content from watchlist, history, and MDBList
 	calendarService := calendar.New(metadataService, watchlistService, historyService, userSettingsService, userService)
@@ -837,6 +861,13 @@ func main() {
 	notificationService := notifications.New(store.Notifications(), notifications.WithProfiles(userService), notifications.WithClients(clientsService))
 	defer notificationService.Close()
 	calendarService.SetReleaseObserver(notificationService)
+	calendarService.SetReminderObserver(func(profile string, items []models.CalendarItem) {
+		ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+		defer cancel()
+		if err := reminderService.ObserveCalendar(ctx, profile, items); err != nil {
+			log.Printf("[reminders] calendar observation was not persisted: %v", err)
+		}
+	})
 	historyService.SetWatchStateChangedHook(calendarService.Invalidate)
 	calendarHandler := handlers.NewCalendarHandler(calendarService, userService, *demoMode)
 	startupHandler.SetCalendar(calendarService)

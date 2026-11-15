@@ -137,6 +137,150 @@ paths:
           description: Storage error
         '503':
           description: Search-interest storage unavailable
+  /api/users/{userId}/reminders:
+    parameters:
+      - $ref: '#/components/parameters/UserID'
+      - $ref: '#/components/parameters/ClientID'
+      - $ref: '#/components/parameters/ProfileUnlock'
+    get:
+      operationId: listTitleReminders
+      summary: List this adult profile's active in-app reminders
+      description: Updates use existing observations only, without creating metadata or source demand. Child and scoped sessions are denied.
+      responses:
+        '200':
+          description: Owned reminders and capability marker.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/ReminderList'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '501': {$ref: '#/components/responses/Error'}
+    post:
+      operationId: createTitleReminder
+      summary: Subscribe to a distinct metadata milestone or source candidate
+      description: |
+        Identifiers must resolve to recently delivered server metadata. Release
+        is an announced movie release-date milestone, not proof of playback.
+        New episode requires canonical official episode provenance. A matching
+        source is a candidate for the creating device's current intent only.
+        Existing pre-creation candidates are informational and do not flood the
+        inbox. A future checkpoint may be seeded from fresh delivered metadata.
+        No external notification channel is created. Title alias idempotency
+        returns the stable saved identity and echoes requestedContentId.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/ReminderCreate'}
+      responses:
+        '200':
+          description: Created or idempotently returned reminder.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [remindersSupported, monitoring, requestedContentId, item]
+                properties:
+                  remindersSupported: {type: boolean, enum: [true]}
+                  monitoring: {type: string, enum: [observations_only]}
+                  requestedContentId: {type: string}
+                  item: {$ref: '#/components/schemas/Reminder'}
+                  currentCandidate: {$ref: '#/components/schemas/SourceAvailability'}
+        '400': {$ref: '#/components/responses/Error'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '409':
+          description: Metadata must be reloaded or a reminder limit was reached.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/ReminderError'}
+  /api/users/{userId}/reminders/{reminderId}:
+    parameters:
+      - $ref: '#/components/parameters/UserID'
+      - $ref: '#/components/parameters/ClientID'
+      - $ref: '#/components/parameters/ProfileUnlock'
+      - name: reminderId
+        in: path
+        required: true
+        schema: {type: string}
+    delete:
+      operationId: revokeTitleReminder
+      summary: Revoke future events while retaining existing inbox receipts
+      responses:
+        '204': {description: Revoked.}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '404': {$ref: '#/components/responses/Error'}
+  /api/users/{userId}/reminder-events:
+    parameters:
+      - $ref: '#/components/parameters/UserID'
+      - $ref: '#/components/parameters/ClientID'
+      - $ref: '#/components/parameters/ProfileUnlock'
+    get:
+      operationId: listReminderEvents
+      summary: Read the owned in-app inbox without external delivery
+      parameters:
+        - name: unread
+          in: query
+          schema: {type: boolean, default: false}
+        - name: cursor
+          in: query
+          schema: {type: string}
+        - name: limit
+          in: query
+          schema: {type: integer, minimum: 1, maximum: 100, default: 50}
+      responses:
+        '200':
+          description: Undismissed events in descending stable order.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [remindersSupported, monitoring, items]
+                properties:
+                  remindersSupported: {type: boolean, enum: [true]}
+                  monitoring: {type: string, enum: [observations_only]}
+                  items: {type: array, maxItems: 100, items: {$ref: '#/components/schemas/ReminderEvent'}}
+                  nextCursor: {type: string}
+        '400': {$ref: '#/components/responses/Error'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+  /api/users/{userId}/reminder-events/{eventId}:
+    parameters:
+      - $ref: '#/components/parameters/UserID'
+      - $ref: '#/components/parameters/ClientID'
+      - $ref: '#/components/parameters/ProfileUnlock'
+      - name: eventId
+        in: path
+        required: true
+        schema: {type: string}
+    patch:
+      operationId: markReminderEvent
+      summary: Set read or dismissed state without resetting dedup receipts
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              properties:
+                read: {type: boolean}
+                dismissed: {type: boolean}
+              anyOf:
+                - required: [read]
+                - required: [dismissed]
+      responses:
+        '200':
+          description: Saved inbox state.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [remindersSupported, item]
+                properties:
+                  remindersSupported: {type: boolean, enum: [true]}
+                  item: {$ref: '#/components/schemas/ReminderEvent'}
+        '400': {$ref: '#/components/responses/Error'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '404': {$ref: '#/components/responses/Error'}
+
   /api/users/{userId}/taste-onboarding:
     parameters:
       - $ref: '#/components/parameters/UserID'
@@ -3138,6 +3282,79 @@ components:
         `unreleased`.
       enum: [released, theatrical, coming_soon, unreleased]
 
+    ReminderEpisode:
+      type: object
+      additionalProperties: false
+      required: [episodeId, numbering, seasonNumber, episodeNumber]
+      properties:
+        episodeId: {type: string, minLength: 1, maxLength: 256}
+        numbering:
+          type: object
+          additionalProperties: false
+          required: [seriesId]
+          properties:
+            seriesId: {type: string, minLength: 1, maxLength: 128}
+            ordering: {type: string, enum: [official]}
+        seasonNumber: {type: integer, minimum: 0, maximum: 10000}
+        episodeNumber: {type: integer, minimum: 1, maximum: 100000}
+    ReminderCreate:
+      type: object
+      additionalProperties: false
+      required: [contentId, contentType, eventKind]
+      properties:
+        contentId: {type: string, minLength: 1, maxLength: 128}
+        contentType: {type: string, enum: [movie, series]}
+        eventKind: {type: string, enum: [release, new_episode, matching_source]}
+        releaseType: {type: string, enum: [digital, physical, theatrical]}
+        episode: {$ref: '#/components/schemas/ReminderEpisode'}
+    Reminder:
+      type: object
+      additionalProperties: false
+      required: [id, contentId, contentType, eventKind, title, state, createdAt, createdOnCurrentDevice]
+      properties:
+        id: {type: string}
+        contentId: {type: string}
+        contentType: {type: string, enum: [movie, series]}
+        eventKind: {type: string, enum: [release, new_episode, matching_source]}
+        title: {$ref: '#/components/schemas/Title'}
+        releaseType: {type: string, enum: [digital, physical, theatrical]}
+        episode: {$ref: '#/components/schemas/ReminderEpisode'}
+        state: {type: string, enum: [waiting, triggered]}
+        createdOnCurrentDevice: {type: boolean, description: Matching-source interest belongs to this creating client; metadata interests are profile-wide.}
+        createdAt: {type: string, format: date-time}
+        lastObservedAt: {type: string, format: date-time}
+    ReminderList:
+      type: object
+      required: [remindersSupported, monitoring, items]
+      properties:
+        remindersSupported: {type: boolean, enum: [true]}
+        monitoring: {type: string, enum: [observations_only]}
+        items: {type: array, maxItems: 100, items: {$ref: '#/components/schemas/Reminder'}}
+    ReminderEvent:
+      type: object
+      additionalProperties: false
+      required: [id, reminderId, eventKind, contentId, contentType, title, occurredAt, candidateOnly]
+      properties:
+        id: {type: string}
+        reminderId: {type: string}
+        eventKind: {type: string, enum: [release, new_episode, matching_source]}
+        contentId: {type: string}
+        contentType: {type: string, enum: [movie, series]}
+        title: {$ref: '#/components/schemas/Title'}
+        episode: {$ref: '#/components/schemas/ReminderEpisode'}
+        releaseType: {type: string, enum: [digital, physical, theatrical]}
+        occurredAt: {type: string, format: date-time}
+        readAt: {type: string, format: date-time}
+        dismissedAt: {type: string, format: date-time}
+        candidateOnly: {type: boolean, description: True only for a source candidate; no event guarantees playback.}
+    ReminderError:
+      type: object
+      required: [error, code]
+      properties:
+        error: {type: string}
+        code:
+          type: string
+          enum: [reminder_invalid_request, reminder_metadata_reload_required, reminder_interest_limit, reminder_not_found, reminder_profile_unavailable, reminder_storage_unavailable]
     SourceAvailability:
       type: object
       required: [state, complete]

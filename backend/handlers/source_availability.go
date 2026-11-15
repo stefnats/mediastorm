@@ -53,6 +53,7 @@ func availabilityWatchlist(service sourceAvailabilityService, profileID, clientI
 // Only presentation copies are annotated; shared metadata/recommendation cache
 // entries must never acquire another profile's source status or queue context.
 func (h *MetadataHandler) encodeMetadata(w http.ResponseWriter, r *http.Request, payload any) error {
+	h.observeReminderPayload(r, payload)
 	profile := strings.TrimSpace(r.URL.Query().Get("userId"))
 	if profile == "" {
 		profile = mux.Vars(r)["userID"]

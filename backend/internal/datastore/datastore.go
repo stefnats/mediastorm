@@ -99,6 +99,7 @@ func (ds *DataStore) HiddenItems() HiddenItemsRepository   { return &pgHiddenIte
 func (ds *DataStore) TasteOnboarding() TasteOnboardingRepository {
 	return &pgTasteOnboardingRepo{pool: ds.pool}
 }
+func (ds *DataStore) Reminders() ReminderRepository        { return &pgReminderRepo{pool: ds.pool} }
 func (ds *DataStore) TitleRatings() TitleRatingRepository  { return &pgTitleRatingRepo{pool: ds.pool} }
 func (ds *DataStore) CustomLists() CustomListRepository    { return &pgCustomListRepo{pool: ds.pool} }
 func (ds *DataStore) WatchHistory() WatchHistoryRepository { return &pgWatchHistoryRepo{pool: ds.pool} }

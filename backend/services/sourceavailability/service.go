@@ -28,6 +28,7 @@ type request struct {
 	LastSeen                   time.Time
 }
 type Service struct {
+	reminderObserver  ReminderObserver
 	rechecks          map[string]recheckJob
 	recheckGeneration uint64
 	localChecker      LocalChecker
@@ -168,7 +169,9 @@ func (s *Service) ObservePlaybackStart(profileID, clientID, titleID, mediaType s
 		}
 		checked := s.now().UTC()
 		expires := checked.Add(time.Duration(cfg.SourceAvailability.EffectiveRefreshHours()) * time.Hour)
-		_ = s.Store.putObservation(profileID, titleID, identity.Key, models.SourceAvailability{State: "found", CheckedAt: &checked, ExpiresAt: &expires, Reason: "prepared_source"}, &observation{Version: 1, Kind: "prepared", PreparedRemote: true, ReportRevision: revision})
+		if err := s.Store.putObservation(profileID, titleID, identity.Key, models.SourceAvailability{State: "found", CheckedAt: &checked, ExpiresAt: &expires, Reason: "prepared_source"}, &observation{Version: 1, Kind: "prepared", PreparedRemote: true, ReportRevision: revision}); err == nil {
+			s.publishReminder(context.Background(), request{ProfileID: profileID, ClientID: clientID, Title: models.Title{ID: titleID, MediaType: mediaType}, Scope: identity.Key, AudioLanguage: identity.AudioLanguage})
+		}
 	}
 }
 
@@ -384,11 +387,17 @@ func (s *Service) checkOne(ctx context.Context) {
 	// Serialize the final visibility check with a departing consumer. Once its
 	// release has completed, late work cannot commit a negative observation.
 	s.mu.Lock()
-	defer s.mu.Unlock()
+	committed := false
 	if !s.neededUntilLocked(chosenID).IsZero() && work.Err() == nil {
 		if err := s.Store.putObservation(chosen.ProfileID, chosen.cacheID(), chosen.Scope, value, evidence, projectEpisode(chosen)); err != nil {
 			refreshReason = "recheck_failed"
+		} else {
+			committed = true
 		}
+	}
+	s.mu.Unlock()
+	if committed {
+		s.publishReminder(work, chosen)
 	}
 }
 

@@ -677,6 +677,7 @@ func TestDatabaseExportSectionsCoverDurableTables(t *testing.T) {
 		required[section] = true
 	}
 	for _, want := range []string{
+		"reminders",
 		"notificationChannels",
 		"notificationObservations",
 		"hiddenItems",
@@ -701,6 +702,7 @@ func TestDatabaseExportSectionsCoverDurableTables(t *testing.T) {
 	// Use a populated struct so omitempty fields are present.
 	now := time.Now().UTC()
 	export := databaseExport{
+		Reminders:   map[string]models.ReminderProfileState{"default": {}},
 		Version:     "2.1",
 		ExportedAt:  now,
 		Accounts:    []models.AccountStorage{},

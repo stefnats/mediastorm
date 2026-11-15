@@ -20,6 +20,7 @@ import (
 )
 
 type kidsRatingRouteFixture struct {
+	metadata                                        *handlers.MetadataHandler
 	router                                          *mux.Router
 	users                                           *users.Service
 	directory                                       string
@@ -99,13 +100,14 @@ func newKidsRatingRouteFixture(t *testing.T) *kidsRatingRouteFixture {
 	policy := func() config.SecuritySettings {
 		return config.SecuritySettings{EnforceProfilePins: true, ProfileUnlockTTLHours: 1}
 	}
+	metadataHandler := &handlers.MetadataHandler{}
 	router := mux.NewRouter()
 	// Exercise the production registration and middleware rather than copying
 	// the two routes into a test-only router. Unused handlers are never invoked.
 	Register(
 		router,                              // r
 		nil,                                 // settingsHandler
-		&handlers.MetadataHandler{},         // metadataHandler
+		metadataHandler,                     // metadataHandler
 		nil,                                 // indexerHandler
 		nil,                                 // playbackHandler
 		nil,                                 // badStreamsHandler
@@ -147,7 +149,7 @@ func newKidsRatingRouteFixture(t *testing.T) *kidsRatingRouteFixture {
 		nil,                                 // latencyAdmin
 		WithProfileUnlocks(unlocks, policy), // opts
 	)
-	f := &kidsRatingRouteFixture{router: router, users: profiles, directory: directory, profile: child.ID, foreign: foreign.ID, token: session.Token, scoped: scoped.Token, master: masterSession.Token}
+	f := &kidsRatingRouteFixture{metadata: metadataHandler, router: router, users: profiles, directory: directory, profile: child.ID, foreign: foreign.ID, token: session.Token, scoped: scoped.Token, master: masterSession.Token}
 	response := f.request(http.MethodPost, child.ID, "/pin/verify", session.Token, "", "", `{"pin":"1234"}`)
 	if response.Code != http.StatusOK {
 		t.Fatalf("unlock failed: %d %s", response.Code, response.Body.String())
