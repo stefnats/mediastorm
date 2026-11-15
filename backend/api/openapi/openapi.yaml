@@ -596,6 +596,7 @@ paths:
                 properties:
                   enabled: {type: boolean}
                   version: {type: integer, format: int64}
+                  episodeCoverage: {$ref: '#/components/schemas/EpisodeSourceCoverage'}
                   items:
                     type: array
                     items:
@@ -2986,6 +2987,8 @@ components:
       type: object
       required: [state, complete]
       properties:
+        episodeCoverage:
+          $ref: '#/components/schemas/EpisodeSourceCoverage'
         sourceType: {type: string, enum: [local], description: Locally checked file and requested audio; not a playback guarantee}
         state:
           type: string
@@ -3006,6 +3009,30 @@ components:
           description: All explicitly selected indexers completed this bounded search.
         reason:
           type: string
+    EpisodeSourceCoverage:
+      type: object
+      additionalProperties: false
+      description: Current observed episode coordinates only. Neither counts nor a general series candidate describe a complete catalogue. Partial requires both found and missing episodes; found-only or found-plus-unknown remains unknown coverage.
+      required: [state, foundEpisodes, notFoundEpisodes, unknownEpisodes, catalogueComplete, seasons]
+      properties:
+        state: {type: string, enum: [unknown, partial]}
+        foundEpisodes: {type: integer, minimum: 0, maximum: 1012}
+        notFoundEpisodes: {type: integer, minimum: 0, maximum: 1012}
+        unknownEpisodes: {type: integer, minimum: 0, maximum: 1012}
+        catalogueComplete: {type: boolean, enum: [false]}
+        seasons:
+          type: array
+          maxItems: 1012
+          items:
+            type: object
+            additionalProperties: false
+            required: [seasonNumber, state, foundEpisodes, notFoundEpisodes, unknownEpisodes]
+            properties:
+              seasonNumber: {type: integer, minimum: 0, maximum: 10000}
+              state: {type: string, enum: [unknown, partial]}
+              foundEpisodes: {type: integer, minimum: 0, maximum: 1012}
+              notFoundEpisodes: {type: integer, minimum: 0, maximum: 1012}
+              unknownEpisodes: {type: integer, minimum: 0, maximum: 1012}
     Title:
       type: object
       required: [id, name, mediaType]

@@ -321,8 +321,11 @@ func TestAvailabilityEpisodeReportsAndPreparationDoNotQualifyWholeSeries(t *test
 		t.Fatal(err)
 	}
 	got := svc.AnnotateTitles("profile", "tv", []models.Title{title})[0].SourceAvailability
-	if got.State != "found" || svc.Revision("profile", "tv") != before {
-		t.Fatal("single episode changed a whole series")
+	if got.State != "found" || got.EpisodeCoverage != nil {
+		t.Fatal("single episode blocked a general series candidate")
+	}
+	if svc.Revision("profile", "tv") == before {
+		t.Fatal("episode report did not invalidate the manifest for cached coverage")
 	}
 	svc.ObservePlaybackStart("profile", "tv", "tmdb:series:2", "series")(true)
 	other := testTitle("tmdb:series:2")

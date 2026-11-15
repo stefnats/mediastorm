@@ -85,6 +85,8 @@ func (s *Service) AnnotateTitles(profileID, clientID string, titles []models.Tit
 		return titles
 	}
 	result := append([]models.Title(nil), titles...)
+	coverageCtx, cancelCoverage := context.WithTimeout(context.Background(), 500*time.Millisecond)
+	defer cancelCoverage()
 	for i := range result {
 		title := &result[i]
 		if title.ID == "" || (title.MediaType != "movie" && title.MediaType != "series" && title.MediaType != "tv") {
@@ -96,6 +98,7 @@ func (s *Service) AnnotateTitles(profileID, clientID string, titles []models.Tit
 		}
 		title.CardSubtitle = cleanSubtitle(title.CardSubtitle)
 		value := s.availability(profileID, clientID, title.ID, identity)
+		value = s.withEpisodeCoverage(coverageCtx, profileID, clientID, *title, identity, value)
 		title.SourceAvailability = &value
 		if value.State == "found" || value.State == "not_found" {
 			label := "Source candidate found"
@@ -383,7 +386,7 @@ func (s *Service) checkOne(ctx context.Context) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if !s.neededUntilLocked(chosenID).IsZero() && work.Err() == nil {
-		if err := s.Store.putObservation(chosen.ProfileID, chosen.cacheID(), chosen.Scope, value, evidence); err != nil {
+		if err := s.Store.putObservation(chosen.ProfileID, chosen.cacheID(), chosen.Scope, value, evidence, projectEpisode(chosen)); err != nil {
 			refreshReason = "recheck_failed"
 		}
 	}

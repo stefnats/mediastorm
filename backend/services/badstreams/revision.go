@@ -35,12 +35,12 @@ func (s *Service) RevisionFor(ctx PlaybackContext) string {
 				ctx.TitleID != "" && scope.AudioLanguage != "" && language.NormalizeToCode(ctx.AudioLanguage) != scope.AudioLanguage {
 				continue
 			}
-			if scope.SeasonNumber != nil && (ctx.Episode == nil || scope.EpisodeNumber == nil ||
+			if ctx.TitleID != "" && scope.SeasonNumber != nil && (ctx.Episode == nil || scope.EpisodeNumber == nil ||
 				ctx.Episode.SeasonNumber != *scope.SeasonNumber || ctx.Episode.EpisodeNumber != *scope.EpisodeNumber ||
 				models.EpisodeNumberingKey(ctx.Episode.Numbering) != scope.NumberingKey) {
 				continue
 			}
-			if scope.SeasonNumber == nil && ctx.Episode != nil {
+			if ctx.TitleID != "" && scope.SeasonNumber == nil && ctx.Episode != nil {
 				continue
 			}
 		}

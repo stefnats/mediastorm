@@ -19,6 +19,7 @@ type LocalChecker interface {
 	Validate(context.Context, LocalRequest, LocalProof) bool
 }
 type localObservation struct {
+	Episode          *episodeProjection
 	Proof            LocalProof
 	State            string
 	Checked, Expires time.Time
@@ -64,7 +65,7 @@ func (s *Service) checkedLocal(ctx context.Context, item request, selected Selec
 		return false
 	}
 	now := s.now()
-	value := localObservation{Proof: proof, State: "none", Checked: now, Expires: now.Add(2 * time.Minute), ReportRevision: before}
+	value := localObservation{Episode: projectEpisode(item), Proof: proof, State: "none", Checked: now, Expires: now.Add(2 * time.Minute), ReportRevision: before}
 	if err != nil {
 		value.State = "unknown"
 		value.Expires = now.Add(30 * time.Second)
@@ -162,6 +163,7 @@ func (s *Service) ApplyLocalTitles(ctx context.Context, profile, client string, 
 		}
 		item := request{ProfileID: profile, ClientID: client, Title: title, Scope: selected.Key, AudioLanguage: selected.AudioLanguage}
 		value := s.localHint(bounded, item, selected)
+		value = s.withEpisodeCoverage(bounded, profile, client, title, selected, value)
 		value = s.recheckPresentation(value, item.ProfileID, item.cacheID(), selected.Key)
 		response.Items[i].Availability = &value
 	}
@@ -189,6 +191,9 @@ func (s *Service) ApplyLocalEpisodes(ctx context.Context, profile, client string
 			value = s.recheckPresentation(value, item.ProfileID, item.cacheID(), selected.Key)
 			response.Items[i].Availability = &value
 		}
+	}
+	if selected, err := resolve(title.ID); err == nil && len(episodes) > 0 {
+		response.EpisodeCoverage = s.cachedEpisodeCoverage(bounded, profile, client, title, selected, episodes).coverage
 	}
 	return response
 }
