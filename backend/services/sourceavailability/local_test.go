@@ -173,8 +173,9 @@ func TestLocalHintsEpisodeEvidenceDoesNotQualifyWholeSeries(t *testing.T) {
 	if other.Items[0].Availability.State == "found" {
 		t.Fatal("another episode reused proof")
 	}
-	if s.AnnotateTitles("profile", "tv", []models.Title{episodeTitle()})[0].SourceAvailability.State == "found" {
-		t.Fatal("episode proof qualified series")
+	status := s.AnnotateTitles("profile", "tv", []models.Title{episodeTitle()})[0].SourceAvailability
+	if status.State != "found" || status.Complete || status.EpisodeCoverage == nil || status.EpisodeCoverage.FoundEpisodes != 1 || status.EpisodeCoverage.State != "unknown" || status.EpisodeCoverage.CatalogueComplete {
+		t.Fatal("episode proof claimed catalogue-wide completeness")
 	}
 }
 func TestLocalHintsCancellationCannotCommitLateProof(t *testing.T) {

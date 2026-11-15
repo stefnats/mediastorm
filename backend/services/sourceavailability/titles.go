@@ -1,6 +1,7 @@
 package sourceavailability
 
 import (
+	"context"
 	"errors"
 	"strings"
 	"time"
@@ -47,7 +48,7 @@ func (s *Service) rememberDelivered(profile, client string, title models.Title) 
 	if client == "" || title.Name == "" {
 		return
 	}
-	projection := models.Title{ID: title.ID, Name: title.Name, OriginalName: title.OriginalName, MediaType: titleCoordinate(title).MediaType, Year: title.Year, Language: title.Language, IMDBID: title.IMDBID, TVDBID: title.TVDBID, TMDBID: title.TMDBID, Certification: title.Certification}
+	projection := models.Title{ID: title.ID, Name: title.Name, OriginalName: title.OriginalName, MediaType: titleCoordinate(title).MediaType, Year: title.Year, Language: title.Language, IMDBID: title.IMDBID, TVDBID: title.TVDBID, TMDBID: title.TMDBID, Certification: title.Certification, IsDaily: title.IsDaily}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.delivered == nil {
@@ -105,6 +106,8 @@ func (s *Service) ReplaceTitleView(profile, client, viewID string, version int64
 	}
 	pending := []request{}
 	desired := map[string]bool{}
+	coverageCtx, cancelCoverage := context.WithTimeout(context.Background(), 500*time.Millisecond)
+	defer cancelCoverage()
 	for _, title := range titles {
 		coord := titleCoordinate(title)
 		if title.ID == "" || title.Name == "" || coord.MediaType != "movie" && coord.MediaType != "series" {
@@ -115,6 +118,7 @@ func (s *Service) ReplaceTitleView(profile, client, viewID string, version int64
 			return response, err
 		}
 		value := s.availability(profile, client, title.ID, selected)
+		value = s.withEpisodeCoverage(coverageCtx, profile, client, title, selected, value)
 		response.Items = append(response.Items, TitleHint{coord, &value})
 		item := request{ProfileID: profile, ClientID: client, Title: title, Scope: selected.Key, AudioLanguage: selected.AudioLanguage, LastSeen: s.now()}
 		desired[requestID(item)] = true

@@ -80,3 +80,45 @@ func TestReportRevisionKeepsEpisodeAndDeviceBoundaries(t *testing.T) {
 		t.Fatal("device revision leaked")
 	}
 }
+
+func TestReportManifestIncludesEpisodeChangesWithoutMakingSeriesExclusions(t *testing.T) {
+	svc := New(filepath.Join(t.TempDir(), "reports.json"))
+	manifest := PlaybackContext{ProfileID: "profile", ClientID: "tv"}
+	before := svc.RevisionFor(manifest)
+	ctx := manifest
+	ctx.TitleID, ctx.AudioLanguage = "tvdb:series:74852", "fra"
+	ctx.Episode = &models.EpisodeReference{Numbering: &models.EpisodeNumbering{SeriesID: ctx.TitleID, Ordering: "official"}, SeasonNumber: 1, EpisodeNumber: 2}
+	report, err := svc.Report(ReportRequest{Result: models.NZBResult{Title: "Synthetic.Series.S01E02"}, Context: ctx, Reason: "missing_language", ReporterID: "profile", Shared: false})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if svc.RevisionFor(manifest) == before {
+		t.Fatal("episode report missing from profile manifest")
+	}
+	series := ctx
+	series.Episode = nil
+	if svc.RevisionFor(series) != before {
+		t.Fatal("episode report became a whole-series rule")
+	}
+	english := ctx
+	english.AudioLanguage = "eng"
+	if svc.RevisionFor(english) != before {
+		t.Fatal("French episode report changed an English playback revision")
+	}
+	other := manifest
+	other.ProfileID = "another-profile"
+	if svc.RevisionFor(other) != before {
+		t.Fatal("private episode report leaked to another profile manifest")
+	}
+	if !svc.Delete(report.ID) || svc.RevisionFor(manifest) != before {
+		t.Fatal("undo did not restore profile manifest")
+	}
+	if _, err := svc.Report(ReportRequest{Result: models.NZBResult{Title: "Synthetic.Series.S01E02"}, Context: ctx, Reason: "device_problem", ReporterID: "profile", Shared: false}); err != nil {
+		t.Fatal(err)
+	}
+	phone := manifest
+	phone.ClientID = "phone"
+	if svc.RevisionFor(manifest) == before || svc.RevisionFor(phone) != before {
+		t.Fatal("episode device rule leaked between device manifests")
+	}
+}

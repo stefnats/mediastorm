@@ -1,6 +1,7 @@
 package sourceavailability
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -31,9 +32,10 @@ type EpisodeHint struct {
 	Availability *models.SourceAvailability `json:"sourceAvailability,omitempty"`
 }
 type EpisodeViewResponse struct {
-	Enabled bool          `json:"enabled"`
-	Version int64         `json:"version"`
-	Items   []EpisodeHint `json:"items"`
+	EpisodeCoverage *models.EpisodeSourceCoverage `json:"episodeCoverage,omitempty"`
+	Enabled         bool                          `json:"enabled"`
+	Version         int64                         `json:"version"`
+	Items           []EpisodeHint                 `json:"items"`
 }
 type episodeView struct {
 	Version  int64
@@ -135,6 +137,11 @@ func (s *Service) ReplaceEpisodeView(profile, client, viewID string, version int
 		s.enqueueLocked(item)
 	}
 	s.mu.Unlock()
+	if len(episodes) > 0 {
+		if selected, err := resolve(title.ID); err == nil {
+			response.EpisodeCoverage = s.cachedEpisodeCoverage(context.Background(), profile, client, title, selected, episodes).coverage
+		}
+	}
 	return response, nil
 }
 

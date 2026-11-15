@@ -22,6 +22,7 @@ type record struct {
 	Scope     string                    `json:"scope"`
 	Value     models.SourceAvailability `json:"value"`
 	Evidence  *observation              `json:"evidence,omitempty"`
+	Episode   *episodeProjection        `json:"episode,omitempty"`
 }
 type Store struct {
 	mu        sync.Mutex
@@ -74,6 +75,13 @@ func NewStore(directory string) (*Store, error) {
 		if !validObservation(entry.Evidence) {
 			entry.Evidence = nil
 		}
+		if entry.Episode != nil {
+			if !validEpisodeProjection(entry.Episode) {
+				entry.Episode = nil
+			} else if ep := entry.Episode.episode(); episodeCacheID(entry.Episode.SeriesID, &ep) != entry.TitleID {
+				entry.Episode = nil
+			}
+		}
 		if len(s.records) < MaxRecords {
 			s.records[strings.TrimSuffix(name, ".json")] = entry
 		} else {
@@ -95,6 +103,11 @@ func validState(value models.SourceAvailability) bool {
 	return value.State == "found" || value.State == "unknown" || (value.State == "not_found" && value.Complete)
 }
 func copyValue(value models.SourceAvailability) models.SourceAvailability {
+	if value.EpisodeCoverage != nil {
+		coverage := *value.EpisodeCoverage
+		coverage.Seasons = append([]models.SeasonSourceCoverage(nil), coverage.Seasons...)
+		value.EpisodeCoverage = &coverage
+	}
 	value.Providers = append([]string(nil), value.Providers...)
 	if value.CheckedAt != nil {
 		t := *value.CheckedAt
@@ -129,7 +142,7 @@ func (s *Store) Put(profile, title, scope string, value models.SourceAvailabilit
 	return s.putObservation(profile, title, scope, value, nil)
 }
 
-func (s *Store) putObservation(profile, title, scope string, value models.SourceAvailability, evidence *observation) error {
+func (s *Store) putObservation(profile, title, scope string, value models.SourceAvailability, evidence *observation, projections ...*episodeProjection) error {
 	if profile == "" || title == "" || scope == "" || value.CheckedAt == nil || value.ExpiresAt == nil {
 		return errors.New("availability identity and dates required")
 	}
@@ -144,6 +157,20 @@ func (s *Store) putObservation(profile, title, scope string, value models.Source
 		return errors.New("invalid source observation")
 	}
 	entry := record{ProfileID: profile, TitleID: title, Scope: scope, Value: value, Evidence: copyObservation(evidence)}
+	if len(projections) > 1 {
+		return errors.New("one episode projection is allowed")
+	}
+	if len(projections) == 1 && projections[0] != nil {
+		p := projections[0]
+		if !validEpisodeProjection(p) {
+			return errors.New("invalid episode projection")
+		}
+		ep := p.episode()
+		if episodeCacheID(p.SeriesID, &ep) != title {
+			return errors.New("episode projection does not match cache identity")
+		}
+		entry.Episode = copyEpisodeProjection(p)
+	}
 	data, err := json.Marshal(entry)
 	if err != nil {
 		return err

@@ -49,8 +49,8 @@ func TestEpisodeAvailabilityUsesExactCoordinatesAndSeparateCache(t *testing.T) {
 		t.Fatalf("unexpected episode search: %+v", search.options)
 	}
 	titleStatus := svc.AnnotateTitles("profile", "tv", []models.Title{episodeTitle()})[0].SourceAvailability
-	if titleStatus.State != "unknown" {
-		t.Fatal("episode result became a whole-series state")
+	if titleStatus.State != "found" || titleStatus.Complete || titleStatus.EpisodeCoverage == nil || titleStatus.EpisodeCoverage.State != "partial" || titleStatus.EpisodeCoverage.CatalogueComplete {
+		t.Fatal("exact episode candidates did not produce conservative partial coverage")
 	}
 }
 func TestEpisodeAvailabilityUnresolvedOrWrongIdentityStaysUnknown(t *testing.T) {
