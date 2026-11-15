@@ -802,7 +802,9 @@ var SettingsSchema = map[string]interface{}{
 				"optionsFrom": "profiles",
 				"order":       6,
 			},
-			"userAgent": map[string]interface{}{"type": "text", "label": "User-Agent Override", "description": "Optional User-Agent sent for searches and NZB downloads from this indexer. Use when an indexer rejects requests that don't come from a current *arr tool (e.g. 403 \"tool is not on the newest version\"). Leave empty for the default.", "placeholder": "Sonarr/4.0.20.3014 (ubuntu 24.04)", "order": 7},
+			"userAgent":       map[string]interface{}{"type": "text", "label": "Default User-Agent", "description": "Fallback for searches without a movie or series override. Also used for NZB downloads. Leave empty for the built-in defaults: mediastorm for searches and SABnzbd for NZB downloads.", "placeholder": "SABnzbd/5.1.3", "order": 7},
+			"movieUserAgent":  map[string]interface{}{"type": "text", "label": "Movie Search User-Agent", "description": "Optional User-Agent for movie searches from this indexer. Leave empty to use the default User-Agent. Does not affect NZB downloads.", "placeholder": "Radarr/6.0", "order": 8},
+			"seriesUserAgent": map[string]interface{}{"type": "text", "label": "Series Search User-Agent", "description": "Optional User-Agent for series searches from this indexer, including season packs and daily shows. Leave empty to use the default User-Agent. Does not affect NZB downloads.", "placeholder": "Sonarr/4.0.20.3014 (ubuntu 24.04)", "order": 9},
 		},
 	},
 	"torrentScrapers": map[string]interface{}{
@@ -5083,7 +5085,7 @@ func (h *AdminUIHandler) RunSearchDiagnostics(w http.ResponseWriter, r *http.Req
 		if !idx.Enabled {
 			continue
 		}
-		result := h.runIndexerSearchDiagnostic(r.Context(), idx, query, diagnosticTimeoutSec)
+		result := h.runIndexerSearchDiagnostic(r.Context(), idx, query, mediaType, diagnosticTimeoutSec)
 		resp.TotalResults += result.Count
 		resp.Sources = append(resp.Sources, result)
 	}
@@ -5110,7 +5112,7 @@ func (h *AdminUIHandler) GetConnectionsUsage(w http.ResponseWriter, r *http.Requ
 	})
 }
 
-func (h *AdminUIHandler) runIndexerSearchDiagnostic(ctx context.Context, idx config.IndexerConfig, query string, timeout float64) SearchDiagnosticSourceResult {
+func (h *AdminUIHandler) runIndexerSearchDiagnostic(ctx context.Context, idx config.IndexerConfig, query, mediaType string, timeout float64) SearchDiagnosticSourceResult {
 	startedAt := time.Now()
 	result := SearchDiagnosticSourceResult{
 		Name:  displayName(idx.Name, "Indexer"),
@@ -5154,7 +5156,7 @@ func (h *AdminUIHandler) runIndexerSearchDiagnostic(ctx context.Context, idx con
 		result.DurationMS = time.Since(startedAt).Milliseconds()
 		return result
 	}
-	addBrowserHeaders(httpReq)
+	httpheaders.SetIndexerSearchHeaders(httpReq, idx.SearchUserAgent(mediaType))
 
 	httpClient := &http.Client{Timeout: time.Duration(timeout * float64(time.Second))}
 	httpResp, err := apiusage.Do(httpClient, displayName(idx.Name, "Indexer"), "Indexer search diagnostic", httpReq)

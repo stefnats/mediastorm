@@ -293,6 +293,26 @@ type IndexerConfig struct {
 	// UserAgent overrides the User-Agent sent for searches and NZB downloads.
 	// Some indexers reject requests unless they come from a recent *arr tool.
 	UserAgent string `json:"userAgent,omitempty"`
+	// MovieUserAgent and SeriesUserAgent override search headers only.
+	// Empty values fall back to UserAgent, then the built-in search default.
+	MovieUserAgent  string `json:"movieUserAgent,omitempty"`
+	SeriesUserAgent string `json:"seriesUserAgent,omitempty"`
+}
+
+// SearchUserAgent selects the media-specific search override without changing
+// the User-Agent used for NZB downloads.
+func (idx IndexerConfig) SearchUserAgent(mediaType string) string {
+	var override string
+	switch strings.ToLower(strings.TrimSpace(mediaType)) {
+	case "movie":
+		override = idx.MovieUserAgent
+	case "series":
+		override = idx.SeriesUserAgent
+	}
+	if override = strings.TrimSpace(override); override != "" {
+		return override
+	}
+	return strings.TrimSpace(idx.UserAgent)
 }
 
 // IndexerUserAgent returns the User-Agent override configured for the named

@@ -38,7 +38,7 @@ type indexerCallResult struct {
 // indexerCallKey identifies a call by everything fetchTorznab reads.
 func indexerCallKey(idx config.IndexerConfig, opts SearchOptions) string {
 	return strings.Join([]string{
-		idx.Name, idx.URL, idx.APIKey, idx.Type, idx.Categories, idx.UserAgent,
+		idx.Name, idx.URL, idx.APIKey, idx.Type, idx.Categories, idx.SearchUserAgent(opts.MediaType),
 		opts.usenetSearchType, fmt.Sprint(opts.usenetUseID), fmt.Sprint(opts.TVDBID), opts.IMDBID,
 		opts.usenetTitle, opts.Query, opts.usenetSeason, opts.usenetEpisode,
 		strings.Join(opts.Categories, ","), opts.MediaType,

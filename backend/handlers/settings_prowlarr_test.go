@@ -31,7 +31,8 @@ func TestExpandProwlarrSourcesDiscoversUsenetAndTorrentIndexers(t *testing.T) {
 
 	settings := config.Settings{
 		Indexers: []config.IndexerConfig{
-			{Name: "Prowlarr", URL: server.URL, APIKey: "prowlarr-key", Type: "prowlarr", Categories: "2000,5000", Enabled: true},
+			{Name: "Prowlarr", URL: server.URL, APIKey: "prowlarr-key", Type: "prowlarr", Categories: "2000,5000", Enabled: true,
+				UserAgent: "SABnzbd/5.1.3", MovieUserAgent: "Radarr/6.0", SeriesUserAgent: "Sonarr/4.0"},
 		},
 		TorrentScrapers: []config.TorrentScraperConfig{
 			{Name: "Prowlarr", Type: "prowlarr", URL: server.URL, APIKey: "prowlarr-key", Enabled: true, SkipNameFiltering: true},
@@ -49,6 +50,9 @@ func TestExpandProwlarrSourcesDiscoversUsenetAndTorrentIndexers(t *testing.T) {
 		t.Fatalf("expected 1 usenet indexer, got %d", len(settings.Indexers))
 	}
 	idx := settings.Indexers[0]
+	if idx.UserAgent != "SABnzbd/5.1.3" || idx.MovieUserAgent != "Radarr/6.0" || idx.SeriesUserAgent != "Sonarr/4.0" {
+		t.Fatalf("expanded indexer lost User-Agent settings: %#v", idx)
+	}
 	if idx.Name != "Prowlarr - NZBgeek" || idx.Type != "newznab" || idx.URL != server.URL+"/2" || idx.APIKey != "prowlarr-key" || idx.Categories != "2000,5000" || !idx.Enabled {
 		t.Fatalf("unexpected expanded usenet indexer: %#v", idx)
 	}

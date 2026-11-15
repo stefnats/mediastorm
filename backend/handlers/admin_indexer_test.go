@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -55,9 +56,50 @@ func TestIndexerSearchDiagnosticRejectsJSONAPIResponse(t *testing.T) {
 	}))
 	defer server.Close()
 
-	result := (&AdminUIHandler{}).runIndexerSearchDiagnostic(t.Context(), config.IndexerConfig{Name: "Newznab", URL: server.URL}, "test", 2)
+	result := (&AdminUIHandler{}).runIndexerSearchDiagnostic(t.Context(), config.IndexerConfig{Name: "Newznab", URL: server.URL}, "test", "movie", 2)
 	if result.Success || !strings.Contains(result.Error, "Newznab API endpoint") {
 		t.Fatalf("diagnostic result = %+v, want actionable invalid-feed error", result)
+	}
+}
+
+func TestIndexerSearchDiagnosticUsesMediaUserAgent(t *testing.T) {
+	for _, tc := range []struct{ mediaType, want string }{
+		{"movie", "Radarr/6.0"}, {"series", "Sonarr/4.0"},
+	} {
+		t.Run(tc.mediaType, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if got := r.UserAgent(); got != tc.want {
+					t.Errorf("User-Agent = %q, want %q", got, tc.want)
+				}
+				if !strings.Contains(r.Header.Get("Accept"), "application/xml") {
+					t.Error("expected indexer search Accept header")
+				}
+				w.Write([]byte(`<rss><channel></channel></rss>`))
+			}))
+			defer server.Close()
+			settings := config.DefaultSettings()
+			// Keep an explicit disabled entry so loading settings does not add
+			// the default Torrentio source to this local-only diagnostic test.
+			settings.TorrentScrapers = []config.TorrentScraperConfig{{Name: "Disabled", Type: "torrentio", Enabled: false}}
+			settings.Indexers = []config.IndexerConfig{{
+				Name: "TestIndexer", URL: server.URL, Enabled: true,
+				UserAgent: "SABnzbd/5.1.3", MovieUserAgent: "Radarr/6.0", SeriesUserAgent: "Sonarr/4.0",
+			}}
+			mgr := config.NewManager(filepath.Join(t.TempDir(), "settings.json"))
+			if err := mgr.Save(settings); err != nil {
+				t.Fatal(err)
+			}
+			payload := `{"query":"Example","mediaType":"` + tc.mediaType + `"}`
+			rec := httptest.NewRecorder()
+			(&AdminUIHandler{configManager: mgr}).RunSearchDiagnostics(rec, httptest.NewRequest(http.MethodPost, "/", strings.NewReader(payload)))
+			var response SearchDiagnosticsResponse
+			if err := json.Unmarshal(rec.Body.Bytes(), &response); err != nil {
+				t.Fatal(err)
+			}
+			if len(response.Sources) != 1 || !response.Sources[0].Success {
+				t.Fatalf("diagnostic result = %+v, want one successful indexer", response)
+			}
+		})
 	}
 }
 

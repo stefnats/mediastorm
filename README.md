@@ -44,6 +44,26 @@ Features include multi-profile watch history and recommendations, kids profiles,
 
 Not every integration is required. A typical installation needs TMDB plus at least one content path, such as Usenet, debrid, a media library, or Live TV.
 
+### Indexer User-Agent settings
+
+In the admin settings, edit a **Usenet Search Source** to configure its optional
+**Movie Search User-Agent** (`movieUserAgent`) and **Series Search User-Agent**
+(`seriesUserAgent`). These fields apply to searches for the selected media type,
+including text searches, season packs, and daily-show searches. They are also
+copied to indexers discovered from a Prowlarr source. Prowlarr controls the headers
+it sends onward to upstream indexers.
+
+An empty or whitespace-only field falls back to **Default User-Agent**
+(`userAgent`), then to the built-in `mediastorm/1.0` search header. Searches without
+a media type, including the generic indexer connection test, use that fallback.
+The search diagnostics use the movie or series setting for their selected media
+type. Existing configurations retain their behavior until an override is set.
+
+Movie and series overrides do not apply to NZB downloads. Downloads continue to
+use `userAgent` when configured, otherwise the built-in SABnzbd header. For
+example, use `Radarr/6.0` for movie searches, `Sonarr/4.0` for series searches, and
+leave **Default User-Agent** empty to retain the SABnzbd download default.
+
 ## Requirements
 
 - A host that can run Docker Compose

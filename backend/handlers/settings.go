@@ -1101,13 +1101,15 @@ func expandProwlarrSources(ctx context.Context, s *config.Settings) error {
 				continue
 			}
 			expandedIndexers = append(expandedIndexers, config.IndexerConfig{
-				Name:       prowlarrGeneratedName(idx.Name, pi.Name),
-				URL:        joinProwlarrIndexerURL(idx.URL, pi.ID),
-				APIKey:     idx.APIKey,
-				Type:       "newznab",
-				Categories: idx.Categories,
-				Enabled:    idx.Enabled,
-				UserAgent:  idx.UserAgent,
+				Name:            prowlarrGeneratedName(idx.Name, pi.Name),
+				URL:             joinProwlarrIndexerURL(idx.URL, pi.ID),
+				APIKey:          idx.APIKey,
+				Type:            "newznab",
+				Categories:      idx.Categories,
+				Enabled:         idx.Enabled,
+				UserAgent:       idx.UserAgent,
+				MovieUserAgent:  idx.MovieUserAgent,
+				SeriesUserAgent: idx.SeriesUserAgent,
 			})
 			added++
 		}
