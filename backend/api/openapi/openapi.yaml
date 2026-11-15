@@ -1981,6 +1981,52 @@ paths:
               schema:
                 type: string
 
+  /admin/api/live/provider-capacity:
+    post:
+      operationId: checkLiveProviderCapacity
+      summary: Check a saved provider account without opening a stream or changing limits
+      description: |
+        Requires an administrator account-management cookie. The source must
+        already be saved and enabled in global Live TV settings. Only Xtream
+        sources and recognized Xtream M3U exports have a supported account
+        endpoint. Caller-provided URLs and credentials are rejected.
+
+        Checks use a five-second timeout, a bounded response, no redirects and
+        a bounded per-account cache. Success is cached for a minute and failure
+        for 30 seconds. Alias configurations share the same check. A zero,
+        missing or invalid reported limit remains unknown, never a claim of
+        unlimited capacity. Provider connection counts are snapshots and cannot
+        reliably identify external usage. Use of a reported limit changes only
+        the settings form; the administrator still needs to save the settings.
+      security:
+        - accountSession: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [sourceId]
+              properties:
+                sourceId:
+                  type: string
+                  minLength: 1
+                  maxLength: 256
+      responses:
+        '200':
+          description: Sanitized account facts or an explicit unknown/unavailable/unsupported state.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ProviderCapacityReport'
+        default:
+          description: Invalid request, insufficient management authority, changed settings or busy checks.
+          content:
+            text/plain:
+              schema:
+                type: string
+
   /account/api/profiles/live-permissions:
     put:
       operationId: setProfileLivePermissions
@@ -2313,6 +2359,25 @@ components:
           type: string
         isMaster:
           type: boolean
+
+    ProviderCapacityReport:
+      type: object
+      additionalProperties: false
+      required: [sourceId, state, message, limitOrigin, cached, configuredLimit, sharedConfiguredLimit, localConnections, enforcedLimit]
+      properties:
+        sourceId: {type: string}
+        state: {type: string, enum: [available, unknown, unsupported, unavailable]}
+        message: {type: string}
+        limitOrigin: {type: string, enum: [provider_account, unknown]}
+        reportedLimit: {type: integer, minimum: 1}
+        providerActiveConnections: {type: integer, minimum: 0}
+        checkedAt: {type: string, format: date-time}
+        cacheExpiresAt: {type: string, format: date-time}
+        cached: {type: boolean}
+        configuredLimit: {type: integer, minimum: 0}
+        sharedConfiguredLimit: {type: integer, minimum: 0}
+        localConnections: {type: integer, minimum: 0}
+        enforcedLimit: {type: integer, minimum: 0}
 
     ProfileLivePermissions:
       type: object

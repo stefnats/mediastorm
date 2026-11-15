@@ -825,7 +825,7 @@ type LiveSettings struct {
 	StalkerDeviceID2         string               `json:"stalkerDeviceId2,omitempty"`
 	StalkerSignature         string               `json:"stalkerSignature,omitempty"`
 	StalkerModel             string               `json:"stalkerModel,omitempty"`
-	MaxStreams               int                  `json:"maxStreams"` // Maximum concurrent Live TV streams per provider (0 = unlimited)
+	MaxStreams               int                  `json:"maxStreams"` // Configured provider cap (0 = unconfigured, no local cap)
 	PlaylistCacheTTLHours    int                  `json:"playlistCacheTtlHours"`
 	ProbeSizeMB              int                  `json:"probeSizeMb"`        // FFmpeg probesize in MB (0 = default ~5MB)
 	AnalyzeDurationSec       int                  `json:"analyzeDurationSec"` // FFmpeg analyzeduration in seconds (0 = default ~5s)

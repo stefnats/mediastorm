@@ -2701,6 +2701,7 @@
 <script src="{{.ServerBasePath}}/api/static/admin-home-views-v1.js?v={{staticAssetVersion "admin-home-views-v1.js"}}"></script>
 <script src="{{.ServerBasePath}}/api/static/admin-custom-list-shelves-v1.js?v={{staticAssetVersion "admin-custom-list-shelves-v1.js"}}"></script>
 <script src="{{.ServerBasePath}}/api/static/admin-shelf-info-v1.js?v={{staticAssetVersion "admin-shelf-info-v1.js"}}"></script>
+<script src="{{.ServerBasePath}}/api/static/provider-capacity-v1.js?v={{staticAssetVersion "provider-capacity-v1.js"}}"></script>
 <script>
     let currentSettings = {{json .Settings}};
     let schema = {{json .Schema}};
@@ -2748,6 +2749,41 @@
         field.description = description;
     });
     let originalSettings = JSON.parse(JSON.stringify(currentSettings));
+    // Only saved provider identities can be checked. A delayed report never
+    // writes into a reordered source card or a different profile/device scope.
+    function capacitySourceIdentity(source) {
+        return JSON.stringify(['mode', 'playlistUrl', 'xtreamHost', 'xtreamUsername', 'xtreamPassword', 'proxyUrl', 'enabled']
+            .map(key => source?.[key] ?? null));
+    }
+    function checkLiveProviderCapacity(sectionKey, index) {
+        if (!isAdmin || selectedUserId || selectedClientId) return;
+        const legacy = index === null;
+        const sourcePath = legacy ? 'live' : getGlobalPath(sectionKey);
+        const sourceAt = root => legacy ? root.live : getAtPath(root, sourcePath)?.[index];
+        const source = sourceAt(currentSettings);
+        const savedItems = legacy ? [] : getAtPath(originalSettings, sourcePath) || [];
+        const saved = legacy ? originalSettings.live : source?.id
+            ? savedItems.find(item => item.id === source.id)
+            : savedItems.length === 1 && index === 0 && !savedItems[0].id ? savedItems[0] : null;
+        const sourceId = legacy || (saved && !saved.id && savedItems.length === 1) ? 'default' : source?.id;
+        const signature = capacitySourceIdentity(source);
+        if (!sourceId || !saved || signature !== capacitySourceIdentity(saved)) {
+            showToast('Save this provider connection before checking its limit.', 'error');
+            return;
+        }
+        const isCurrent = () => !selectedUserId && !selectedClientId &&
+            sourceAt(currentSettings) === source && capacitySourceIdentity(source) === signature;
+        window.MediastormProviderCapacity.open({
+            basePath, sourceId, sourceName: source.name || 'Default provider', isCurrent,
+            onUse: limit => {
+                if (!isCurrent()) return false;
+                setValue(legacy ? 'live.maxStreams' : sourcePath + '.' + index + '.maxStreams', limit);
+                renderSettings(); updateSettingsSaveStatus();
+                showToast('Reported limit added to the form. Save settings to apply it.', 'success');
+                return true;
+            },
+        });
+    }
     let selectedUserId = '';
     let userSettings = null;
     let originalUserSettings = null;
@@ -6828,6 +6864,11 @@
             return '<p class="form-hint">AltMount and Decypharr usually use <code>/webdav</code>; NZBDav and NZBDavEx usually use the root URL.</p>';
         }
         if (fieldKey !== 'maxStreams') return '';
+        if (['live', 'liveTV'].includes(sectionKey) && isAdmin && !selectedUserId && !selectedClientId &&
+            !(currentSettings.live?.sources?.length || currentSettings.live?.playlistSources?.length)) {
+            return '<p class="form-hint">0 leaves the local cap unconfigured; it does not confirm unlimited provider capacity.</p>' +
+                '<button type="button" class="btn btn-sm btn-secondary" onclick="checkLiveProviderCapacity(\'live\', null)">Provider limit</button>';
+        }
         if (sectionKey === 'liveTV' && selectedUserId) {
             return '<p class="form-hint">Leave empty to inherit global.</p>';
         }
@@ -9421,7 +9462,7 @@
         if (groupKey === 'connection') return liveSourceEndpointSummary(item);
         if (groupKey === 'playback') {
             const streams = Number(item.maxStreams || 0);
-            const streamLabel = streams === 0 ? 'Unlimited streams' : streams + ' max stream' + (streams === 1 ? '' : 's');
+            const streamLabel = streams === 0 ? 'Provider limit unconfirmed' : streams + ' max stream' + (streams === 1 ? '' : 's');
             const format = liveSourceOptionLabel(sectionDef.fields?.streamFormat, item.streamFormat, 'Format not set');
             const cacheTtl = item.playlistCacheTtlHours === undefined || item.playlistCacheTtlHours === null || item.playlistCacheTtlHours === ''
                 ? 'Default cache'
@@ -9485,6 +9526,9 @@
         const testButton = isTestable
             ? '<button id="test-btn-' + sectionKey + '-' + index + '" type="button" class="btn btn-sm btn-secondary" onclick="testProvider(\'' + sectionKey + '\', ' + index + ')">' + getIcon('check') + ' Test</button>'
             : '';
+        const capacityButton = isAdmin && !selectedUserId && !selectedClientId && sectionKey === 'live.sources'
+            ? '<button type="button" class="btn btn-sm btn-secondary" ' + (item.enabled === false ? 'disabled title="Enable and save this source before checking" ' : '') + 'onclick="checkLiveProviderCapacity(\'' + sectionKey + '\', ' + index + ')">Provider limit</button>'
+            : '';
         const hiddenChannelsButton = '<button type="button" class="btn btn-sm btn-secondary" onclick="openHiddenChannelsManagerForSource(\'' + sectionKey + '\', ' + index + ', event)">' +
             '<svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 3l18 18"/><path d="M10.58 10.58A2 2 0 0 0 13.42 13.42"/><path d="M9.88 4.24A10.94 10.94 0 0 1 12 4c7 0 10 8 10 8a18.5 18.5 0 0 1-2.16 3.19"/><path d="M6.61 6.61C3.98 8.38 2 12 2 12s3 8 10 8a10.9 10.9 0 0 0 5.39-1.39"/></svg> Manage Hidden Channels</button>';
         const deleteMenu = '<details class="live-source-action-menu">' +
@@ -9504,7 +9548,7 @@
                         '<span class="live-source-endpoint" title="' + escapeHtml(endpoint).replace(/"/g, '&quot;') + '">Server: ' + escapeHtml(endpoint) + '</span>' +
                     '</div>' +
                 '</div>' +
-                '<div class="live-source-card-actions">' + hiddenChannelsButton + testButton + editButton + deleteMenu + '</div>' +
+                '<div class="live-source-card-actions">' + hiddenChannelsButton + capacityButton + testButton + editButton + deleteMenu + '</div>' +
             '</div>' +
             (isEditing ? '<div class="live-source-groups">' + groupsHtml + '</div>' : '') +
         '</div>';

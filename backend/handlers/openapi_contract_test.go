@@ -1030,6 +1030,16 @@ func TestOpenAPIContract(t *testing.T) {
 		}
 	})
 
+	t.Run("saved provider capacity", func(t *testing.T) {
+		h, _, _ := capacityFixture(t, nil)
+		for _, source := range []string{"xtream", "export", "plain"} {
+			exercise(t, v, contractCall{method: "POST", target: "/admin/api/live/provider-capacity", master: true,
+				headers: map[string]string{"Cookie": sessionCookieName + "=synthetic-master-contract"}, body: map[string]string{"sourceId": source}}, h.CheckProviderCapacity, 200)
+		}
+		exercise(t, v, contractCall{method: "POST", target: "/admin/api/live/provider-capacity", master: false,
+			body: map[string]string{"sourceId": "xtream"}}, h.CheckProviderCapacity, 403)
+	})
+
 	t.Run("coverage", func(t *testing.T) {
 		covered := v.Covered()
 		var missing []string

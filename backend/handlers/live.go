@@ -368,6 +368,7 @@ type xtreamChannelsFetch struct {
 // LiveHandler proxies remote M3U playlists through the backend and can transmux
 // individual live channel streams into browser-friendly MP4 fragments.
 type LiveHandler struct {
+	providerCapacity providerCapacityChecks
 	catchupGrants      catchupGrants
 	discoveryOnce      sync.Once
 	discovery          *liveDiscovery
