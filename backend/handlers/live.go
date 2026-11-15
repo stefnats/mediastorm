@@ -26,6 +26,7 @@ import (
 	"time"
 
 	"novastream/config"
+	"novastream/internal/auth"
 	"novastream/internal/livecapacity"
 	"novastream/internal/netproxy"
 	"novastream/internal/requestsecurity"
@@ -368,7 +369,7 @@ type xtreamChannelsFetch struct {
 // LiveHandler proxies remote M3U playlists through the backend and can transmux
 // individual live channel streams into browser-friendly MP4 fragments.
 type LiveHandler struct {
-	providerCapacity providerCapacityChecks
+	providerCapacity   providerCapacityChecks
 	catchupGrants      catchupGrants
 	discoveryOnce      sync.Once
 	discovery          *liveDiscovery
@@ -2652,6 +2653,17 @@ func (h *LiveHandler) FetchFilteredChannelsForRequest(r *http.Request) ([]LiveCh
 
 // RecordingChannels resolves the complete visible channel list for a profile.
 func (h *LiveHandler) RecordingChannels(ctx context.Context, profileID string) ([]recordings.Channel, error) {
+	// This internal catalog read belongs to a persisted recording/rule owner,
+	// including when an advisory planner was requested by a different account.
+	// It is not the public channel endpoint and never grants the caller these URLs.
+	if h.usersSvc != nil {
+		profile, ok := h.usersSvc.Get(profileID)
+		if !ok || profile.IsKidsProfile {
+			return nil, fmt.Errorf("recording profile unavailable")
+		}
+		ctx = context.WithValue(ctx, auth.ContextKeyAccountID, profile.AccountID)
+		ctx = context.WithValue(ctx, auth.ContextKeyIsMaster, false)
+	}
 	query := url.Values{}
 	query.Set("profileId", profileID)
 	request := httptest.NewRequest(http.MethodGet, "/api/live/channels?"+query.Encode(), nil).WithContext(ctx)

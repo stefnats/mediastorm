@@ -17,12 +17,23 @@
         return 'Recording capacity forecast unavailable for this source.';
     }
 
+    function ruleScope(forecast) {
+        if (!forecast) return 'Future rule matches are not included by this server.';
+        if (forecast.status === 'not_configured') return 'No enabled recurring recording rules are configured.';
+        if (forecast.status === 'unavailable') return 'Rule forecast unavailable. Future rule matches remain uncertain.';
+        const until = new Date(forecast.horizonEnd);
+        const horizon = Number.isNaN(until.getTime()) ? '' : ' through ' + until.toLocaleString();
+        const count = Number.isInteger(forecast.projectedCount) && forecast.projectedCount >= 0 ? forecast.projectedCount : 0;
+        return `${count} projected rule matches for this profile${horizon}. ` +
+            (forecast.status === 'available' ? 'Known guide matches are included; future guide changes may change demand.' : 'Only known guide matches are included. Missing guide coverage remains uncertain.');
+    }
+
     function invalidate() {
         generation++;
         if (cancelCurrent) cancelCurrent();
     }
 
-    function ask(item, complete, isCurrent) {
+    function ask(item, complete, isCurrent, ruleForecast) {
         return new Promise(resolve => {
             const dialog = document.createElement('dialog');
             dialog.setAttribute('aria-label', 'Recording capacity forecast');
@@ -35,7 +46,7 @@
             message.style.cssText = 'margin:0 0 12px;';
             message.textContent = label(item);
             const detail = document.createElement('p');
-            detail.textContent = scope + (complete === false ? ' Some scheduled inputs could not be checked.' : '');
+            detail.textContent = scope + ' ' + ruleScope(ruleForecast) + (complete === false ? ' Some scheduled inputs could not be checked.' : '');
             detail.style.cssText = 'margin:0 0 16px;';
             const age = document.createElement('p');
             age.style.cssText = 'margin:0 0 12px;';
@@ -110,7 +121,7 @@
                 }
                 if (!isCurrent()) return false;
                 if (plan?.candidate?.state === 'clear') return true;
-                const choice = await ask(plan?.candidate, plan?.complete, isCurrent);
+                const choice = await ask(plan?.candidate, plan?.complete, isCurrent, plan?.ruleForecast);
                 if (choice === 'retry') continue;
                 return choice === 'schedule' && isCurrent();
             }
@@ -119,5 +130,5 @@
             pending = false;
         }
     }
-    window.recordingPlanUI = {confirm, invalidate, label};
+    window.recordingPlanUI = {confirm, invalidate, label, ruleScope};
 })();
