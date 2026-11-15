@@ -174,3 +174,37 @@ native fixture path was then exercised separately with all 13 examples, leaving
 38 pre-existing opt-in skips. The backend binary has matching commit metadata.
 Packages remain in separate fork branches; the combined branch is for integration
 verification. No new upstream PR, production deployment or service activation.
+
+## Fork-only automatic library selection
+
+[Backend](https://github.com/stefnats/mediastorm/tree/feature/automatic-library-selection)
+and [TV/phone](https://github.com/stefnats/mediastorm-androidtv/tree/feature/native-automatic-library-selection)
+route supported catalog Play, next episodes and prefetch through one automatic
+selection policy. Episode/season/title preferences precede profile/server values.
+Eligible local, Plex and Jellyfin copies are preferred or used as fallback.
+Explicit Versions and Stream Instead remain deliberate source choices.
+
+Automatic copies require exact catalog/episode/version identity, complete parts,
+current library rights, requested track metadata and current quality limits.
+Unknown or conflicting identities remain manual-only. Cross-provider series
+aliases do not establish corresponding child preference coordinates. Remote
+automatic library substitution remains denied for children. Current policy is
+confirmed on foreground Play; old active preparation IDs remain usable for
+reports/progress. Native library requests retain the initiating profile context.
+
+The feature reads existing scans and permits bounded probes only for actual
+preparation. Catalog/status reads add no provider calls or probes. Backup import
+cannot manufacture new remote selection proof. No additional migration.
+
+Validation: 3,608 affected backend cases, 348 repeated race cases, 42 API/contract
+cases including seven real native serializer fixtures, a real synthetic
+PostgreSQL roundtrip and full build. Native: 1,055 tests, 44 new cases, both APKs,
+empty private debug prefills, independent final review. Physical playback/focus
+acceptance remains separate.
+
+The combined commit `1d74f9e6cf4a49445c9f10be5ac67c91b26f20a0` passes 8,722
+backend cases with 38 explicit opt-in skips, including the seven automatic and
+13 reminder native contracts, synthetic PostgreSQL and local browser fixtures.
+Its built binary has matching clean commit metadata. Packages remain separately
+reviewable fork branches; no upstream PR, deployment or application activation
+was performed by this work package.
