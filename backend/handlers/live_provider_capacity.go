@@ -28,24 +28,33 @@ const maxProviderCapacityChecks = 128
 
 // Only numeric account facts are returned. Provider messages, URLs, credentials
 // and server_info are intentionally excluded from the management response.
+// ProviderExternalUsage deliberately has no numeric count or range. Aggregate
+// provider counters and local reservations do not share a trusted measurement.
+type ProviderExternalUsage struct {
+	State  string `json:"state"`
+	Reason string `json:"reason"`
+}
+
 type ProviderCapacityReport struct {
-	SourceID                  string     `json:"sourceId"`
-	State                     string     `json:"state"`
-	Message                   string     `json:"message"`
-	LimitOrigin               string     `json:"limitOrigin"`
-	ReportedLimit             *int       `json:"reportedLimit,omitempty"`
-	ProviderActiveConnections *int       `json:"providerActiveConnections,omitempty"`
-	CheckedAt                 *time.Time `json:"checkedAt,omitempty"`
-	CacheExpiresAt            *time.Time `json:"cacheExpiresAt,omitempty"`
-	Cached                    bool       `json:"cached"`
-	ConfiguredLimit           int        `json:"configuredLimit"`
-	SharedConfiguredLimit     int        `json:"sharedConfiguredLimit"`
-	LocalConnections          int        `json:"localConnections"`
-	EnforcedLimit             int        `json:"enforcedLimit"`
-	AutomaticAdoptionEnabled  bool       `json:"automaticAdoptionEnabled"`
-	AutomaticLimit            *int       `json:"automaticLimit,omitempty"`
-	AutomaticExpiresAt        *time.Time `json:"automaticExpiresAt,omitempty"`
-	EnforcementOrigin         string     `json:"enforcementOrigin"`
+	SourceID                  string                `json:"sourceId"`
+	State                     string                `json:"state"`
+	Message                   string                `json:"message"`
+	LimitOrigin               string                `json:"limitOrigin"`
+	ReportedLimit             *int                  `json:"reportedLimit,omitempty"`
+	ProviderActiveConnections *int                  `json:"providerActiveConnections,omitempty"`
+	CheckedAt                 *time.Time            `json:"checkedAt,omitempty"`
+	CacheExpiresAt            *time.Time            `json:"cacheExpiresAt,omitempty"`
+	Cached                    bool                  `json:"cached"`
+	ConfiguredLimit           int                   `json:"configuredLimit"`
+	SharedConfiguredLimit     int                   `json:"sharedConfiguredLimit"`
+	LocalConnections          int                   `json:"localConnections"`
+	LocalSnapshotCompletedAt  time.Time             `json:"localSnapshotCompletedAt"`
+	ExternalUsage             ProviderExternalUsage `json:"externalUsage"`
+	EnforcedLimit             int                   `json:"enforcedLimit"`
+	AutomaticAdoptionEnabled  bool                  `json:"automaticAdoptionEnabled"`
+	AutomaticLimit            *int                  `json:"automaticLimit,omitempty"`
+	AutomaticExpiresAt        *time.Time            `json:"automaticExpiresAt,omitempty"`
+	EnforcementOrigin         string                `json:"enforcementOrigin"`
 }
 
 type providerCapacityEntry struct {
@@ -348,6 +357,14 @@ func (h *LiveHandler) CheckProviderCapacity(w http.ResponseWriter, r *http.Reque
 	}
 	var automatic livecapacity.AutomaticLimit
 	report.LocalConnections, report.EnforcedLimit, automatic = livecapacity.Default.UsageWithAutomaticLimit(bucket, report.SharedConfiguredLimit)
+	// This is our local sampling completion, separately from the older cached
+	// provider-response/check completion. Neither is a provider measurement time.
+	report.LocalSnapshotCompletedAt = time.Now().UTC()
+	report.ExternalUsage = ProviderExternalUsage{State: "unknown", Reason: "provider_count_unavailable"}
+	if report.ProviderActiveConnections != nil {
+		report.ExternalUsage.Reason = "no_common_trusted_measurement"
+	}
+
 	report.AutomaticAdoptionEnabled = latest.Live.AutoAdoptProviderLimits
 	report.EnforcementOrigin = "manual"
 	if automatic.Limit > 0 {

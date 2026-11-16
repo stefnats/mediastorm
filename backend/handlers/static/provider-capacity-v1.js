@@ -55,10 +55,17 @@
                 if (Number.isInteger(report.reportedLimit) && report.reportedLimit > 0)
                     facts.append(node('p', 'Provider-reported limit: ' + report.reportedLimit));
                 if (Number.isInteger(report.providerActiveConnections) && report.providerActiveConnections >= 0)
-                    facts.append(node('p', 'Provider-reported active connections: ' + report.providerActiveConnections));
+                    facts.append(node('p', 'Provider-reported active connections: ' + report.providerActiveConnections + (fresh() ? ' (at check)' : ' (expired snapshot)')));
+                else
+                    facts.append(node('p', 'Provider-reported active connections: Unknown (not available from this check)'));
                 if (Number.isInteger(report.localConnections) && report.localConnections >= 0)
                     facts.append(node('p', 'Connections reserved by Mediastorm: ' + report.localConnections));
                 facts.append(node('p', 'Connection counts are snapshots. They do not reliably identify usage by other apps.'));
+                facts.append(node('p', 'Usage outside Mediastorm: Unknown'));
+                facts.append(node('p', report.externalUsage?.reason === 'provider_count_unavailable'
+                    ? 'The provider did not supply a usable authenticated active-connection count. Usage by other apps cannot be determined.'
+                    : 'Provider counts and local reservations are separate snapshots, including inputs opening or closing. There is no common trusted measurement to identify usage by other apps.'));
+
                 facts.append(node('p', report.automaticAdoptionEnabled
                     ? 'Automatic adoption at check: enabled for fresh checked global-provider reports on the shared account budget. Expired, unavailable or changed-source reports use the manual limit.'
                     : 'Automatic adoption at check: off. Use reported limit copies a value to the form; save settings to change the manual limit.'));
@@ -68,7 +75,10 @@
                     facts.append(node('p', 'Local admission cap at check: ' + (report.enforcedLimit > 0 ? report.enforcedLimit : 'Not configured')));
 
                 const checked = Date.parse(report.checkedAt);
-                if (Number.isFinite(checked)) facts.append(node('p', 'Checked: ' + new Date(checked).toLocaleString() + (report.cached ? ' (cached)' : '')));
+                if (Number.isFinite(checked)) facts.append(node('p', 'Provider response check completed: ' + new Date(checked).toLocaleString() + (report.cached ? ' (cached)' : '')));
+                const localChecked = Date.parse(report.localSnapshotCompletedAt);
+                if (Number.isFinite(localChecked)) facts.append(node('p', 'Local reservation snapshot completed: ' + new Date(localChecked).toLocaleString()));
+                facts.append(node('p', 'These are server observation times, not a provider measurement time.'));
                 use.disabled = !usable();
             };
             const load = async () => {

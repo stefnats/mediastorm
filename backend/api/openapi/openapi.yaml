@@ -3161,20 +3161,43 @@ components:
     ProviderCapacityReport:
       type: object
       additionalProperties: false
-      required: [sourceId, state, message, limitOrigin, cached, configuredLimit, sharedConfiguredLimit, localConnections, enforcedLimit]
+      required: [sourceId, state, message, limitOrigin, cached, configuredLimit, sharedConfiguredLimit, localConnections, enforcedLimit, externalUsage, localSnapshotCompletedAt]
       properties:
         sourceId: {type: string}
         state: {type: string, enum: [available, unknown, unsupported, unavailable]}
         message: {type: string}
         limitOrigin: {type: string, enum: [provider_account, unknown]}
         reportedLimit: {type: integer, minimum: 1}
-        providerActiveConnections: {type: integer, minimum: 0}
-        checkedAt: {type: string, format: date-time}
+        providerActiveConnections:
+          type: integer
+          minimum: 0
+          description: Optional aggregate active_cons from an authenticated active provider response, even when the connection limit is unknown. Missing or invalid is unknown, never zero. It is not an external-app count and is not combined arithmetically with local reservations.
+        checkedAt:
+          type: string
+          format: date-time
+          description: Server completion time of the provider-response/check processing, retained on cache reads. Not the provider measurement time and not the time of the later local reservation snapshot.
         cacheExpiresAt: {type: string, format: date-time}
         cached: {type: boolean}
         configuredLimit: {type: integer, minimum: 0}
         sharedConfiguredLimit: {type: integer, minimum: 0}
-        localConnections: {type: integer, minimum: 0}
+        localConnections:
+          type: integer
+          minimum: 0
+          description: Local server-process reservations, including inputs still opening or closing and shared upstream semantics. Not an atomic common sample with the provider aggregate.
+        localSnapshotCompletedAt:
+          type: string
+          format: date-time
+          description: Server completion time immediately after the local reservation/policy snapshot; resampled per response without renewing checkedAt.
+        externalUsage:
+          type: object
+          additionalProperties: false
+          required: [state, reason]
+          description: External occupancy remains unknown for this producer. No measured external count, zero, range or inferred difference is provided; no extra polling or client enumeration occurs.
+          properties:
+            state: {type: string, enum: [unknown]}
+            reason:
+              type: string
+              enum: [provider_count_unavailable, no_common_trusted_measurement]
         enforcedLimit: {type: integer, minimum: 0}
         automaticAdoptionEnabled:
           type: boolean
