@@ -1868,3 +1868,53 @@ independent/root checks; those two new branches remain local. The latest
 separately authorized native publication is still the exact Saved Love branch.
 Repeated targeted events overlap the normal suites. No production activation,
 real provider request, private playlist or new upstream submission occurred.
+
+## Fork-only atomic parent flag seam and native DVR contract
+
+The [internal parent mutation seam](https://github.com/stefnats/mediastorm/tree/feature/parent-mutation)
+binds one original authenticated request, actor, owner and exact kids-flag intent.
+Its private password proof performs real bcrypt outside database locks. Commit
+locks accounts in stable order, then the original session and target, compares
+complete original row versions including ABA and updates only the flag and its
+timestamp. Current actor role is authoritative; the persisted session role is a
+historical cache and grants no authority. Original context and the minimum
+original expiry/deadline/30-second bound never renew. Copies, imports, foreign
+store instances and replay cannot create a proof. An uncertain commit remains
+OutcomeUnknown: the actual lost-ack test confirms a real write and no replay.
+
+Exactly two sources/one production file passed 220 focused normal events with
+eight optional skips, a 64-event real PostgreSQL group with no skips, 192 race
+events and both builds. The PG group overlaps normal/race; counts are not added.
+Own NOLOGIN roles and schemas, actual concurrent connections and lock telemetry
+cover expiry/cancel, original credentials, role/owner/PIN/kids changes, unchanged
+value ABA, deletion, opaque proof misuse and commit acknowledgement loss. The
+initial strict cached-session-role hypothesis is retained as a contract
+experiment with exact source/raw, not a vulnerability or product RED.
+
+This flag-only primitive is not a replacement for the existing setter defaults,
+shared public password-attempt budget, UI intent protocol or cache persistence.
+It has no service, Main or public-route caller. Legacy full-cache writes can
+still overwrite a later committed row; targeted versioned persistence is the
+next separate prerequisite. No public family or age/file/playback grant is added.
+Independent/root checks cover the complete sources, both archives, all pre-run
+and phase pins, runners, tool, raw reports and binary.
+
+The [native recording request contract](https://github.com/stefnats/mediastorm/tree/test/native-recording-timing-contract)
+adds one test file and no production source. The two unchanged native builder
+URLs pass through actual local HTTP, recording service, descriptor FFprobe and
+positive response schema. One counted probe produces the observation; passive
+read preserves its exact bytes. Wrong method and a retired original session
+produce no extra probe. Seven normal and 21 race events pass. Auth is injected
+over controlled ports, not a full login/SQL/authenticated Android-send proof.
+A wrong expected403 versus the existing intended404 was corrected only in the
+fixture, with exact test/pin/raw retained. A runner parse typo occurred before
+Go test execution and is separately recorded, not a product failure.
+
+The clean combined revision daab6ccf301fe138225560cd136e3621f14db49c passed 10,773
+cases in 106 packages with 38 optional skips and built at
+the same clean revision. Eight isolated synthetic PG optins and four immutable
+native query exports ran; source, runner and all export bytes stayed unchanged.
+No real provider input, private playlist, production activation or new upstream
+submission occurred. The separate local native foreground-listener packet
+passed 2,116 tests and both APKs; its new branch remains local while publication
+approval for the previously named five branches is pending.
