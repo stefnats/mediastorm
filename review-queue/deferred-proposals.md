@@ -1263,3 +1263,44 @@ all-writers, media authorization, age grant or activation claim.
 
 The packet remains in the fork; no production activation, private playlist or
 new upstream submission occurred.
+
+## Fork-only protected web DVR downloads
+
+The [recordings UI](https://github.com/stefnats/mediastorm/tree/feature/web-dvr-export)
+now offers original-parts ZIP downloads in admin and account views. Large archives
+use the browser's normal download transport, without a full in-memory Blob.
+Temporary owner unlocks travel only in a bounded same-origin POST body, never
+in URLs, cookies or persistent client storage. The private cookie bridge checks
+current full-session/account/profile authority, exact Origin and a single token;
+PIN replies are buffered and released only after unchanged original authority.
+No public API/export-core behavior or age policy is changed.
+
+Deferred frame/PIN replies retain their action generation. An old denial cannot
+replace a newer prompt or start a download after a profile change. Status says
+requested, not completed; browser cancellation and the original export guard
+control actual transfer lifetime. Two actual candidate REDs are archived with
+source/test hashes: stale A/B control and an authorized comma-token collection
+that violated the new single-value protocol, not an authentication bypass.
+The A/B case is unchanged in the final Python although a separate later block
+was added; whole-file identity is not invented.
+
+All 4,318 affected normal cases passed with 39 optional skips; 111 main-package
+race cases, 40 API cases, three actual browser flows and their nine repeated race
+runs passed. The real recordings page downloaded six byte-identical ZIPs across
+admin/account and 320/390/1280 widths, without URL credentials or page errors.
+Actual tests cover late PIN/profile replies, cancellation/slot join and PIN
+replacement during a transfer. Independent review verified all seven files
+(three production), patch/archive, binary, runners, raw reports and RED snapshots.
+A historical rate-limit assertion crossed a real refill interval, not a data race;
+its corrected burst test is separate from actual wrong-PIN verification. One
+existing planning selector now targets its forecast aria-label; the unchanged
+assertion and all three final browser flows were rerun after that test-only edit.
+
+The clean integration commit
+[79005bb6e18f3f4a69a7f1063dd3c791fa7c4526](https://github.com/stefnats/mediastorm/commit/79005bb6e18f3f4a69a7f1063dd3c791fa7c4526)
+retains the isolated live fixture correction and passes 9,980
+cases with 38 optional skips across 106 packages,
+including the actual new browser test, then builds at the same clean commit.
+[Exact seven-file feature delta](https://github.com/stefnats/mediastorm/compare/399c7f10aefa9b48f970aa6182f9b672c88f79df...8d90049df7edc26d1522c56e5714aeb149f74036).
+No production activation, real provider, private playlist or new upstream
+submission occurred. Physical Safari/native-device acceptance remains separate.
