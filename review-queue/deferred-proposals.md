@@ -309,3 +309,51 @@ Combined `9989edb15c41ab9b85b2a042b0871e4c0b85f409` passes 8,839 cases with
 38 explicit opt-in skips, synthetic PostgreSQL and local authenticated browser
 fixtures. Its server binary has matching clean commit metadata. No private
 playlist, provider query, upstream PR/comment, deployment or application start.
+
+## Fork-only DVR capture parts and source failover
+
+[Backend](https://github.com/stefnats/mediastorm/tree/feature/dvr-source-failover)
+and [TV/phone](https://github.com/stefnats/mediastorm-androidtv/tree/feature/native-dvr-parts)
+preserve each recording input attempt in an exclusive owned file. Optional
+failover revalidates current station, profile rights and quality before ordinary
+private capacity admission. Country, language and time-shifted broadcasts stay
+distinct. Old processes join and flush before releasing their connection.
+Existing explicitly chosen primary transports retain their authorization path;
+automatic alternatives require supported direct M3U/Xtream input.
+
+Parts with different codecs/audio layouts are never appended or remuxed together.
+Gaps and interrupted/multipart outcomes remain incomplete. Default playback uses
+the lowest nonempty available part, whose HTTP response ends at its own EOF even
+if another part is recording. Explicit parts support HEAD/Range. Native closed
+part actions start at zero without progress/resume writes or automatic chaining.
+Continuous playback, merging and export of every part remain separate work.
+
+Migration 076 adds PostgreSQL capture metadata. Startup marks interrupted ledgers
+honestly without fabricating closure times. Restore cancels and joins registered
+writers before its transaction, gates new registration and strips imported source
+authority. Public responses omit source URLs/private paths/run identifiers;
+owned part resolution rejects imported locations, symlinks and forged selectors.
+Deletion waits for actual writer cleanup. No production restore or migration ran.
+
+Validation: 3,639 affected backend cases with 42 explicit environment/opt-in
+skips, 45 repeated runtime/compatibility race cases, 84 repeated HTTP race cases,
+39 repeated planning race cases, API/schema cases and build pass. These reruns
+overlap the ordinary cases. Actual local FFmpeg fixtures switch H264/mono to
+HEVC/stereo; independent ffprobe and first-part hashes verify preserved files.
+Ten real Go handler replies are byte-identical native resources. Native: 1,192
+tests, 48 new cases, no skips, both APKs and empty private debug prefills.
+Independent reviews are clean; physical rendering/focus/touch remains open.
+
+Exact deltas: [backend 9989edb1 to 7ddae24c](https://github.com/stefnats/mediastorm/compare/9989edb15c41ab9b85b2a042b0871e4c0b85f409...7ddae24cb41e48288b126f499ec3db272391f1ef),
+[native e5be1697 to fa893ef3](https://github.com/stefnats/mediastorm-androidtv/compare/e5be1697da84701c6b29f713f6ecaecfa17d03e5...fa893ef329d1e394d8a1295ad42ba360a5bfa0c6).
+A [separate one-file test correction](https://github.com/stefnats/mediastorm/compare/7ddae24cb41e48288b126f499ec3db272391f1ef...91859233654469e8a2f864b0575f54dc9fdcce8b)
+gives an existing loopback fixture a unique cache URL; unchanged assertions pass
+20 repeated runs. Production cache behavior is unchanged. These branches inherit
+fork prerequisites and require extraction before any upstream review.
+
+Combined `91859233654469e8a2f864b0575f54dc9fdcce8b` passes 8,936 cases with
+38 explicit opt-in skips, synthetic PostgreSQL and
+local authenticated browser fixtures. The server binary has matching clean commit
+metadata. No private playlist, real provider/indexer query, upstream PR/comment,
+deployment or application restart. The next scoped packet is server-side stream
+filters over bounded retained snapshots; filter/page actions will remain cache-only.
