@@ -17,6 +17,7 @@ import (
 	"novastream/config"
 	"novastream/models"
 	"novastream/services/customlists"
+	metadatapkg "novastream/services/metadata"
 	"novastream/services/playback"
 	"novastream/services/watchlist"
 
@@ -169,6 +170,10 @@ func (h *DisplayListHandler) get(w http.ResponseWriter, r *http.Request) {
 	}
 	if source == "loved-stored" {
 		h.getLovedStored(w, r, userID, languageQuery)
+		return
+	}
+	if source == "collection-cached" {
+		h.getCachedCollection(w, r, userID, languageQuery)
 		return
 	}
 	metadataSource := source != "watchlist" &&
@@ -452,6 +457,105 @@ func (h *DisplayListHandler) getHiddenManagement(w http.ResponseWriter, r *http.
 
 // lovedStoredItem exposes the saved preference time without adding private
 // rating keys or aliases to the catalogue title contract.
+type cachedCollectionReader interface {
+	GetCachedCollectionSnapshot(int64, time.Time) (*metadatapkg.CachedCollectionSnapshot, error)
+}
+type cachedCollectionBrowseResponse struct {
+	DisplayListResponse
+	Collection cachedCollectionBrowseObservation `json:"collection"`
+}
+type cachedCollectionBrowseObservation struct {
+	ID               int64     `json:"id"`
+	Name             string    `json:"name"`
+	MetadataLanguage string    `json:"metadataLanguage"`
+	ObservedAt       time.Time `json:"observedAt"`
+	ExpiresAt        time.Time `json:"expiresAt"`
+}
+
+func cachedCollectionError(w http.ResponseWriter, status int, code string) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	_ = json.NewEncoder(w).Encode(map[string]string{"code": code, "error": "Cached collection unavailable"})
+}
+
+func (h *DisplayListHandler) getCachedCollection(w http.ResponseWriter, r *http.Request, userID string, language displayListOriginalLanguageQuery) {
+	w.Header().Set("Cache-Control", "private, no-store")
+	if h.MetadataHandler == nil || h.MetadataHandler.UsersService == nil {
+		cachedCollectionError(w, 503, "collection_reader_unavailable")
+		return
+	}
+	profile, found := h.MetadataHandler.UsersService.Get(userID)
+	if !found || profile.ID != userID {
+		cachedCollectionError(w, 404, "profile_not_found")
+		return
+	}
+	if profile.IsKidsProfile {
+		cachedCollectionError(w, 403, "kids_collection_unavailable")
+		return
+	}
+	id, err := validateCachedCollectionQuery(r, parseDisplayListQuery(r))
+	if err != nil {
+		http.Error(w, err.Error(), 400)
+		return
+	}
+	if h.HiddenItemsService == nil {
+		cachedCollectionError(w, 503, "collection_reader_unavailable")
+		return
+	}
+	reader, ok := h.metadataForUser(userID).(cachedCollectionReader)
+	if !ok {
+		cachedCollectionError(w, 503, "collection_reader_unavailable")
+		return
+	}
+	at := time.Now()
+	snapshot, err := reader.GetCachedCollectionSnapshot(id, at)
+	if err != nil || snapshot == nil || snapshot.CollectionID != id || !snapshot.ExpiresAt.After(at) {
+		cachedCollectionError(w, 409, "collection_snapshot_unavailable")
+		return
+	}
+	// The concrete getter validates its own complete provider observation. No
+	// Title/client input may fill a missing collection or original-language fact.
+	titles := snapshot.Titles()
+	policy := resolveUnreleasedVisibilityPolicy(h.MetadataHandler.CfgManager, h.MetadataHandler.UserSettings, h.MetadataHandler.ClientSettings, userID, requestClientID(r), unreleasedVisibilityLists)
+	titles = filterTitlesByUnreleasedVisibility(titles, policy)
+	visible := make([]models.Title, 0, len(titles))
+	for _, title := range titles {
+		if !h.HiddenItemsService.ShouldHideTitleMap(userID, map[string]interface{}{"id": title.ID, "name": title.Name, "mediaType": title.MediaType, "tmdbId": strconv.FormatInt(title.TMDBID, 10)}) {
+			visible = append(visible, title)
+		}
+	}
+	if language.active() {
+		matches := h.originalLanguageMatcher(userID, language)
+		filtered := make([]models.Title, 0, len(visible))
+		for _, title := range visible {
+			if matches(title.ID, title.MediaType) {
+				filtered = append(filtered, title)
+			}
+		}
+		visible = filtered
+	}
+	items, alphabet := queryCachedCollectionTitles(visible, parseDisplayListQuery(r))
+	total := len(items)
+	limit, offset := parseLimitOffset(r)
+	if offset >= len(items) {
+		items = []models.Title{}
+	} else {
+		items = items[offset:]
+		if limit > 0 && limit < len(items) {
+			items = items[:limit]
+		}
+	}
+	if r.Context().Err() != nil {
+		return
+	}
+	if !snapshot.ExpiresAt.After(time.Now()) {
+		cachedCollectionError(w, 409, "collection_snapshot_unavailable")
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(cachedCollectionBrowseResponse{DisplayListResponse: DisplayListResponse{Source: "collection-cached", Items: items, Total: total, AlphabetBuckets: alphabet, OriginalLanguageFilterSupported: true}, Collection: cachedCollectionBrowseObservation{ID: snapshot.CollectionID, Name: snapshot.Name, MetadataLanguage: snapshot.MetadataLanguage, ObservedAt: snapshot.ObservedAt, ExpiresAt: snapshot.ExpiresAt}})
+}
+
 type lovedStoredItem struct {
 	Rank      int          `json:"rank"`
 	Title     models.Title `json:"title"`

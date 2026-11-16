@@ -2477,9 +2477,11 @@ func (c *tmdbClient) fetchCollectionDetails(ctx context.Context, collectionID in
 			Popularity   float64 `json:"popularity"`
 		} `json:"parts"`
 	}
-	if err := json.NewDecoder(resp.Body).Decode(&collection); err != nil {
+	legacyBody, observedBody := collectionResponseForLegacy(resp.Body)
+	if err := json.NewDecoder(legacyBody).Decode(&collection); err != nil {
 		return nil, err
 	}
+	c.recordCollectionSnapshot(collectionID, observedBody, time.Now())
 
 	details := &models.CollectionDetails{
 		ID:       collection.ID,

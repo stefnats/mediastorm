@@ -576,9 +576,99 @@ func queryLovedStoredItems(items []lovedStoredItem, q displayListQueryOptions) (
 
 func displayListOriginalLanguageSupportedSource(source string) bool {
 	switch source {
-	case "watchlist", "custom-list", "custom_user_list", "custom-user-list", "permanent-prequeue", "hidden", "loved-stored":
+	case "watchlist", "custom-list", "custom_user_list", "custom-user-list", "permanent-prequeue", "hidden", "loved-stored", "collection-cached":
 		return true
 	default:
 		return false
 	}
+}
+
+func validateCachedCollectionQuery(r *http.Request, q displayListQueryOptions) (int64, error) {
+	if err := validateLovedStoredQuery(r, q); err != nil {
+		return 0, err
+	}
+	if q.SortBy == "added" {
+		return 0, fmt.Errorf("cached collections do not contain added timestamps")
+	}
+	allowed := map[string]bool{}
+	for _, key := range []string{"source", "collectionId", "id", "limit", "offset", "homeView", "titleFilter", "filterMediaType", "sortBy", "sortDirection", "alphabet", "originalLanguages", "includeUnknownOriginalLanguage", "watchStatus", "genres", "ratingSource", "hideWatched", "hideUnreleased", "includeUnwatchedCounts", "includeFacets", "token", "profileUnlock", "profileId", "userId", "clientId"} {
+		allowed[key] = true
+	}
+	values, err := url.ParseQuery(r.URL.RawQuery)
+	if err != nil {
+		return 0, fmt.Errorf("invalid cached collection query")
+	}
+	for key, items := range values {
+		if !allowed[key] {
+			return 0, fmt.Errorf("unsupported cached collection requirement: %s", key)
+		}
+		if key == "originalLanguages" || key == "includeUnknownOriginalLanguage" {
+			continue
+		}
+		for _, item := range items {
+			if len(items) > 0 && item != items[0] {
+				return 0, fmt.Errorf("conflicting cached collection query")
+			}
+		}
+	}
+	for _, key := range []string{"limit", "offset"} {
+		if raw, exists := values[key]; exists {
+			v, err := strconv.Atoi(raw[0])
+			if err != nil || v < 0 || v > 1000000 || strconv.Itoa(v) != raw[0] {
+				return 0, fmt.Errorf("invalid cached collection pagination")
+			}
+		}
+	}
+	var id int64
+	for _, key := range []string{"collectionId", "id"} {
+		for _, raw := range values[key] {
+			v, err := strconv.ParseInt(raw, 10, 64)
+			if err != nil || v <= 0 || strconv.FormatInt(v, 10) != raw || id != 0 && id != v {
+				return 0, fmt.Errorf("invalid collection identity")
+			}
+			id = v
+		}
+	}
+	if id == 0 {
+		return 0, fmt.Errorf("collectionId is required")
+	}
+	return id, nil
+}
+
+func queryCachedCollectionTitles(items []models.Title, q displayListQueryOptions) ([]models.Title, []string) {
+	index := make([]models.WatchlistItem, len(items))
+	for i, title := range items {
+		index[i] = models.WatchlistItem{ID: strconv.Itoa(i), Name: title.Name, MediaType: title.MediaType, Year: title.Year}
+	}
+	filter := q
+	filter.SortBy = "default"
+	filtered, _, alphabet := queryWatchlistItems(index, filter)
+	result := make([]models.Title, 0, len(filtered))
+	for _, row := range filtered {
+		i, _ := strconv.Atoi(row.ID)
+		result = append(result, items[i])
+	}
+	direction := 1
+	if q.SortDirection == "desc" {
+		direction = -1
+	}
+	sort.SliceStable(result, func(i, j int) bool {
+		a, b := result[i], result[j]
+		if q.SortBy != "name" {
+			if (a.Year == 0) != (b.Year == 0) {
+				return a.Year != 0
+			}
+			if a.Year != b.Year {
+				return compareDisplayListInt(a.Year, b.Year)*direction < 0
+			}
+		}
+		if cmp := strings.Compare(sortableDisplayListName(a.Name), sortableDisplayListName(b.Name)); cmp != 0 {
+			if q.SortBy == "name" {
+				return cmp*direction < 0
+			}
+			return cmp < 0
+		}
+		return a.ID < b.ID
+	})
+	return result, alphabet
 }

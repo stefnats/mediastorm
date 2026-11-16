@@ -1822,7 +1822,8 @@ paths:
         `items` is `WatchlistItem[]` for `watchlist` / `custom-list`,
         `TrendingItem[]` for `permanent-prequeue` and custom-list shelves,
         `HiddenItem[]` for the complete stored `hidden` management index,
-        `LovedStoredItem[]` for the complete `loved-stored` browse view, and
+        `LovedStoredItem[]` for the complete `loved-stored` browse view,
+        plain `Title[]` for `collection-cached`, and
         the delegated metadata payload (usually `TrendingItem[]`) for
         discovery sources.
       parameters:
@@ -1831,7 +1832,8 @@ paths:
           description: |
             Up to 32 distinct registered canonical ISO639-3 codes, separated by
             commas. Supported only for stored watchlist, custom-list (including
-            aliases and custom-list shelves), permanent-prequeue, hidden, and loved-stored. Matches
+            aliases and custom-list shelves), permanent-prequeue, hidden, loved-stored
+            and collection-cached. Matches
             current cached provider original-language facts before paging;
             missing, expired or unbound facts are unknown. No provider lookup
             is started. Invalid or unsupported active queries return 400.
@@ -1853,7 +1855,29 @@ paths:
             `popular-on-server`, `recently-watched`, `trending`, `genre`,
             `decade`, `mdblist`, `stremio`, `tmdb-list`, `trakt-list`,
             `publicmetadb-list`, `simkl-list`, `letterboxd-list`,
-            `personalized`, `loved`, `loved-stored`, `custom-ai`, `similar`, `collection`.
+            `personalized`, `loved`, `loved-stored`, `custom-ai`, `similar`, `collection`, `collection-cached`.
+            `collection-cached` is an explicit adult-only cache browse, separate
+            from the normal collection GET. Requires collectionId (or matching id).
+            Only a complete normal TMDB collection response with its actual ID,
+            explicit parts array, unique valid IDs and at most 4096 members / 4 MiB
+            can populate the language-specific snapshot. It expires within 24 hours
+            or the shorter existing cache TTL. Browsing never refreshes it;
+            missing, expired, malformed or unavailable snapshots return 409 with
+            code collection_snapshot_unavailable, never an empty success or
+            automatic provider request. An actual observed empty array is valid.
+            Existing GET /api/metadata/collection is the explicit normal reload.
+            Supports original language, titleFilter, filterMediaType, alphabet,
+            default/year chronological ordering (undated last) and name sorting.
+            Hidden and verified cache language selection precede total/page;
+            limit=0 returns the entire matching pool with no 500-item discovery cap.
+            Unsupported genre/watched/runtime/rating/count/facet/added requirements
+            return 400 before reading the snapshot. Only already captured primary
+            release dates feed existing unreleased visibility; no release-window
+            warmup, History, artwork fetch, enrichment, source or prequeue work.
+            The collection response identifies original observation and expiry.
+            No global catalogue completeness, immutable pages, file/audio/age
+            proof or playback permission is granted. Existing collection route,
+            kids enrichment and legacy semantics remain separate.
             `hidden` reads every saved suppression marker for the owned profile,
             without applying suppression to itself or starting metadata/history,
             artwork, source, prequeue or provider work. Its IDs and hiddenAt stay
@@ -1895,6 +1919,14 @@ paths:
           in: query
           schema:
             type: string
+        - name: collectionId
+          in: query
+          description: Positive canonical collection ID for collection-cached; conflicting id aliases reject.
+          schema: {type: integer, format: int64, minimum: 1}
+        - name: id
+          in: query
+          description: Existing collection ID alias; must agree with collectionId when both are supplied.
+          schema: {type: integer, format: int64, minimum: 1}
         - name: sortBy
           in: query
           schema:
@@ -1974,6 +2006,11 @@ paths:
           $ref: '#/components/responses/Forbidden'
         '404':
           $ref: '#/components/responses/Error'
+        '409':
+          description: Requested collection snapshot is unavailable; only explicit normal reload may contact the provider.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Error'}
         '503':
           $ref: '#/components/responses/Error'
 
@@ -4971,7 +5008,17 @@ components:
         originalLanguageFilterSupported:
           type: boolean
           readOnly: true
-          description: True only for normalized stored watchlist, custom-list, permanent-prequeue, hidden and loved-stored sources. On these sources total is the effective filtered count before pagination; sourceTotal or unfilteredTotal must not drive paging.
+          description: True only for normalized stored watchlist, custom-list, permanent-prequeue, hidden, loved-stored and explicit collection-cached sources. On these sources total is the effective filtered count before pagination; sourceTotal or unfilteredTotal must not drive paging.
+        collection:
+          type: object
+          description: Present only for collection-cached. Original provider observation without renewal or immutable-page guarantee.
+          required: [id, name, metadataLanguage, observedAt, expiresAt]
+          properties:
+            id: {type: integer, format: int64, minimum: 1}
+            name: {type: string}
+            metadataLanguage: {type: string}
+            observedAt: {type: string, format: date-time}
+            expiresAt: {type: string, format: date-time}
         source:
           type: string
           description: Canonical source name actually served.
@@ -4986,6 +5033,7 @@ components:
               - $ref: '#/components/schemas/SeriesWatchState'
               - $ref: '#/components/schemas/HiddenItem'
               - $ref: '#/components/schemas/LovedStoredItem'
+              - $ref: '#/components/schemas/Title'
         total:
           type: integer
           description: Total matching items before paging.

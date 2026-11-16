@@ -1134,6 +1134,7 @@ func TestOpenAPIContract(t *testing.T) {
 	t.Run("usenet_fallback_list", func(t *testing.T) { sabFallbackListOpenAPIContract(t, v) })
 
 	t.Run("loved_stored_language", func(t *testing.T) { lovedStoredLanguageOpenAPIContract(t, v) })
+	t.Run("collection_cached", func(t *testing.T) { collectionCachedOpenAPIContract(t, v) })
 
 	t.Run("hls_zero_restart", func(t *testing.T) { hlsZeroRestartOpenAPIContract(t, v) })
 
