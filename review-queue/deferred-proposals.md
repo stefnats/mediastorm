@@ -696,3 +696,23 @@ and zero HTTP requests, without claiming a successful full Android ApiClient.sen
 Real gateway/report flows use deferred request fixtures; no physical controller,
 decoder, device, production service, provider or new upstream submission was used.
 No new content or age grant is introduced.
+
+## Fork-only skip-segment request context
+
+The [skip-segment correction](https://github.com/stefnats/mediastorm-androidtv/tree/fix/native-skip-context)
+retains the original player epoch and profile through intro/recap/credits lookup,
+chapter fallback and repeated marker lookup. Each stage checks its generation
+before and after suspension. Terminal access denials retire the operation and
+use the existing player-denial path without chapters or another lookup. Ordinary
+lookup failures retain the existing fallback. Retired or replaced-duration
+responses cannot overwrite newer ranges.
+
+Validation: all 1,439 native tests passed, including 15 new cases; both APKs built.
+Independent source/frozen-artifact review and root checks confirmed all six files,
+raw XML, APK hashes, registry and five empty private debug prefills.
+[Exact six-file delta](https://github.com/stefnats/mediastorm-androidtv/compare/949ff0a801cdb14466224d113f9ea699bb169eda...5d9b482863a6472ad7c264da8ec5a2a42464e27a).
+The epoch transitions are simulated without Android profile-picker activation.
+Successful HTTP uses the production query/context helper seam; actual ApiClient
+methods prove stale rejection before HTTP, without claiming a successful full
+Android send, decoder or device test. No production or provider request occurred.
+Subtitle search/extraction/translation is the next independent native package.
