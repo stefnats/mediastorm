@@ -1724,3 +1724,48 @@ The clean combined commit c6cc8ab8e4c9c554a823b15c4ad158c59233756c passed 10,447
 with 38 optional skips and built at that same revision. Runner, source and both
 native builder exports remained unchanged. No deployment, real provider/indexer
 request, private playlist or new upstream submission occurred.
+
+## Fork-only complete observed Collection language browse
+
+The [explicit collection-cached source](https://github.com/stefnats/mediastorm/tree/feature/collection-cached-language)
+filters a complete normally observed Collection before totals, alphabet and paging.
+The existing ordinary Collection GET remains the producer and reload path. Only
+a matching actual ID, explicit complete parts array, unique valid movie IDs and
+bounded response become a snapshot, with at most 4,096 members and 4MiB. Metadata
+language, original observation and a maximum 24-hour or shorter cache expiry bind
+the saved pool. Missing, stale or invalid data is unavailable, not an empty result.
+
+Known adult profiles, existing account/profile/PIN guards and Hidden suppression
+remain required. Original language uses existing verified detail evidence; scalar
+Collection language cannot repair it. Unsupported metadata requirements reject
+early. Browsing starts no provider, enrichment, artwork, history or source work.
+This catalogue observation grants no age, file, audio or playback authority and
+does not freeze a language-filtered view across later evidence changes.
+
+All 5,020 focused normal events passed with 46 optional skips; 333 race, 46 API,
+nine actual wire replies, six exact-old-source compatibility controls and both
+builds passed. The actual same-body replay error regression has a complete
+ten-source pre-fix archive/raw. Existing first-JSON-value legacy behavior remains,
+while an incomplete/oversized/trailing/error response creates no observation.
+The additional 27/81 account/session/profile/PIN cases are overlapping final subsets.
+
+One early development fixture made an unintended external TMDB attempt with an
+explicit synthetic key and received 401, with zero local producer calls. This is
+an explicit exception, not a local success. Its nine relevant sources and a tool
+output transcript are retained; no separate JSON raw or kernel isolation is
+invented. Source inspection confirmed synthetic/empty provider arguments and an
+isolated minimal test configuration. The corrected fixture installs its guard
+before every constructor, rewrites only its exact expected operation to its
+explicit local server, and uses Proxy=nil plus exact literal-loopback dialing.
+Final producer 1/denied 0 and foreign-operation/no-dial controls passed.
+
+The native consumer separately passed 2,045 tests and both APKs, with nine unchanged
+Go reply fixtures; it is locally committed, publication pending. Six actual native
+builder URLs passed 7 normal/21 race events in the [separate single-file contract](https://github.com/stefnats/mediastorm/tree/test/native-collection-contract)
+against the actual local producer/cache/language/schema paths. It injects a
+synthetic owner; login, SQL, full Android transport and device execution are not
+claimed. All sources, pins, complete archives, binaries and raw reports were
+checked independently. The clean combined commit 271862f7e682a95b2d134dc3919fb279a4794ff3 passed
+10,566 cases in 106 packages with 38 optional skips, then built at that same
+revision. Source, runner and all three native query exports stayed unchanged.
+No production activation, private playlist or new upstream submission occurred.
