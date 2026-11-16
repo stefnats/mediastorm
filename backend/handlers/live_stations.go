@@ -8,6 +8,7 @@ import (
 	"strings"
 	"unicode"
 
+	"golang.org/x/text/language"
 	"novastream/config"
 )
 
@@ -34,6 +35,24 @@ func canonicalStationCountry(raw string) string {
 		return "IT"
 	}
 	return ""
+}
+
+// Explicit provider country metadata may use ISO 3166 alpha-2 codes beyond
+// the legacy label aliases. Do not apply this to category/name tokens such as
+// "TV" or "SD", which are not evidence of Tuvalu or Sudan in a playlist label.
+func explicitStationCountry(raw string) string {
+	if known := canonicalStationCountry(raw); known != "" {
+		return known
+	}
+	value := strings.ToUpper(strings.TrimSpace(raw))
+	if len(value) != 2 || value[0] < 'A' || value[0] > 'Z' || value[1] < 'A' || value[1] > 'Z' {
+		return ""
+	}
+	region, err := language.ParseRegion(value)
+	if err != nil || !region.IsCountry() || region.IsPrivateUse() || region.String() != value {
+		return ""
+	}
+	return value
 }
 
 func compactStationName(raw string) string {
@@ -77,7 +96,12 @@ func liveStationIdentity(channel LiveChannel, mappings []config.LiveStationMappi
 		}
 	}
 	name := strings.TrimSpace(channel.Name)
-	country := canonicalStationCountry(channel.TvgCountry)
+	country := explicitStationCountry(channel.TvgCountry)
+	if strings.TrimSpace(channel.TvgCountry) != "" && country == "" {
+		// Explicit but unrecognized country metadata cannot silently become a
+		// shared unknown-country station or be overridden by a category label.
+		return stationID("unknown-country|" + strings.ToLower(strings.TrimSpace(channel.TvgCountry)) + "|" + channel.SourceID + "|" + channel.ID), channel.Name
+	}
 	if match := stationCountryPrefix.FindStringSubmatch(name); len(match) > 1 {
 		if country == "" {
 			country = canonicalStationCountry(match[1])

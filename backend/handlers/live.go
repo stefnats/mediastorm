@@ -116,16 +116,18 @@ const (
 )
 
 type liveChannelsRequest struct {
-	GroupByStation *bool    `json:"groupByStation,omitempty"`
-	ProfileID      string   `json:"profileId"`
-	SourceID       string   `json:"sourceId"`
-	SourceIndex    *int     `json:"sourceIndex,omitempty"`
-	Offset         *int     `json:"offset,omitempty"`
-	Limit          *int     `json:"limit,omitempty"`
-	Filter         string   `json:"filter,omitempty"`
-	Categories     []string `json:"categories,omitempty"`
-	FavoriteIDs    []string `json:"favoriteIds,omitempty"`
-	FavoritesOnly  bool     `json:"favoritesOnly,omitempty"`
+	GroupByStation     *bool    `json:"groupByStation,omitempty"`
+	ProfileID          string   `json:"profileId"`
+	SourceID           string   `json:"sourceId"`
+	SourceIndex        *int     `json:"sourceIndex,omitempty"`
+	Offset             *int     `json:"offset,omitempty"`
+	Limit              *int     `json:"limit,omitempty"`
+	Filter             string   `json:"filter,omitempty"`
+	Categories         []string `json:"categories,omitempty"`
+	FavoriteIDs        []string `json:"favoriteIds,omitempty"`
+	FavoriteStationIDs []string `json:"favoriteStationIds,omitempty"`
+	FavoritesOnly      bool     `json:"favoritesOnly,omitempty"`
+	IncludeHidden      bool     `json:"includeHidden,omitempty"`
 }
 
 func parseLiveChannelPagination(r *http.Request) (offset, limit int, paginated bool, err error) {
@@ -161,12 +163,14 @@ func parseLiveChannelsRequest(w http.ResponseWriter, r *http.Request) (liveChann
 		}
 		query := r.URL.Query()
 		request := liveChannelsRequest{
-			ProfileID:     query.Get("profileId"),
-			SourceID:      query.Get("sourceId"),
-			Filter:        query.Get("filter"),
-			Categories:    query["category"],
-			FavoriteIDs:   query["favoriteId"],
-			FavoritesOnly: parseOptionalBool(query.Get("favoritesOnly")),
+			ProfileID:          query.Get("profileId"),
+			SourceID:           query.Get("sourceId"),
+			Filter:             query.Get("filter"),
+			Categories:         query["category"],
+			FavoriteIDs:        query["favoriteId"],
+			FavoriteStationIDs: query["favoriteStationId"],
+			FavoritesOnly:      parseOptionalBool(query.Get("favoritesOnly")),
+			IncludeHidden:      parseOptionalBool(query.Get("includeHidden")),
 		}
 		if query.Has("groupByStation") {
 			group := parseOptionalBool(query.Get("groupByStation"))
@@ -225,6 +229,15 @@ func normalizeLiveChannelsRequest(request liveChannelsRequest) (liveChannelsRequ
 	}
 	request.Categories = normalizedLiveChannelValues(request.Categories)
 	request.FavoriteIDs = normalizedLiveChannelValues(request.FavoriteIDs)
+	if len(request.FavoriteStationIDs) > models.MaxFavoriteStations {
+		return liveChannelsRequest{}, false, fmt.Errorf("favoriteStationIds must contain at most %d values", models.MaxFavoriteStations)
+	}
+	request.FavoriteStationIDs = normalizedLiveChannelValues(request.FavoriteStationIDs)
+	for _, id := range request.FavoriteStationIDs {
+		if !models.ValidFavoriteStationID(id) {
+			return liveChannelsRequest{}, false, errors.New("invalid favorite station identity")
+		}
+	}
 
 	paginated := request.Offset != nil || request.Limit != nil
 	if !paginated {
@@ -2797,12 +2810,33 @@ func (h *LiveHandler) getChannels(w http.ResponseWriter, r *http.Request, admin 
 		len(filter.EnabledCategories),
 		filter.MaxChannels,
 	)
+	stationFavorites := make(map[string]struct{}, len(request.FavoriteStationIDs))
+	for _, id := range request.FavoriteStationIDs {
+		stationFavorites[id] = struct{}{}
+	}
+	// Only explicitly opted-in requests expand station membership. Legacy
+	// requests keep their source pruning and individual-channel semantics.
+	stationMode := len(stationFavorites) > 0
+	hiddenStationChannels := map[string]struct{}{}
+	if stationMode && profileID != "" && h.userSettingsSvc != nil {
+		profileSettings, err := h.userSettingsSvc.Get(profileID)
+		if err != nil {
+			http.Error(w, `{"error":"failed to load profile preferences"}`, http.StatusInternalServerError)
+			return
+		}
+		if profileSettings != nil {
+			for _, id := range profileSettings.LiveTV.HiddenChannels {
+				hiddenStationChannels[id] = struct{}{}
+			}
+		}
+	}
+	effectiveFavoriteIDs := append([]string(nil), request.FavoriteIDs...)
 	includeSourceInID := len(sources) > 1
 	totalBeforeFilter := 0
 	successfulSources := 0
 	failedSources := 0
 	for _, liveSource := range selectedSources {
-		if request.FavoritesOnly && !liveSourceMayContainFavorites(liveSource.ID, request.FavoriteIDs, includeSourceInID) {
+		if request.FavoritesOnly && !stationMode && !liveSourceMayContainFavorites(liveSource.ID, request.FavoriteIDs, includeSourceInID) {
 			continue
 		}
 		sourceFilter := filter
@@ -2818,7 +2852,7 @@ func (h *LiveHandler) getChannels(w http.ResponseWriter, r *http.Request, admin 
 		} else if liveSource.Mode == "stremio" {
 			sourceChannels, sourceErr = h.fetchStremioChannels(r.Context(), liveSource.ManifestURL, liveSource.ProxyURL)
 		} else if liveSource.Mode == "stalker" {
-			if paginated && request.Filter == "" && !request.FavoritesOnly && len(selectedSources) == 1 {
+			if paginated && request.Filter == "" && !request.FavoritesOnly && !stationMode && len(selectedSources) == 1 {
 				sourceChannels, stalkerCategoryTotal, stalkerAvailableCategories, sourceErr = fetchStalkerCategoryChannels(
 					r.Context(), stalkerConfigFromResolvedSource(liveSource), request.Categories, offset+limit,
 				)
@@ -2856,16 +2890,37 @@ func (h *LiveHandler) getChannels(w http.ResponseWriter, r *http.Request, admin 
 		enabledAvailabilityChannels := filterChannelsByEnabledCategories(availabilityChannels, sourceFilter.EnabledCategories)
 		categorySourceChannels = append(categorySourceChannels, enabledAvailabilityChannels...)
 		enabledChannels := filterChannelsByEnabledCategories(sourceChannels, sourceFilter.EnabledCategories)
-		selectedChannels := filterChannelsByRequestedCategories(
-			enabledChannels, request.Categories, request.FavoriteIDs, liveSource.ID, includeSourceInID,
-		)
+		var selectedChannels []LiveChannel
+		if stationMode {
+			// Source tagging and the existing station resolver run before any
+			// requested-category, favorite, pinning or page reduction.
+			tagged := annotateLiveStations(tagChannelsWithSource(enabledChannels, liveSource, includeSourceInID), settings.Live.StationMappings)
+			visible := tagged[:0]
+			for _, channel := range tagged {
+				if _, hidden := hiddenStationChannels[channel.ID]; hidden && !request.IncludeHidden {
+					continue
+				}
+				visible = append(visible, channel)
+				if _, favorite := stationFavorites[channel.StationID]; favorite {
+					effectiveFavoriteIDs = append(effectiveFavoriteIDs, channel.ID)
+				}
+			}
+			selectedChannels = filterStationFavoriteCategories(visible, request.Categories, effectiveFavoriteIDs)
+			selectedChannels = prioritizeStationFavoriteChannels(selectedChannels, effectiveFavoriteIDs, request.FavoritesOnly)
+		} else {
+			selectedChannels = filterChannelsByRequestedCategories(enabledChannels, request.Categories, request.FavoriteIDs, liveSource.ID, includeSourceInID)
+		}
 		if sourceFilter.MaxChannels > 0 && len(selectedChannels) > sourceFilter.MaxChannels {
 			selectedChannels = selectedChannels[:sourceFilter.MaxChannels]
 			if stalkerCategoryTotal > sourceFilter.MaxChannels {
 				stalkerCategoryTotal = sourceFilter.MaxChannels
 			}
 		}
-		allChannels = append(allChannels, tagChannelsWithSource(selectedChannels, liveSource, includeSourceInID)...)
+		if stationMode {
+			allChannels = append(allChannels, selectedChannels...)
+		} else {
+			allChannels = append(allChannels, tagChannelsWithSource(selectedChannels, liveSource, includeSourceInID)...)
+		}
 	}
 	if successfulSources == 0 && failedSources > 0 {
 		http.Error(w, `{"error":"failed to fetch channels"}`, http.StatusBadGateway)
@@ -2891,7 +2946,7 @@ func (h *LiveHandler) getChannels(w http.ResponseWriter, r *http.Request, admin 
 		}
 	}
 	requestedFavoriteIDs := make(map[string]struct{})
-	for _, channelID := range request.FavoriteIDs {
+	for _, channelID := range effectiveFavoriteIDs {
 		if channelID = strings.TrimSpace(channelID); channelID != "" {
 			requestedFavoriteIDs[channelID] = struct{}{}
 		}

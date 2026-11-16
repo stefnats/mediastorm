@@ -1123,6 +1123,8 @@ func TestOpenAPIContract(t *testing.T) {
 
 	t.Run("media_evidence_health", func(t *testing.T) { mediaEvidenceHealthContract(t, v) })
 
+	t.Run("station_favorites", func(t *testing.T) { stationFavoritesOpenAPIContract(t, v) })
+
 	t.Run("coverage", func(t *testing.T) {
 		covered := v.Covered()
 		var missing []string

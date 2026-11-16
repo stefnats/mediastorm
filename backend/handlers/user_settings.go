@@ -85,7 +85,8 @@ func (h *UserSettingsHandler) GetSettings(w http.ResponseWriter, r *http.Request
 	json.NewEncoder(w).Encode(struct {
 		models.UserSettings
 		AutomaticLibrarySelectionSupported bool `json:"automaticLibrarySelectionSupported"`
-	}{settings, true})
+		StationFavoritesSupported          bool `json:"stationFavoritesSupported"`
+	}{settings, true, true})
 }
 
 // GetFrontendSettingState reports which exposed fields are stored as profile
@@ -143,11 +144,15 @@ func (h *UserSettingsHandler) PutSettings(w http.ResponseWriter, r *http.Request
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
-	// Update keeps the stored intro/recap auto-skip values regardless of the
-	// body; report those rather than whatever the client sent.
-	if saved, err := h.Service.Get(userID); err == nil && saved != nil {
-		settings.Playback.IntroAutoSkip = saved.Playback.IntroAutoSkip
-		settings.Playback.RecapAutoSkip = saved.Playback.RecapAutoSkip
+	// Dedicated preferences retain their current stored values regardless of
+	// the body; return those values, including an absent last station bookmark.
+	if saved, err := h.Service.Get(userID); err == nil {
+		settings.LiveTV.FavoriteStationIDs = nil
+		if saved != nil {
+			settings.LiveTV.FavoriteStationIDs = append([]string(nil), saved.LiveTV.FavoriteStationIDs...)
+			settings.Playback.IntroAutoSkip = saved.Playback.IntroAutoSkip
+			settings.Playback.RecapAutoSkip = saved.Playback.RecapAutoSkip
+		}
 	}
 
 	var previous models.UserSettings

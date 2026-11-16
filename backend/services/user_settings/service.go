@@ -142,6 +142,7 @@ func (s *Service) Get(userID string) (*models.UserSettings, error) {
 
 	if settings, ok := s.settings[userID]; ok {
 		copy := settings
+		copy.LiveTV.FavoriteStationIDs = append([]string(nil), settings.LiveTV.FavoriteStationIDs...)
 		copy.SportsPreferences = append(json.RawMessage(nil), settings.SportsPreferences...)
 		return &copy, nil
 	}
@@ -236,6 +237,7 @@ func (s *Service) GetWithDefaults(userID string, defaults models.UserSettings) (
 		merged := base.Merge(settings.Recommendations).WithDefaults()
 		settings.Recommendations = &merged
 		// Sanitize language codes (strip stray quotes/whitespace)
+		settings.LiveTV.FavoriteStationIDs = append([]string(nil), settings.LiveTV.FavoriteStationIDs...)
 		settings.SportsPreferences = append(json.RawMessage(nil), settings.SportsPreferences...)
 		settings.Playback.PreferredAudioLanguage = sanitizeLanguageCode(settings.Playback.PreferredAudioLanguage)
 		settings.Playback.PreferredSubtitleLanguage = sanitizeLanguageCode(settings.Playback.PreferredSubtitleLanguage)
@@ -710,6 +712,8 @@ func (s *Service) Update(userID string, settings models.UserSettings) error {
 	// If settings are empty, delete the entry instead of saving
 	// General settings PUTs (including older clients) cannot replace sports data.
 	settings.SportsPreferences = s.settings[userID].SportsPreferences
+	// Station bookmarks change only through the dedicated idempotent endpoint.
+	settings.LiveTV.FavoriteStationIDs = append([]string(nil), s.settings[userID].LiveTV.FavoriteStationIDs...)
 	// Intro, recap and next-episode autoplay change only through UpdateSkipping (PATCH
 	// /settings/skipping). Clients send back the whole document they last
 	// read, often from a cache older than the latest toggle, so a full PUT
@@ -856,6 +860,7 @@ func isSettingsEmpty(s models.UserSettings) bool {
 	// Check LiveTV
 	if len(s.LiveTV.HiddenChannels) > 0 ||
 		len(s.LiveTV.FavoriteChannels) > 0 ||
+		len(s.LiveTV.FavoriteStationIDs) > 0 ||
 		len(s.LiveTV.SelectedCategories) > 0 ||
 		s.LiveTV.Mode != nil ||
 		s.LiveTV.PlaylistURL != nil ||

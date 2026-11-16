@@ -856,6 +856,8 @@ func Register(
 	profileProtected.HandleFunc("/{userID}/kids/lists", usersHandler.Options).Methods(http.MethodOptions)
 
 	profileProtected.HandleFunc("/{userID}/settings", userSettingsHandler.GetSettings).Methods(http.MethodGet)
+	profileProtected.HandleFunc("/{userID}/live-tv/station-favorites", userSettingsHandler.SetStationFavorite).Methods(http.MethodPut)
+	profileProtected.HandleFunc("/{userID}/live-tv/station-favorites", userSettingsHandler.Options).Methods(http.MethodOptions)
 	registerSportsPreferenceRoutes(profileProtected, userSettingsHandler)
 	profileProtected.HandleFunc("/{userID}/settings/skipping", userSettingsHandler.PatchSkipping).Methods(http.MethodPatch)
 	profileProtected.HandleFunc("/{userID}/settings/skipping", userSettingsHandler.Options).Methods(http.MethodOptions)

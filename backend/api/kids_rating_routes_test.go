@@ -27,7 +27,7 @@ type kidsRatingRouteFixture struct {
 	profile, foreign, token, scoped, master, unlock string
 }
 
-func newKidsRatingRouteFixture(t *testing.T) *kidsRatingRouteFixture {
+func newKidsRatingRouteFixture(t *testing.T, configureSettings ...func(*users.Service) *handlers.UserSettingsHandler) *kidsRatingRouteFixture {
 	t.Helper()
 	t.Setenv("STRMR_INITIAL_ADMIN_PASSWORD", "synthetic-master-password")
 	directory := t.TempDir()
@@ -101,6 +101,10 @@ func newKidsRatingRouteFixture(t *testing.T) *kidsRatingRouteFixture {
 		return config.SecuritySettings{EnforceProfilePins: true, ProfileUnlockTTLHours: 1}
 	}
 	metadataHandler := &handlers.MetadataHandler{}
+	var profileSettings *handlers.UserSettingsHandler
+	if len(configureSettings) > 0 {
+		profileSettings = configureSettings[0](profiles)
+	}
 	router := mux.NewRouter()
 	// Exercise the production registration and middleware rather than copying
 	// the two routes into a test-only router. Unused handlers are never invoked.
@@ -128,7 +132,7 @@ func newKidsRatingRouteFixture(t *testing.T) *kidsRatingRouteFixture {
 		nil,                                 // epgHandler
 		nil,                                 // sportsHandler
 		nil,                                 // sportsLinksHandler
-		nil,                                 // userSettingsHandler
+		profileSettings,                     // userSettingsHandler
 		nil,                                 // subtitlesHandler
 		nil,                                 // clientsHandler
 		nil,                                 // contentPreferencesHandler

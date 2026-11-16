@@ -777,14 +777,61 @@ paths:
               schema:
                 type: object
                 additionalProperties: true
-                required: [automaticLibrarySelectionSupported]
+                required: [automaticLibrarySelectionSupported, stationFavoritesSupported]
                 properties:
                   automaticLibrarySelectionSupported:
                     type: boolean
                     enum: [true]
                     readOnly: true
+                  stationFavoritesSupported:
+                    type: boolean
+                    enum: [true]
+                    readOnly: true
+                  liveTV:
+                    type: object
+                    additionalProperties: true
+                    properties:
+                      favoriteStationIds: {$ref: '#/components/schemas/FavoriteStationIds'}
         '404':
           $ref: '#/components/responses/Error'
+
+  /api/users/{userId}/live-tv/station-favorites:
+    put:
+      operationId: setProfileStationFavorite
+      summary: Add or remove one profile-wide station favorite
+      description: |
+        Idempotently updates only favoriteStationIds. Existing per-stream
+        favoriteChannels and all unrelated settings remain unchanged. Requires
+        a full owned account session, profile unlock and an adult profile.
+        Does not fetch a playlist or open a stream. General settings PUTs
+        cannot overwrite this field from an omitted or stale snapshot.
+        Bookmarks do not grant access to a provider or broadcast variant.
+      parameters:
+        - {name: userId, in: path, required: true, schema: {type: string}}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [stationId, favorite]
+              properties:
+                stationId: {$ref: '#/components/schemas/FavoriteStationId'}
+                favorite: {type: boolean}
+      responses:
+        '200':
+          description: Current profile station favorites, always an array
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/StationFavoriteSnapshot'}
+        '400': {$ref: '#/components/responses/Error'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '404': {$ref: '#/components/responses/Error'}
+        '409': {$ref: '#/components/responses/Error'}
+        '413': {$ref: '#/components/responses/Error'}
+        '500': {$ref: '#/components/responses/Error'}
+        '503': {$ref: '#/components/responses/Error'}
 
   /api/users/{userId}/settings/skipping:
     patch:
@@ -5054,6 +5101,81 @@ components:
           type: array
           items: {$ref: '#/components/schemas/SubtitleTrackInfo'}
         mediaEvidence: {$ref: '#/components/schemas/MediaEvidence'}
+
+    FavoriteStationId:
+      type: string
+      pattern: '^station:[0-9a-f]{24}$'
+      description: Existing server-resolved station identity. Never inferred by clients or treated as source access.
+    FavoriteStationIds:
+      type: array
+      maxItems: 10000
+      uniqueItems: true
+      items: {$ref: '#/components/schemas/FavoriteStationId'}
+    StationFavoriteSnapshot:
+      type: object
+      additionalProperties: false
+      required: [favoriteStationIds]
+      properties:
+        favoriteStationIds: {$ref: '#/components/schemas/FavoriteStationIds'}
+    StationFavoritesChannelsRequest:
+      type: object
+      additionalProperties: true
+      description: |
+        Existing GET/POST /api/live/channels supports additive favoriteStationIds
+        (GET repeated favoriteStationId). Absent/empty station IDs preserve legacy
+        source-favorite behavior. Nonempty IDs include current allowed members
+        before category/favorite pinning and source count caps, followed by
+        filtering and paging. includeHidden defaults false; true bypasses only
+        personal hidden-channel preferences, never provider or category access.
+        The existing bounded catalogue fetch is used; no stream is opened.
+      properties:
+        profileId: {type: string}
+        sourceId: {type: string}
+        sourceIndex: {type: integer, minimum: 0}
+        offset: {type: integer, minimum: 0}
+        limit: {type: integer, minimum: 1, maximum: 500}
+        filter: {type: string, maxLength: 512}
+        categories: {type: array, maxItems: 2000, items: {type: string}}
+        favoriteIds: {type: array, maxItems: 10000, items: {type: string}}
+        favoriteStationIds: {$ref: '#/components/schemas/FavoriteStationIds'}
+        favoritesOnly: {type: boolean}
+        includeHidden: {type: boolean, default: false}
+        groupByStation: {type: boolean}
+    StationFavoritesChannelsResponse:
+      type: object
+      required: [channels, totalBeforeFilter, total, offset, limit, hasMore, availableCategories]
+      properties:
+        channels:
+          type: array
+          items:
+            type: object
+            required: [id, name, url, stationId, stationVariants]
+            properties:
+              id: {type: string}
+              name: {type: string}
+              url: {type: string}
+              sourceId: {type: string}
+              sourceName: {type: string}
+              stationId: {$ref: '#/components/schemas/FavoriteStationId'}
+              stationName: {type: string}
+              stationVariants:
+                type: integer
+                minimum: 1
+                description: Visible eligible members after filters and count caps, before response pagination.
+        totalBeforeFilter: {type: integer, minimum: 0}
+        total: {type: integer, minimum: 0}
+        offset: {type: integer, minimum: 0}
+        limit: {type: integer, minimum: 0}
+        hasMore: {type: boolean}
+        availableCategories: {type: array, items: {type: string}}
+        sources:
+          type: array
+          items:
+            type: object
+            required: [id, name]
+            properties:
+              id: {type: string}
+              name: {type: string}
 
     OriginalLanguageEvidence:
       type: object
