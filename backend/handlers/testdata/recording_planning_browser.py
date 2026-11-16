@@ -123,7 +123,7 @@ with sync_playwright() as p:
     prepare(page)
     dialog = open_forecast(page)
     page.evaluate('window.originalPlanNow = Date.now; Date.now = () => originalPlanNow() + 16000')
-    page.wait_for_function("document.querySelector('dialog button:last-child').disabled")
+    page.wait_for_function("""document.querySelector('dialog[aria-label="Recording capacity forecast"] button:last-child').disabled""")
     assert 'expired' in dialog.inner_text()
     assert info()['writes'] == before
     page.keyboard.press('Escape')

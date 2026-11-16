@@ -140,10 +140,25 @@
         <div id="recordingRuleForecastItems"></div>
     </div>
 </div>
+<p id="recordingExportStatus" role="status" aria-live="polite" style="margin-top:1rem;overflow-wrap:anywhere;"></p>
+<dialog id="recordingExportPIN" style="max-width:min(26rem,90vw);background:var(--bg-secondary);color:var(--text-primary);border:1px solid var(--border);border-radius:0.75rem;">
+    <form>
+        <h2>Unlock recording profile</h2>
+        <p>Enter this profile's PIN to download its original parts. The parts remain separate files.</p>
+        <label for="recordingExportPINInput">Profile PIN</label>
+        <input id="recordingExportPINInput" data-export-pin type="password" autocomplete="off" class="form-input" maxlength="256">
+        <p data-export-pin-status role="status" aria-live="polite"></p>
+        <div style="display:flex;gap:0.5rem;flex-wrap:wrap;">
+            <button type="submit" class="btn btn-primary">Unlock and download</button>
+            <button type="button" data-export-pin-cancel class="btn btn-secondary">Cancel</button>
+        </div>
+    </form>
+</dialog>
 {{end}}
 
 {{define "scripts"}}
 <script src="{{.ServerBasePath}}/api/static/recording-plan-v1.js"></script>
+<script src="{{.ServerBasePath}}/api/static/recording-export-v1.js"></script>
 <script>
 const profiles = {{json .Users}};
 let channels = [];
@@ -152,6 +167,11 @@ let epgPrograms = [];
 let serverTimeOffsetMs = 0;
 let currentRecordingPlan = new Map();
 let recordingListGeneration = 0;
+const recordingExportUI = window.RecordingExportUI.create({
+    container: document.getElementById('recordingsList'), status: document.getElementById('recordingExportStatus'), dialog: document.getElementById('recordingExportPIN'),
+    profile: () => document.getElementById('recordingProfile').value, generation: () => recordingListGeneration,
+    apiBase: () => pageApiBase(), pinBase: () => basePath + '/api/users'
+});
 
 function pageApiBase() {
     return basePath + '/api/live/recordings';
@@ -297,7 +317,7 @@ function renderRecordingRules(rules) {
         return;
     }
     container.innerHTML = rules.map((rule) => `
-        <div data-rule-id="${escapeHtml(rule.id)}" style="padding: 1rem; border-bottom: 1px solid var(--border); display: flex; justify-content: space-between; gap: 1rem; align-items: center; flex-wrap: wrap;">
+        <div data-rule-id="${escapeHtml(rule.id)}" style="padding: 1rem; border-bottom: 1px solid var(--border); display: flex; justify-content: space-between; gap: 1rem; align-items: center; flex-wrap: wrap; flex-wrap: wrap;">
             <div style="min-width: 220px; flex: 1;">
                 <div style="font-weight: 600; overflow-wrap: anywhere;">${escapeHtml(rule.pattern)}</div>
                 <div style="font-size: 0.85rem; color: var(--text-muted); margin-top: 0.25rem;">${rule.matchType === 'regex' ? 'Regex' : 'Program title'} · ${escapeHtml(rule.allChannels ? 'All channels' : rule.channelName || 'Selected channel')}</div>
@@ -554,6 +574,7 @@ function streamRecordingURL(id) {
 }
 
 async function loadRecordings() {
+    recordingExportUI.invalidate();
     const generation = ++recordingListGeneration;
     const profileId = document.getElementById('recordingProfile').value;
     const response = await fetch(`${pageApiBase()}?profileId=${encodeURIComponent(profileId)}`);
@@ -591,6 +612,7 @@ function renderRuleForecast(plan, fallback) {
 }
 
 function renderRecordings(recordings) {
+    recordingExportUI.bind(recordings, document.getElementById('recordingProfile').value, recordingListGeneration);
     const container = document.getElementById('recordingsList');
     if (!recordings.length) {
         container.innerHTML = '<div style="padding: 1rem; color: var(--text-muted);">No recordings scheduled.</div>';
@@ -600,22 +622,25 @@ function renderRecordings(recordings) {
         const canCancel = ['pending', 'starting', 'running'].includes(recording.status);
         const canDelete = !['starting', 'running'].includes(recording.status) && !(recording.ruleId && recording.status === 'pending');
         const canPlay = ['completed', 'running', 'cancelled', 'failed'].includes(recording.status) && !!recording.outputPath;
-        const playLabel = recording.status === 'running' ? 'Play In Progress' : 'Play';
+        const exportInfo = window.RecordingExportUI.details(recording);
+        const playLabel = exportInfo && exportInfo.count > 1 ? 'Play first available part' : (recording.status === 'running' ? 'Play In Progress' : 'Play');
         const visibleError = recording.error && recording.error !== 'recording rule paused' && !recording.error.startsWith('cancelled because the recording rule')
             ? recording.error
             : '';
         return `
-            <div style="padding: 1rem; border-bottom: 1px solid var(--border); display: flex; justify-content: space-between; gap: 1rem; align-items: center;">
-                <div style="min-width: 0;">
+            <div style="padding: 1rem; border-bottom: 1px solid var(--border); display: flex; justify-content: space-between; gap: 1rem; align-items: center; flex-wrap: wrap;">
+                <div style="min-width: 0; flex: 1 1 15rem;">
                     <div style="font-weight: 600;">${escapeHtml(recording.title || recording.channelName || 'Recording')}</div>
                     <div style="font-size: 0.85rem; color: var(--text-muted); margin-top: 0.25rem;">
                         ${escapeHtml(recording.channelName || '')} · ${escapeHtml(recording.status)} · ${new Date(recording.startAt).toLocaleString()}
                     </div>
                     ${canCancel ? `<div class="recording-plan-hint" style="font-size:0.85rem; margin-top:0.4rem; overflow-wrap:anywhere;">${escapeHtml(recordingPlanUI.label(currentRecordingPlan.get(recording.id)))}</div>` : ''}
+                    ${exportInfo ? `<div style="font-size:0.85rem;margin-top:0.4rem;">${exportInfo.count} original part${exportInfo.count === 1 ? '' : 's'}${exportInfo.incomplete ? ' · Incomplete capture' : ''}. ZIP keeps parts separate; gaps are not filled.</div>` : ''}
                     ${visibleError ? `<div style="font-size: 0.8rem; color: var(--danger); margin-top: 0.25rem;">${escapeHtml(visibleError)}</div>` : ''}
                 </div>
                 <div style="display: flex; gap: 0.5rem; flex-wrap: wrap;">
                     ${canPlay ? `<a class="btn btn-primary btn-sm" href="${streamRecordingURL(recording.id)}" target="_blank" rel="noreferrer">${playLabel}</a>` : ''}
+                    ${exportInfo && exportInfo.exportable ? `<button type="button" class="btn btn-secondary btn-sm" data-recording-export="${escapeHtml(recording.id)}">Download parts ZIP</button>` : ''}
                     ${canCancel ? `<button class="btn btn-secondary btn-sm" onclick="cancelRecording('${escapeHtml(recording.id)}')">Cancel</button>` : ''}
                     ${canDelete ? `<button class="btn btn-danger btn-sm" onclick="deleteRecording('${escapeHtml(recording.id)}')">Delete</button>` : ''}
                 </div>
@@ -632,6 +657,7 @@ function escapeHtml(text) {
 }
 
 document.getElementById('recordingProfile').addEventListener('change', async () => {
+    recordingExportUI.invalidate();
     recordingPlanUI.invalidate();
     recordingListGeneration++;
     currentRecordingPlan = new Map();
@@ -654,7 +680,7 @@ document.getElementById('recordingChannel').addEventListener('change', () => {
 
 document.addEventListener('input', () => recordingPlanUI.invalidate());
 document.addEventListener('change', () => recordingPlanUI.invalidate());
-window.addEventListener('pagehide', () => recordingPlanUI.invalidate());
+window.addEventListener('pagehide', () => { recordingPlanUI.invalidate(); recordingExportUI.invalidate(); });
 
 initProfiles();
 loadChannels().then(async () => {

@@ -1,15 +1,20 @@
 package main
 
 import (
+	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
 	"io"
 	"log"
 	"log/slog"
+	"mime"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -22,6 +27,7 @@ import (
 	"novastream/handlers"
 	"novastream/internal/accountrecovery"
 	"novastream/internal/apiusage"
+	"novastream/internal/auth"
 	"novastream/internal/database"
 	"novastream/internal/datastore"
 	"novastream/internal/integration"
@@ -29,6 +35,7 @@ import (
 	"novastream/internal/livecapacity"
 	"novastream/internal/mediaidentity"
 	"novastream/internal/pool"
+	"novastream/internal/requestsecurity"
 	"novastream/internal/slogutil"
 	internalusenet "novastream/internal/usenet"
 	"novastream/internal/webdav"
@@ -1546,6 +1553,10 @@ func main() {
 	r.HandleFunc("/admin/api/live/recordings/time-block", adminUIHandler.RequireAuth(recordingsHandler.CreateTimeBlock)).Methods(http.MethodPost)
 	r.HandleFunc("/admin/api/live/recordings/{recordingID}", adminUIHandler.RequireAuth(recordingsHandler.Get)).Methods(http.MethodGet)
 	r.HandleFunc("/admin/api/live/recordings/{recordingID}", adminUIHandler.RequireAuth(recordingsHandler.Delete)).Methods(http.MethodDelete)
+	webRecordingPIN, webRecordingDownload := newRecordingWebPOSTHandlers(sessionsService, accountsService, userService, usersHandler.VerifyPin, recordingsHandler.ExportParts)
+	webRecordingPINLimiter := api.NewIPRateLimiter(rate.Every(6*time.Second), 10)
+	r.HandleFunc("/admin/api/users/{userID}/pin/verify", recordingWebOrigin(adminUIHandler.RequireAuth(api.RateLimitHandlerFunc(webRecordingPINLimiter, webRecordingPIN)))).Methods(http.MethodPost)
+	r.HandleFunc("/admin/api/live/recordings/{recordingID}/export", recordingWebOrigin(adminUIHandler.RequireAuth(webRecordingDownload))).Methods(http.MethodPost)
 	r.HandleFunc("/admin/api/live/recordings/{recordingID}/export", adminUIHandler.RequireAuth(recordingsHandler.ExportParts)).Methods(http.MethodGet)
 	r.HandleFunc("/admin/api/live/recordings/{recordingID}/stream", adminUIHandler.RequireAuth(recordingsHandler.Stream)).Methods(http.MethodGet)
 	r.HandleFunc("/admin/api/live/recordings/{recordingID}/cancel", adminUIHandler.RequireAuth(recordingsHandler.Cancel)).Methods(http.MethodPost)
@@ -1846,6 +1857,8 @@ func main() {
 	r.HandleFunc("/account/api/live/recordings/time-block", adminUIHandler.RequireAuth(recordingsHandler.CreateTimeBlock)).Methods(http.MethodPost)
 	r.HandleFunc("/account/api/live/recordings/{recordingID}", adminUIHandler.RequireAuth(recordingsHandler.Get)).Methods(http.MethodGet)
 	r.HandleFunc("/account/api/live/recordings/{recordingID}", adminUIHandler.RequireAuth(recordingsHandler.Delete)).Methods(http.MethodDelete)
+	r.HandleFunc("/account/api/users/{userID}/pin/verify", recordingWebOrigin(adminUIHandler.RequireAuth(api.RateLimitHandlerFunc(webRecordingPINLimiter, webRecordingPIN)))).Methods(http.MethodPost)
+	r.HandleFunc("/account/api/live/recordings/{recordingID}/export", recordingWebOrigin(adminUIHandler.RequireAuth(webRecordingDownload))).Methods(http.MethodPost)
 	r.HandleFunc("/account/api/live/recordings/{recordingID}/export", adminUIHandler.RequireAuth(recordingsHandler.ExportParts)).Methods(http.MethodGet)
 	r.HandleFunc("/account/api/live/recordings/{recordingID}/stream", adminUIHandler.RequireAuth(recordingsHandler.Stream)).Methods(http.MethodGet)
 	r.HandleFunc("/account/api/live/recordings/{recordingID}/cancel", adminUIHandler.RequireAuth(recordingsHandler.Cancel)).Methods(http.MethodPost)
@@ -2655,4 +2668,237 @@ func (a jellyfinBridgeController) Apply(cfg config.JellyfinBridgeSettings) error
 func (a jellyfinBridgeController) Status() handlers.JellyfinBridgeStatus {
 	st := a.c.Status()
 	return handlers.JellyfinBridgeStatus{Running: st.Running, Port: st.Port, ServerID: st.ServerID, Error: st.Error}
+}
+
+// recordingWebOrigin protects the new cookie-authenticated POST transports.
+// Forwarded host headers and absent/null origins are never CSRF authority.
+func recordingWebOrigin(next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		origins := r.Header.Values("Origin")
+		sites := r.Header.Values("Sec-Fetch-Site")
+		scheme := "http"
+		if requestsecurity.IsSecure(r) {
+			scheme = "https"
+		}
+		expected, err := url.Parse(scheme + "://" + r.Host)
+		valid := err == nil && expected.User == nil && expected.Host != "" && expected.Path == "" && len(origins) == 1 && len(sites) <= 1 && (len(sites) == 0 || sites[0] == "same-origin")
+		if valid {
+			origin, e := url.Parse(origins[0])
+			valid = e == nil && origin.Scheme == scheme && origin.Host != "" && origin.User == nil && origin.Path == "" && origin.RawQuery == "" && origin.Fragment == "" && origin.Opaque == "" && !origin.ForceQuery && !strings.ContainsAny(origins[0], "?#")
+			port := func(u *url.URL) string {
+				if p := u.Port(); p != "" {
+					return p
+				}
+				if u.Scheme == "https" {
+					return "443"
+				}
+				return "80"
+			}
+			valid = valid && strings.EqualFold(origin.Hostname(), expected.Hostname()) && port(origin) == port(expected)
+		}
+		if !valid {
+			http.Error(w, "same-origin request required", http.StatusForbidden)
+			return
+		}
+		next(w, r)
+	}
+}
+
+// newRecordingWebPOSTHandlers bridges only an already authenticated full cookie
+// session. It never turns a scoped token, caller role or profile into authority.
+func newRecordingWebPOSTHandlers(sessionStore *sessions.Service, accountStore *accounts.Service, profiles *users.Service, verifyPIN, export http.HandlerFunc) (http.HandlerFunc, http.HandlerFunc) {
+	snapshot := func(r *http.Request, profileID string) (*http.Request, [32]byte, bool) {
+		var empty [32]byte
+		claimed, ok := auth.GetSession(r)
+		if !ok || claimed.Token == "" || claimed.Scope != "" || sessionStore == nil || accountStore == nil || profiles == nil || r.Context().Err() != nil {
+			return nil, empty, false
+		}
+		current, err := sessionStore.SnapshotForAuthorization(r.Context(), claimed.Token)
+		if err != nil || current == nil || current.Token != claimed.Token || current.Scope != "" || current.AccountID != claimed.AccountID || auth.GetAccountID(r) != current.AccountID || !current.ExpiresAt.After(time.Now()) {
+			return nil, empty, false
+		}
+		actor, ok := accountStore.Get(current.AccountID)
+		if !ok || actor.ID != current.AccountID || actor.ExpiresAt != nil && !actor.ExpiresAt.After(time.Now()) {
+			return nil, empty, false
+		}
+		profile, ok := profiles.Get(profileID)
+		if !ok || profile.ID != profileID || profile.AccountID == "" || profile.AccountID != actor.ID && !actor.IsMaster {
+			return nil, empty, false
+		}
+		owner, ok := accountStore.Get(profile.AccountID)
+		if !ok || owner.ID != profile.AccountID || owner.ExpiresAt != nil && !owner.ExpiresAt.After(time.Now()) {
+			return nil, empty, false
+		}
+		raw, err := json.Marshal([]any{current, current.Token, actor.ID, actor.IsMaster, actor.ExpiresAt, actor.UpdatedAt, owner.ID, owner.ExpiresAt, owner.UpdatedAt, profile.ID, profile.AccountID, profile.PinHash, profile.IsKidsProfile, profile.UpdatedAt})
+		if err != nil {
+			return nil, empty, false
+		}
+		normalized := *current
+		normalized.IsMaster = actor.IsMaster
+		ctx := context.WithValue(r.Context(), auth.ContextKeySession, normalized)
+		ctx = context.WithValue(ctx, auth.ContextKeyIsMaster, actor.IsMaster)
+		ctx = context.WithValue(ctx, auth.ContextKeyAccountID, actor.ID)
+		return r.WithContext(ctx), sha256.Sum256(raw), r.Context().Err() == nil
+	}
+	readBody := func(w http.ResponseWriter, r *http.Request, contentType string) ([]byte, bool) {
+		mediaType, params, err := mime.ParseMediaType(r.Header.Get("Content-Type"))
+		if err != nil || mediaType != contentType || len(params) > 1 || len(params) == 1 && !strings.EqualFold(params["charset"], "utf-8") || r.URL.RawQuery != "" || len(r.Header.Values("Authorization")) != 0 || len(r.Header.Values("X-Profile-Unlock")) != 0 {
+			http.Error(w, "invalid recording request", http.StatusBadRequest)
+			return nil, false
+		}
+		deadline := time.Now().Add(10 * time.Second)
+		if at, ok := r.Context().Deadline(); ok && at.Before(deadline) {
+			deadline = at
+		}
+		control := http.NewResponseController(w)
+		_ = control.SetReadDeadline(deadline)
+		defer control.SetReadDeadline(time.Time{})
+		if r.Body == nil {
+			http.Error(w, "invalid recording request", http.StatusBadRequest)
+			return nil, false
+		}
+		body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, 8<<10))
+		if err != nil {
+			http.Error(w, "recording request too large or unavailable", http.StatusBadRequest)
+			return nil, false
+		}
+		if r.Context().Err() != nil {
+			return nil, false
+		}
+		return body, true
+	}
+	deny := func(w http.ResponseWriter) { http.Error(w, "recording access unavailable", http.StatusNotFound) }
+	verify := recordingWebOrigin(func(w http.ResponseWriter, r *http.Request) {
+		raw, ok := readBody(w, r, "application/json")
+		if !ok {
+			return
+		}
+		decoder := json.NewDecoder(bytes.NewReader(raw))
+		token, err := decoder.Token()
+		if err != nil || token != json.Delim('{') {
+			http.Error(w, "invalid PIN request", 400)
+			return
+		}
+		count := 0
+		for decoder.More() {
+			key, err := decoder.Token()
+			if err != nil || key != "pin" || count != 0 {
+				http.Error(w, "invalid PIN request", 400)
+				return
+			}
+			var pin string
+			if decoder.Decode(&pin) != nil || len(pin) > 256 {
+				http.Error(w, "invalid PIN request", 400)
+				return
+			}
+			count++
+		}
+		token, err = decoder.Token()
+		var trailing any
+		if err != nil || token != json.Delim('}') || count != 1 || decoder.Decode(&trailing) != io.EOF {
+			http.Error(w, "invalid PIN request", 400)
+			return
+		}
+		id := mux.Vars(r)["userID"]
+		checked, before, ok := snapshot(r, id)
+		if !ok {
+			deny(w)
+			return
+		}
+		checked = checked.Clone(checked.Context())
+		checked.Body = io.NopCloser(bytes.NewReader(raw))
+		reply := &recordingWebPINReply{header: make(http.Header)}
+		api.ProfileOwnershipMiddleware(profiles)(verifyPIN).ServeHTTP(reply, checked)
+		_, after, valid := snapshot(checked, id)
+		if !valid || after != before || reply.overflow {
+			deny(w)
+			return
+		}
+		w.Header().Set("Content-Type", reply.header.Get("Content-Type"))
+		w.Header().Set("Cache-Control", "private, no-store")
+		status := reply.status
+		if status == 0 {
+			status = http.StatusOK
+		}
+		w.WriteHeader(status)
+		_, _ = w.Write(reply.body.Bytes())
+	})
+	download := recordingWebOrigin(func(w http.ResponseWriter, r *http.Request) {
+		raw, ok := readBody(w, r, "application/x-www-form-urlencoded")
+		if !ok {
+			return
+		}
+		fields, err := url.ParseQuery(string(raw))
+		if err != nil || len(fields) < 1 || len(fields) > 2 {
+			http.Error(w, "invalid recording request", 400)
+			return
+		}
+		for key, values := range fields {
+			if key != "profileId" && key != "profileUnlock" || len(values) != 1 {
+				http.Error(w, "invalid recording request", 400)
+				return
+			}
+		}
+		id := fields.Get("profileId")
+		unlock := fields.Get("profileUnlock")
+		safe := func(value string, limit int) bool {
+			if len(value) > limit {
+				return false
+			}
+			for _, ch := range value {
+				if ch < 33 || ch > 126 {
+					return false
+				}
+			}
+			return true
+		}
+		if id == "" || !safe(id, 128) || !safe(unlock, 2048) || strings.ContainsRune(unlock, ',') {
+			http.Error(w, "invalid recording request", 400)
+			return
+		}
+		checked, _, ok := snapshot(r, id)
+		if !ok {
+			deny(w)
+			return
+		}
+		checked = checked.Clone(checked.Context())
+		target := *checked.URL
+		target.RawQuery = url.Values{"profileId": {id}}.Encode()
+		checked.URL = &target
+		checked.Body = http.NoBody
+		checked.ContentLength = 0
+		checked.Header = checked.Header.Clone()
+		checked.Header.Del("Content-Type")
+		checked.Header.Set("X-Profile-Unlock", unlock)
+		export(w, checked)
+	})
+	return verify, download
+}
+
+type recordingWebPINReply struct {
+	header   http.Header
+	body     bytes.Buffer
+	status   int
+	overflow bool
+}
+
+func (w *recordingWebPINReply) Header() http.Header { return w.header }
+func (w *recordingWebPINReply) WriteHeader(status int) {
+	if w.status == 0 {
+		w.status = status
+	}
+}
+func (w *recordingWebPINReply) Write(body []byte) (int, error) {
+	if w.body.Len()+len(body) > 4096 {
+		w.overflow = true
+		return 0, io.ErrShortBuffer
+	}
+	if w.status == 0 {
+		w.status = 200
+	}
+	return w.body.Write(body)
 }
