@@ -1465,3 +1465,50 @@ provider probe, new media/parent grant or all-catalogue filter is introduced.
 The reverse test is committed separately at 14154ed7da23d0f87be0ffb9ed13666d5b2ec197;
 its merge into the next combined backend run is pending. No production activation,
 private playlist or new upstream submission occurred.
+
+## Fork-only durable SAB download handoff status
+
+The [SAB fallback status packet](https://github.com/stefnats/mediastorm/tree/feature/sab-fallback-status)
+makes the existing explicitly configured final-import-failure handoff durable.
+A private receipt is stored before submission. Lost acknowledgements and crash
+windows remain submission_unknown; retry/restart never automatically resubmits.
+Concurrent metadata replacement or re-adding a queue item preserves its receipt.
+The endpoint/credential fingerprint prevents querying an old job on a replacement
+backend. A fresh source check follows a blocked refresh CAS before any status HTTP.
+Only bounded regular no-follow NZB descriptors are read, with a 32 MiB limit.
+This is not an immutable-file or instant disk-read cancellation guarantee.
+
+GET returns persisted sanitized state only. POST explicitly refreshes status with
+bounded concurrency and the original request/session/account deadline capped at
+five seconds. Both actual current SQL master role and nonrenewing session snapshot
+are checked before and after work, without trusting cached IsMaster. Main uses
+the same two-route registration in actual cookie/origin loopback tests. Output
+contains only queue ID, allowlisted state/reason and observation times, without
+credentials, raw provider errors, paths, URLs or private SAB job identifiers.
+download_completed never changes the failed import into a playable or imported
+item. No new automatic Play, Sonarr/Radarr, target storage, quota, cleanup or
+media/parent permission is introduced.
+
+All 4,697 focused normal cases passed with 39 explicit optional skips, alongside
+303 race events, 42 API cases and both builds. Actual isolated PostgreSQL role
+and session tests and actual registered cookie/origin cases each passed eight
+normal and 24 race events, overlapping those totals. Root's earlier 42/126
+session/account-port reports precede the final entry-deadline guard; final author
+runs bind those same test cases to the final source. Seven actual sanitized wire
+replies and schema provenance are retained. Independent and root verification
+cover all twelve sources, six production, complete patch/archive, binary,
+pre-run source pin, runners, tools and raw reports.
+
+Two executed regressions retain exact source archives: ten non-object re-add
+cases erased receipts, and a changed-backend refresh after a blocked SQLite CAS
+issued one old status request instead of zero. An earlier CAS fixture counter
+failure is recorded separately rather than called a product RED. The final test
+captures the old configuration after the actual copy under its lock.
+
+The clean combined commit 65509d379e6007c914aff1bfe691b443e373f9c0 passed 10,212 cases across
+106 packages with 38 optional skips, including the
+previously separate native management reverse contract. Runner, source worktree
+and frozen native query bytes stayed unchanged. The server then built at that
+same revision. Native device execution and a complete managed download/import
+workflow remain separate. No production activation, private playlist, real
+provider request or new upstream submission occurred.
