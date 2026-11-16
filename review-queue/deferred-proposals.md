@@ -269,3 +269,43 @@ series-alias follow-up and passes 8,818 cases with 38 explicit opt-in skips,
 synthetic PostgreSQL, local browser fixtures and existing native contracts.
 The server binary has matching clean commit metadata. No upstream PR, external
 comment, provider query, production deployment or application activation.
+
+## Fork-only profile station favorites
+
+[Backend](https://github.com/stefnats/mediastorm/tree/feature/station-favorites)
+and [TV/phone](https://github.com/stefnats/mediastorm-androidtv/tree/feature/native-station-favorites)
+store favorite broadcasts separately from existing stream favorites. Eligible
+alternatives remain favorites when another allowed playlist is added. A dedicated
+idempotent profile write preserves other settings; old/stale full settings saves
+cannot overwrite the station list. Markerless clients retain their old behavior.
+
+Existing server station identities, explicit regional/language/+1 distinctions,
+source access and enabled-category policies govern membership. Explicit ISO2
+country metadata no longer collapses ES/MX or NL/BE; known German hashes remain
+stable. Personal Show Hidden is explicit and grants no source access. In opt-in
+requests, eligible favorite pinning/filtering precedes the per-source count cap;
+visible grouping counts and pages follow filtering. No stream opens on favorite.
+
+Native group headers and flat/channel/program menus expose distinct station and
+stream actions. A shared profile queue orders writes, scopes settings/pages and
+retries to the original epoch, and preserves EPG initialization across canceled
+startup. Catalog removal does not retune or stop the playing channel.
+
+Validation: 3,479 affected backend cases, 48 repeated race cases, 49 API cases,
+real synthetic PostgreSQL JSON roundtrip and full build. No migration. Native:
+1,144 tests, 38 new cases, zero skips, both APKs and empty private debug prefills.
+Five Go fixtures are portable native tests. A separate six-file test-only step
+runs five production native body-builder exports through real handlers, parsers
+and OpenAPI (41 contract cases). Method/path provenance is traced separately;
+the fixtures are serialized bodies, not captured network traffic. Independent
+reviews are clean; physical rendering/focus/touch remains open.
+
+Exact deltas: [backend 33101c78 to 024f92a7](https://github.com/stefnats/mediastorm/compare/33101c78523d2752afe270f6b67ae508da2132d9...024f92a7bf3ee00f0f124b108cdfdd13e00a340c),
+[native 85022e69 to e5be1697](https://github.com/stefnats/mediastorm-androidtv/compare/85022e69270b86e9fb722c3ead2bc100f70e00dd...e5be1697da84701c6b29f713f6ecaecfa17d03e5),
+and [contract-only 024f92a7 to 9989edb1](https://github.com/stefnats/mediastorm/compare/024f92a7bf3ee00f0f124b108cdfdd13e00a340c...9989edb15c41ab9b85b2a042b0871e4c0b85f409).
+These inherit fork prerequisites and require extraction before upstream review.
+
+Combined `9989edb15c41ab9b85b2a042b0871e4c0b85f409` passes 8,839 cases with
+38 explicit opt-in skips, synthetic PostgreSQL and local authenticated browser
+fixtures. Its server binary has matching clean commit metadata. No private
+playlist, provider query, upstream PR/comment, deployment or application start.
