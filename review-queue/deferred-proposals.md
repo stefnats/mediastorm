@@ -1163,3 +1163,69 @@ closes honest reporting of uncertainty, not measured external occupancy.
 
 The packet remains only in the fork; no production activation, real provider,
 private playlist or new upstream submission occurred.
+
+## Fork-only closed DVR parts ZIP export
+
+The [backend export route](https://github.com/stefnats/mediastorm/tree/feature/dvr-parts-export)
+downloads terminal capture-v1 recordings as ZIP Store archives of their closed
+original parts and a sanitized manifest. Original indices, stored incomplete
+flags, observed gaps and mixed codecs are retained. Nothing is concatenated or
+remuxed. Current full-session, stored-owner and PIN checks precede file access
+and remain bound to the original identity throughout reading and output.
+Two transfers are allowed at once. Exact opened regular descriptors, fixed
+sizes and bounded one-MiB buffers avoid reopening untrusted ledger paths.
+Failure after output starts aborts the transfer without finalizing a valid ZIP.
+This is an API addition; export buttons remain a separate UI packet.
+
+All 4,280 affected cases passed with 38 optional skips, plus 375 repeated race
+cases, 40 API cases and both builds. The clean integration passed
+9,942 cases with 38 optional skips across 106 packages
+and built at the same commit. Actual tests separately verify registered API/PIN
+boundaries, byte-identical extracted H264/mono and HEVC/stereo files, and a real
+local TCP transfer aborted after an authority change. Independent review verified
+all ten source files (five production), patch/archive, binary, runners and raw
+reports. The one-MiB synthetic handler measurement is 70 repository reads,
+reduced from 312; it is not a throughput guarantee. Closed-file size/mtime checks
+are not proof against a privileged in-place rewrite. Cancellation closes inputs
+and retains the slot until writer cleanup joins; arbitrary writers are not
+claimed to interrupt instantly. No new age/provider permission is inferred.
+[Exact ten-file delta](https://github.com/stefnats/mediastorm/compare/0892cd709fdf9fc7d8dcaec69d3595d5ba2027a0...399c7f10aefa9b48f970aa6182f9b672c88f79df).
+
+The first full integration run at the export commit retained one failure in an
+existing channel-filter fixture: a recycled loopback URL reused another test's
+persistent playlist cache. Its original 9,941 passes, one failure and raw cache-hit
+log remain preserved. A separate test-only live fixture correction gives each
+synthetic M3U URL a unique query nonce and asserts actual initial fixture fetches.
+No production cache is read, deleted or changed by that correction. The final
+full-suite and clean-build figures above apply to integration commit
+[0c103f37e55e4766850f070617b497eb2bc82664](https://github.com/stefnats/mediastorm/commit/0c103f37e55e4766850f070617b497eb2bc82664), including
+this isolated fixture fix; they do not recast the first failing run as green.
+
+## Fork-only original menu and Set Aside mutation context
+
+The [native selection correction](https://github.com/stefnats/mediastorm-androidtv/tree/feature/native-setaside-context)
+captures the original target, epoch and producer lifetime before deferred menus,
+pickers or sheet animations. A synchronous one-use acceptance allows intentional
+menu dismissal; cancelled hiding or retired producers cannot start stale writes.
+Accepted work is a real child of the original producer, so another blocked child
+cannot postpone its cancellation. Reserved Set Aside discovery/create/mutation
+and refresh are serialized per original owner, including strict fresh discovery
+and validation of the returned reserved list. Replacement UI, errors and toasts
+remain guarded. Existing Watchlist/Hide/Watched API workflows are not declared
+fully migrated by this packet.
+
+All 1,743 native cases passed, including
+42 new tests, and both APKs built. Frozen review verifies
+all 28 files (23 production),
+raw XML, APK hashes, registry and five empty private prefills. Tests execute the
+actual receipt/workflow/Store publisher, phone menu singleton and loopback
+Call.await cancellation. Complete successful Android ApiClient.send and Compose
+sheet/navigation execution remain source/compile-reviewed. One changed helper
+currently has no caller and is not presented as an exercised producer. Source
+review findings were corrected before final runs; no executed pre-fix failure is
+invented. A preliminary green run was repeated after adding an explicit test
+sibling-entry barrier, with its original reports retained.
+[Exact native delta](https://github.com/stefnats/mediastorm-androidtv/compare/66f2255302ed9b86e63f25d6d41b067b02f41915...0cbb77e09e6f01a2080942a9ed11475a727c9ffe).
+
+Both packets remain in the forks. No production activation, actual provider,
+private playlist publication or new upstream submission occurred.
