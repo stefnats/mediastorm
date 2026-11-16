@@ -357,3 +357,52 @@ local authenticated browser fixtures. The server binary has matching clean commi
 metadata. No private playlist, real provider/indexer query, upstream PR/comment,
 deployment or application restart. The next scoped packet is server-side stream
 filters over bounded retained snapshots; filter/page actions will remain cache-only.
+
+## Fork-only retained source filters
+
+[Backend](https://github.com/stefnats/mediastorm/tree/feature/source-filters)
+and [TV/phone](https://github.com/stefnats/mediastorm-androidtv/tree/feature/native-source-filters)
+filter the source picker over a server-owned snapshot retained before presentation
+and per-resolution caps. At most 512 candidates/8 MiB are retained, with explicit
+truncation. Counts cover that retained pool, not every possible provider result.
+Filter/page/reapply operations perform no provider, metadata, preparation, health
+or probe calls. The normal initial health budget covers only the first visible page.
+
+Release claims and observed file metadata remain separate bases. Missing or expired
+traits are unknown; users can explicitly require known matches. File audio language,
+codec and description predicates must match one track. Complete inventories are
+required for negative conclusions. Unbound series file facts cannot establish a
+known exact-episode match; movie facts remain source-only. Neither basis proves
+spoken content, decoded quality or device output. Library versions stay separate.
+
+Snapshots bind current account/profile/client, configuration/provider rights,
+content preferences and reports. Frozen views retain counts, indices and proof
+expiry across pages. New proof invalidates old cursors; reapply stays cache-only.
+A deliberate fresh track choice remains usable when only an older view is stale,
+while context or permission changes retire it. Existing scoped probes resolve
+server-owned rows, ignore caller result claims and recheck context after work.
+Prepared metadata requires a private configuration marker captured before input
+selection/probing; imported or old entries cannot mint current proof.
+
+Legacy servers retain their existing arrays and source actions. Native strict
+decoding rejects coerced enums and malformed scalar fields. A static registered
+language table matches the backend normalizer and is packaged in both APKs.
+No source result is rewritten into a playback grant.
+
+Validation: 3,736 affected backend cases with 36 explicit opt-in/environment skips,
+165 repeated race cases, 40 API/schema cases and build pass. These reruns overlap
+ordinary cases. Fourteen actual Go replies are portable native resources; seven
+production native request-helper exports pass real handlers and OpenAPI. Only
+opaque runtime references are rebound for successful continuation. These are
+serialized requests, not captured network traffic. Native: 1,257 tests, 65 new,
+no skips, both APKs and empty private debug prefills. Independent reviews are clean.
+
+Exact deltas: [backend 91859233 to c1f04b9e](https://github.com/stefnats/mediastorm/compare/91859233654469e8a2f864b0575f54dc9fdcce8b...c1f04b9ed3f1d220208e7d23f08548bfd49fa11b),
+[native fa893ef3 to a26483ed](https://github.com/stefnats/mediastorm-androidtv/compare/fa893ef329d1e394d8a1295ad42ba360a5bfa0c6...a26483edab948e4ed12517ea65d7096922cac23b).
+These inherit fork prerequisites and need extraction before upstream review.
+
+Combined c1f04b9ed3f1d220208e7d23f08548bfd49fa11b passes 9,007 cases with
+38 explicit opt-in skips, synthetic PostgreSQL and local authenticated browsers.
+The binary has matching clean commit metadata. Catalogue-wide/original-language
+filtering and physical device acceptance remain separate work. No private playlist,
+real provider/indexer query, upstream PR/comment, deployment or application start.
