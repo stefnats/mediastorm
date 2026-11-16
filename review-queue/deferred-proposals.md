@@ -1421,3 +1421,47 @@ then built at the same revision. Original-language catalogue filtering does not
 prove spoken audio or complete remote metadata. The separate native management
 consumer remains in progress. No deployment, private playlist, real provider or
 new upstream submission occurred.
+
+## Fork-only native management language filters
+
+The [native management consumer](https://github.com/stefnats/mediastorm-androidtv/tree/feature/native-management-language)
+adds original-language controls to Hidden management and local-library cards.
+Hidden pages use a separate strict raw management reader and never replace the
+complete global Hidden suppression store. A row hint offers Unhide even before
+the global store loads, using the existing original operation receipt. Local
+library support comes from the same normal include=cards response. Explicit
+remote sources remain unsupported; an unknown source is not assumed local.
+
+A strict active/supported page cannot silently drop malformed rows or retain
+older filtered pages after a bad continuation. Totals remain group totals;
+itemCount remains the raw version count rather than a new displayed UI field.
+Replaced read children are cancelled before they could start a legacy followup.
+Only the observed initial default/unfiltered exact unsupported-source 400 allows
+an owned full legacy Hidden read, without global Store publication. Active
+filters, sorted/kind requests, authentication, 503, network, malformed responses
+and later supported-view downgrades never take that fallback.
+
+All 1,867 native cases passed, including 31 new cases, and both APKs built.
+Independent and root review verify 36 changed sources, 11 production, 236 raw XML
+reports, pre-run source/runner pins, APK/DEX symbols, registry and five empty
+private prefills. The first full run remains archived as 1,660 core pass and one
+obsolete baseline expectation rejecting Hidden; TV and phone did not run there.
+Its complete 35-file candidate tree, raw core reports and separately pinned
+unchanged committed-base test are retained. Only that existing test expectation
+changed; the 11 production hashes stayed identical before the successful rerun.
+
+Eighteen actual Go handler replies are byte-identical in native fixtures. Six
+requests exported by the production native builders pass the separate
+[Go reverse contract](https://github.com/stefnats/mediastorm/tree/test/native-management-contract):
+7 normal and 21 race pass events with no failures/skips, through actual Go
+handlers, cached evidence readers and the OpenAPI schema. Service-port wire
+fixtures do not claim PostgreSQL, network login or Android transport. Native
+models/decoders and a separate two-request context-bound loopback HTTP helper run;
+full successful authenticated Android ApiClient.send, Compose effects, physical
+input and device playback remain unverified. No original-language audio proof,
+provider probe, new media/parent grant or all-catalogue filter is introduced.
+
+[Exact native delta](https://github.com/stefnats/mediastorm-androidtv/compare/a9b360c3670453a656ee0b764bee44c966b1bccd...4a2ad7eafb70a5d5f4e37c8e96ce4c0f65f27400).
+The reverse test is committed separately at 14154ed7da23d0f87be0ffb9ed13666d5b2ec197;
+its merge into the next combined backend run is pending. No production activation,
+private playlist or new upstream submission occurred.
