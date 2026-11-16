@@ -1629,3 +1629,33 @@ logs remain separately named.
 
 [Exact nineteen-file delta](https://github.com/stefnats/mediastorm-androidtv/compare/dfcf4ed12cd782b444adcf5ca0702453ba829561...7cef133eb3215d02f09fdd4dc668b50b82389f8f).
 No production activation, private playlist or new upstream submission occurred.
+
+## Fork-only bounded HLS restart from zero
+
+The [configured HLS boundary](https://github.com/stefnats/mediastorm/tree/feature/hls-zero-restart)
+supports one explicit restart at time zero for its existing normal H264/AAC TS
+pipe, with at most two input attempts per original session. The port remains
+uninstalled in Main. Positive seek and automatic recovery remain unsupported.
+
+Both the original authority and current request must pass before any touch,
+retirement or new input. A fresh caller PIN cannot replace an expired or revoked
+original unlock. The exact original session, client, source access, policy and
+absolute deadline remain binding. The old owned body, pump and process must join
+before a successor GET. A distinct directory and generation fence prevent stale
+readers or cleanup from affecting its successor. A narrow shared pure check
+preserves the existing destructive Raw wrapper while separating local retirement
+from real authority loss. No new file, age or parent-policy grant is introduced.
+
+All 4,700 focused normal events passed with 42 optional skips; 999 race events,
+44 API cases and both builds passed. Actual synthetic HTTP/media/process cases
+exercise two sequential inputs, original-PIN revocation and stale callbacks.
+Three executed failures have exact old source archives and raw reports; a later
+denial-fixture timing correction retained all six production files unchanged.
+Independent and root checks verify the nine sources, six production, pre-run pin,
+archive, patch, binary and reports. No physical device proof is claimed.
+
+The clean combined commit e9ef60ec4e8920ae7ebf0b430b2c5e146c13e44e passed 10,354 cases in 106 packages, with 38
+optional skips, and built at that same revision. This is a deliberate restart
+from the beginning; general seek, automatic recovery, Cast, HDR and full family
+activation remain separate work. No production activation, real provider request,
+private playlist or new upstream submission occurred.
