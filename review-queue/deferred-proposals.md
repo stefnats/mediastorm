@@ -1659,3 +1659,30 @@ optional skips, and built at that same revision. This is a deliberate restart
 from the beginning; general seek, automatic recovery, Cast, HDR and full family
 activation remain separate work. No production activation, real provider request,
 private playlist or new upstream submission occurred.
+
+## Fork-only native saved Love request contract
+
+The [single-file contract test](https://github.com/stefnats/mediastorm/tree/test/native-loved-contract)
+checks six actual native request-builder exports against local HTTP transport,
+the complete stored-Love handler, actual cached language evidence, bounded rating
+receipt service and response schema over a synthetic saved-rating repository.
+Seven normal and 21 repeated race events passed without skips. The explicit row
+refresh uses a fresh client: Resolve is false before the actual delivery and true
+afterward, while other clients and profiles remain denied. An earlier passing
+version that reused a previously delivered client is archived; its assertion was
+strengthened during independent review, with no executed product failure. One
+sandbox-denied loopback attempt is separately retained.
+
+Independent review verified the single test source, runner, pre-run hashes, raw
+reports and unchanged native query bytes. There is no new production source and
+no actual login, PostgreSQL queue, complete Android transport or device claim.
+The native consumer separately passed 1,962 tests and both APK builds; its clean
+local commit is ready, while exact native-fork publication remains pending user
+approval after automatic review rejected that separate push.
+
+The clean combined commit a45724e23c224270c5d29851acc2b86c19c90645 passed 10,361 cases across 106 packages with
+38 optional skips, including all seven configured synthetic database opt-ins,
+both frozen native builder contracts and local browser fixtures. The same clean
+revision built successfully; source, runner and both query files stayed unchanged.
+No deployment, real provider request, private playlist or new upstream submission
+occurred.
