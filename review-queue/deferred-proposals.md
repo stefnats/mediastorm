@@ -441,3 +441,37 @@ The branch inherits fork prerequisites and requires extraction before upstream
 review. Public parent controls, all route/reuse/stream gates, internal transport
 binding, native denial handling and safe offline ownership remain separate steps.
 No private playlist, real provider, production change or new upstream PR/comment.
+
+## Fork-only native terminal VOD denials
+
+[Native correction](https://github.com/stefnats/mediastorm-androidtv/tree/fix/native-vod-denials)
+stops observed terminal backend access denials from becoming alternate-release,
+per-episode, offline-resume or stale-details playback attempts. Manual resolution
+and polling retain their captured profile context; queued Up Next settings reads
+cannot switch to a replacement profile. Only the existing coded profile_locked
+response can request PIN recovery.
+
+Player HTTP handling classifies the actual final response origin rather than
+the original request URL. Own protected-media denials stop Media3 retry/fallback;
+external CDN403 keeps ordinary provider handling. A player-local nonce marker is
+never sent over the network and incoming forged markers are removed. Captured
+backend credentials are stripped on external redirects while distinct explicit
+provider authorization is retained. Synthetic HTTP redirects exercise these paths.
+
+Current source/player denials retire matching already-open detail actions through
+a bounded ephemeral event, not a stored policy or permission. Captured epochs,
+current-operation tokens and metadata read-start fences ignore old delayed failures
+after a newer successful read or reopened page, while newer denials still apply.
+Reporting or changing releases cannot bypass a current terminal authorization error.
+
+Validation: 1,298 native tests, 41 new cases, zero failures/errors/skips, TV/phone
+APKs and empty private debug prefills. Independent production and frozen47-file
+hash reviews are clean. Seven future internal denial codes match the backend core;
+no public HTTP policy fixture or regional rule was invented. This is reactive
+denial handling, not continuous authorization, offline ownership or full family
+safety acceptance. Physical device rendering/focus/touch remains open.
+
+[Exact native delta](https://github.com/stefnats/mediastorm-androidtv/compare/a26483edab948e4ed12517ea65d7096922cac23b...472ca44fead2f65d065abaf24ec9cdf3a2ce436d).
+This inherits fork prerequisites and needs extraction before upstream review.
+No provider/private playlist, installation, policy activation or upstream PR/comment.
+Offline server/account/profile ownership is the next separate native packet.
