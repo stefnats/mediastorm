@@ -1,9 +1,12 @@
 package handlers
 
 import (
+	"errors"
 	"net/http"
+	"net/url"
 	"sort"
 	"strings"
+	"time"
 
 	"novastream/models"
 )
@@ -383,4 +386,96 @@ func (h *MetadataHandler) queryTrendingList(
 		items = query.Apply(items)
 	}
 	return items, genres, alphabet
+}
+
+// Original-language filtering is supported only by complete stored-list indexes.
+// It is deliberately separate from discovery queries and source/audio filters.
+const maxDisplayListOriginalLanguages = 32
+
+type displayListOriginalLanguageQuery struct {
+	Languages      map[string]bool
+	IncludeUnknown bool
+}
+
+func (q displayListOriginalLanguageQuery) active() bool {
+	return len(q.Languages) > 0 || q.IncludeUnknown
+}
+
+func parseDisplayListOriginalLanguageQuery(r *http.Request) (displayListOriginalLanguageQuery, error) {
+	q := displayListOriginalLanguageQuery{Languages: map[string]bool{}}
+	invalid := errors.New("invalid original-language filter")
+	values, err := url.ParseQuery(r.URL.RawQuery)
+	if err != nil {
+		return q, invalid
+	}
+	for _, raw := range values["originalLanguages"] {
+		if len(raw) > maxDisplayListOriginalLanguages*4 {
+			return q, invalid
+		}
+		if raw == "" {
+			continue
+		}
+		for _, code := range strings.Split(raw, ",") {
+			if len(code) != 3 || models.NormalizeEvidenceLanguage(code) != code {
+				return q, invalid
+			}
+			q.Languages[code] = true
+			if len(q.Languages) > maxDisplayListOriginalLanguages {
+				return q, invalid
+			}
+		}
+	}
+	var unknown string
+	for i, value := range values["includeUnknownOriginalLanguage"] {
+		if value != "true" && value != "false" {
+			return q, invalid
+		}
+		if i > 0 && value != unknown {
+			return q, invalid
+		}
+		unknown = value
+	}
+	q.IncludeUnknown = unknown == "true"
+	return q, nil
+}
+
+type cachedOriginalLanguageReader interface {
+	GetCachedOriginalLanguageEvidence(titleID, mediaType string, at time.Time) *models.OriginalLanguageEvidence
+}
+
+func (h *DisplayListHandler) filterOriginalLanguages(userID string, items []models.WatchlistItem, q displayListOriginalLanguageQuery) []models.WatchlistItem {
+	if !q.active() {
+		return items
+	}
+	reader, _ := h.metadataForUser(userID).(cachedOriginalLanguageReader)
+	at := time.Now()
+	// Keep facts request-local. Saved ExternalIDs and manual language values are
+	// not identity evidence, and no cache miss schedules provider work.
+	facts := make(map[string]string)
+	result := make([]models.WatchlistItem, 0, len(items))
+	for _, item := range items {
+		key := item.MediaType + "\x00" + item.ID
+		language, found := facts[key]
+		if !found {
+			if reader != nil {
+				if fact := reader.GetCachedOriginalLanguageEvidence(item.ID, item.MediaType, at); fact != nil {
+					language = models.NormalizeEvidenceLanguage(fact.Language)
+				}
+			}
+			facts[key] = language
+		}
+		if (language == "" && q.IncludeUnknown) || (language != "" && q.Languages[language]) {
+			result = append(result, item)
+		}
+	}
+	return result
+}
+
+func displayListOriginalLanguageSupportedSource(source string) bool {
+	switch source {
+	case "watchlist", "custom-list", "custom_user_list", "custom-user-list", "permanent-prequeue":
+		return true
+	default:
+		return false
+	}
 }
