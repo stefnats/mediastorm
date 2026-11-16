@@ -1769,3 +1769,11 @@ checked independently. The clean combined commit 271862f7e682a95b2d134dc3919fb27
 10,566 cases in 106 packages with 38 optional skips, then built at that same
 revision. Source, runner and all three native query exports stayed unchanged.
 No production activation, private playlist or new upstream submission occurred.
+
+## Fork-only native saved Love language browse
+
+The additional [Saved Love Ratings view](https://github.com/stefnats/mediastorm-androidtv/tree/feature/native-loved-stored-language) browses the complete saved preference pool with original-language filters and normal server pagination. The existing Loved Titles view remains. Strict source/capability/rows/rank/time checks reject malformed or downgraded responses. Rendering starts no preview, source-availability, history or Set Aside demand.
+
+Explicit Rate renews exactly the original selected row and reads actual server editability before opening a seeded editor. Original profile/client/options/row/producer remain binding through the open editor; normal menu dismissal remains valid. Existing private receipt capacity and expiry remain; receipt loss requires closing and explicitly choosing Rate again. No unlimited editing or age/file/audio grant is inferred.
+
+The user explicitly approved publication of this exact 32-file commit 31959d483a7a8e2fa3847cb47cf6d4733ea94567 to this fork. It passed 1,962 native tests, including 27 new cases, and both APK builds. Independent/root checks verify 32 sources/17 production, pre-run pin, full archive,248 raw XML files, APK/DEX contents and five empty private prefills. Nine actual Go response fixtures remain byte-identical. Six actual native request builders also passed the separately reviewed 7 normal/21 race cache-handler/schema contract. Android/Compose/device execution is not claimed. Publication was read back at the exact approved commit. No private playlist, production activation or new upstream submission occurred.
