@@ -798,3 +798,32 @@ cancellation requires the original parent/deadline or trusted private invalidati
 no new production invalidation hooks or complete continuous revocation are claimed.
 Nil-port legacy behavior remains unchanged. All fixtures are synthetic; no real
 provider, playlist, device, production activation or new upstream submission was used.
+
+## Fork-only native HLS URI context
+
+The [HLS URI correction](https://github.com/stefnats/mediastorm-androidtv/tree/fix/native-hls-uri-context)
+builds Live/DVR/Cast media URLs under the original playback epoch. Exact owned HLS
+assets carry the captured profile on every Media3 network hop, including relative
+segments, variants, initialization and subtitle/caption assets. A child URI does
+not inherit its parent playlist query; the actual child request is checked.
+
+Scheme, host, port and reverse-proxy API prefix must match. All existing profile
+selectors, case variants and duplicates must agree; conflicts reject before I/O.
+Encoded unrelated queries and server-supplied authentication remain unchanged;
+captured token/PIN are appended only when absent. External/provider URLs invoke
+no native credential callback and receive no added selector. Redirect header
+cleanup preserves distinct provider authorization and strips only captured backend
+credentials outside the owned API namespace. Non-media control routes gain no
+asset selector merely from a matching path prefix.
+
+Validation: all 1,483 native tests passed, including 17 new cases; both APKs built.
+Independent review and root verification checked all seven source files, raw XML,
+APK hashes, registry, empty private prefills and actual consumer/server-route
+provenance. Synthetic two-origin HTTP exercises the actual per-hop interceptor.
+[Exact seven-file delta](https://github.com/stefnats/mediastorm-androidtv/compare/98741671d25f5e6133c25a2f7712be0ccb641f7e...c5e196312e5a99780b7f1151b16d87ccc3748fea).
+
+No successful complete Android start/send, decoder, device or receiver is claimed.
+Profile URI fields confer no session/input/content/age grant. Cast receiver child
+rewriting and owned server leases remain server responsibilities; native HLS
+keepalive/restart lifetime is a separate following packet. No provider, private
+playlist, production activation or new upstream submission occurred.
