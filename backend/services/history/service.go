@@ -2,12 +2,15 @@ package history
 
 import (
 	"context"
+	"crypto/rand"
 	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"log"
+	"math"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -143,6 +146,227 @@ type cachedContinueWatching struct {
 	expiresAt time.Time
 }
 
+// CachedContinueWatchingEpisode carries only existing catalog/progress coordinates.
+// It is correlation data, never a playback or history-write receipt.
+type CachedContinueWatchingEpisode struct {
+	Numbering             *models.EpisodeNumbering `json:"numbering,omitempty"`
+	SeasonNumber          int                      `json:"seasonNumber"`
+	EpisodeNumber         int                      `json:"episodeNumber"`
+	AbsoluteEpisodeNumber int                      `json:"absoluteEpisodeNumber,omitempty"`
+	EpisodeID             string                   `json:"episodeId,omitempty"`
+	ItemID                string                   `json:"itemId,omitempty"`
+	TvdbID                string                   `json:"tvdbId,omitempty"`
+	Title                 string                   `json:"title,omitempty"`
+	AirDate               string                   `json:"airDate,omitempty"`
+	AirDateTimeUTC        string                   `json:"airDateTimeUTC,omitempty"`
+}
+
+type CachedContinueWatchingItem struct {
+	SeriesID       string                         `json:"seriesId"`
+	SeriesTitle    string                         `json:"seriesTitle"`
+	MediaType      string                         `json:"mediaType"`
+	Year           int                            `json:"year,omitempty"`
+	ExternalIDs    map[string]string              `json:"externalIds,omitempty"`
+	UpdatedAt      time.Time                      `json:"updatedAt"`
+	NextEpisode    *CachedContinueWatchingEpisode `json:"nextEpisode,omitempty"`
+	LastWatched    *CachedContinueWatchingEpisode `json:"lastWatched,omitempty"`
+	Resume         *models.ResumeState            `json:"resume,omitempty"`
+	PercentWatched float64                        `json:"percentWatched,omitempty"`
+	ResumePercent  float64                        `json:"resumePercent,omitempty"`
+}
+
+// CachedContinueWatchingPool describes a complete normal service observation,
+// before display-list caps. Language and suppression facts remain current reads.
+type CachedContinueWatchingPool struct {
+	ID         string                       `json:"id"`
+	ObservedAt time.Time                    `json:"observedAt"`
+	ExpiresAt  time.Time                    `json:"expiresAt"`
+	Complete   bool                         `json:"complete"`
+	Items      []CachedContinueWatchingItem `json:"items"`
+}
+
+type cachedContinueWatchingPool struct {
+	id                    string
+	observedAt, expiresAt time.Time
+	revision              watchStateRevision
+	encoded               []byte
+}
+
+const (
+	maxContinueWatchingPoolItems    = 4096
+	maxContinueWatchingPoolBytes    = 4 << 20
+	maxContinueWatchingProfilePools = 32
+)
+
+var ErrContinueWatchingPoolUnavailable = errors.New("continue watching observation unavailable")
+var cachedWatchingCatalogID = regexp.MustCompile(`^(?:tmdb:(?:movie|tv|series):[1-9][0-9]*|tvdb:(?:(?:movie|series):)?[1-9][0-9]*|imdb:(?:movie|series):tt[0-9]+)$`)
+var cachedWatchingToken = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9:._-]{0,511}$`)
+
+// projectContinueWatchingPoolLocked is invoked only by the existing normal
+// producer. The getter never builds, repairs identities or looks up metadata.
+func (s *Service) projectContinueWatchingPoolLocked(userID string, observed *cachedContinueWatching) {
+	if s.continueWatchingPools == nil {
+		s.continueWatchingPools = make(map[string]*cachedContinueWatchingPool)
+	}
+	delete(s.continueWatchingPools, userID)
+	if len(observed.items) > maxContinueWatchingPoolItems || !observed.expiresAt.After(observed.cachedAt) || observed.expiresAt.Sub(observed.cachedAt) > 10*time.Minute {
+		return
+	}
+	// Reuse the same pure progress/episode-ID merger as the normal HTTP producer,
+	// with already stored progress values under the same lock. No service ports.
+	merged := make(map[string]models.PlaybackProgress)
+	for _, p := range s.playbackProgress[userID] {
+		merged[p.ID] = p
+	}
+	for _, p := range s.activePlaybackProgress[userID] {
+		old, ok := merged[p.ID]
+		if ok && observed.cachedAt.Sub(p.UpdatedAt) <= activeProgressTTL && preferPlaybackProgress(p, old) {
+			merged[p.ID] = p
+		}
+	}
+	progress := make([]models.PlaybackProgress, 0, len(merged))
+	for _, p := range merged {
+		progress = append(progress, p)
+	}
+	rows := MergeProgressIntoContinueWatching(observed.items, progress)
+	items := make([]CachedContinueWatchingItem, 0, len(rows))
+	for _, row := range rows {
+		if !cachedWatchingCatalogID.MatchString(row.SeriesID) || row.SeriesTitle == "" || row.UpdatedAt.IsZero() || len(row.SeriesTitle) > 4096 || row.Year < 0 || row.Year > 9999 {
+			return
+		}
+		kind := "series"
+		if strings.Contains(row.SeriesID, ":movie:") {
+			kind = "movie"
+		}
+		if kind == "series" && row.NextEpisode == nil || kind == "movie" && row.NextEpisode != nil {
+			return
+		}
+		out := CachedContinueWatchingItem{SeriesID: row.SeriesID, SeriesTitle: row.SeriesTitle, MediaType: kind, Year: row.Year, UpdatedAt: row.UpdatedAt, PercentWatched: row.PercentWatched, ResumePercent: row.ResumePercent}
+		for _, value := range []float64{out.PercentWatched, out.ResumePercent} {
+			if math.IsNaN(value) || math.IsInf(value, 0) || value < 0 || value > 100 {
+				return
+			}
+		}
+		for key, value := range row.ExternalIDs {
+			if key == "tmdb" || key == "tvdb" || key == "imdb" {
+				if !cachedWatchingToken.MatchString(value) {
+					return
+				}
+				if out.ExternalIDs == nil {
+					out.ExternalIDs = make(map[string]string)
+				}
+				out.ExternalIDs[key] = value
+			}
+		}
+		if row.Resume != nil {
+			resume := *row.Resume
+			for _, value := range []float64{resume.Position, resume.Duration, resume.Percent} {
+				if math.IsNaN(value) || math.IsInf(value, 0) || value < 0 {
+					return
+				}
+			}
+			if resume.Percent > 100 {
+				return
+			}
+			out.Resume = &resume
+		}
+		episode := func(ep models.EpisodeReference) (*CachedContinueWatchingEpisode, bool) {
+			if ep.SeasonNumber < 0 || ep.EpisodeNumber <= 0 || ep.AbsoluteEpisodeNumber < 0 || len(ep.Title) > 4096 {
+				return nil, false
+			}
+			for _, value := range []string{ep.ItemID, ep.EpisodeID, ep.TvdbID} {
+				if value != "" && !cachedWatchingToken.MatchString(value) {
+					return nil, false
+				}
+			}
+			if ep.AirDate != "" {
+				if _, err := time.Parse("2006-01-02", ep.AirDate); err != nil {
+					return nil, false
+				}
+			}
+			if ep.AirDateTimeUTC != "" {
+				if _, err := time.Parse(time.RFC3339Nano, ep.AirDateTimeUTC); err != nil {
+					return nil, false
+				}
+			}
+			out := &CachedContinueWatchingEpisode{SeasonNumber: ep.SeasonNumber, EpisodeNumber: ep.EpisodeNumber, AbsoluteEpisodeNumber: ep.AbsoluteEpisodeNumber, EpisodeID: ep.EpisodeID, ItemID: ep.ItemID, TvdbID: ep.TvdbID, Title: ep.Title, AirDate: ep.AirDate, AirDateTimeUTC: ep.AirDateTimeUTC}
+			if ep.Numbering != nil {
+				if !cachedWatchingCatalogID.MatchString(ep.Numbering.SeriesID) || ep.Numbering.Ordering != "" && !cachedWatchingToken.MatchString(ep.Numbering.Ordering) {
+					return nil, false
+				}
+				numbering := *ep.Numbering
+				out.Numbering = &numbering
+			}
+			return out, true
+		}
+		if row.NextEpisode != nil {
+			var ok bool
+			out.NextEpisode, ok = episode(*row.NextEpisode)
+			if !ok {
+				return
+			}
+		}
+		if row.LastWatched.EpisodeNumber > 0 {
+			var ok bool
+			out.LastWatched, ok = episode(row.LastWatched)
+			if !ok {
+				return
+			}
+		}
+		items = append(items, out)
+	}
+	nonce := make([]byte, 16)
+	if _, err := rand.Read(nonce); err != nil {
+		return
+	}
+	pool := CachedContinueWatchingPool{ID: hex.EncodeToString(nonce), ObservedAt: observed.cachedAt, ExpiresAt: observed.expiresAt, Complete: true, Items: items}
+	encoded, err := json.Marshal(pool)
+	if err != nil || len(encoded) > maxContinueWatchingPoolBytes {
+		return
+	}
+	if len(s.continueWatchingPools) >= maxContinueWatchingProfilePools {
+		oldestID := ""
+		var oldest time.Time
+		for id, candidate := range s.continueWatchingPools {
+			if oldestID == "" || candidate.observedAt.Before(oldest) || candidate.observedAt.Equal(oldest) && id < oldestID {
+				oldestID, oldest = id, candidate.observedAt
+			}
+		}
+		delete(s.continueWatchingPools, oldestID)
+	}
+	s.continueWatchingPools[userID] = &cachedContinueWatchingPool{id: pool.ID, observedAt: pool.ObservedAt, expiresAt: pool.ExpiresAt, revision: s.watchStateRevisionLocked(userID), encoded: encoded}
+}
+
+func (s *Service) cachedContinueWatchingPoolCurrentLocked(userID, id string, at time.Time) bool {
+	pool := s.continueWatchingPools[userID]
+	observed := s.continueWatchingCache[userID]
+	return userID != "" && !at.IsZero() && pool != nil && pool.id == id && observed != nil &&
+		!at.Before(pool.observedAt) && at.Before(pool.expiresAt) && pool.observedAt.Equal(observed.cachedAt) &&
+		pool.expiresAt.Equal(observed.expiresAt) && pool.revision == s.watchStateRevisionLocked(userID)
+}
+
+// GetCachedContinueWatchingPool returns independent bytes from one completed
+// normal observation. Absence/expiry/revision loss never invokes cold work.
+func (s *Service) GetCachedContinueWatchingPool(userID string, at time.Time) (*CachedContinueWatchingPool, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	pool := s.continueWatchingPools[userID]
+	if pool == nil || !s.cachedContinueWatchingPoolCurrentLocked(userID, pool.id, at) {
+		return nil, ErrContinueWatchingPoolUnavailable
+	}
+	var result CachedContinueWatchingPool
+	if json.Unmarshal(pool.encoded, &result) != nil {
+		return nil, ErrContinueWatchingPoolUnavailable
+	}
+	return &result, nil
+}
+
+func (s *Service) CachedContinueWatchingPoolCurrent(userID, id string, at time.Time) bool {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.cachedContinueWatchingPoolCurrentLocked(userID, id, at)
+}
+
 // Service persists watch history for all content (movies, series, episodes).
 type Service struct {
 	mu                        sync.RWMutex
@@ -176,6 +400,7 @@ type Service struct {
 	metadataCacheTTL           time.Duration
 	continueWatchingCache      map[string]*cachedContinueWatching // userID -> continue watching
 	continueWatchingTTL        time.Duration
+	continueWatchingPools      map[string]*cachedContinueWatchingPool
 	// Watch state revisions (protected by mu). watchStateSeq is a monotonically
 	// increasing sequence; userWatchStateRev records the sequence value of each
 	// user's latest mutation and globalWatchStateRev that of the latest

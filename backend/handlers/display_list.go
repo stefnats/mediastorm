@@ -2,6 +2,7 @@ package handlers
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"log"
@@ -15,8 +16,12 @@ import (
 	"time"
 
 	"novastream/config"
+	"novastream/internal/auth"
+	"novastream/internal/mediaidentity"
+	"novastream/internal/profileaccess"
 	"novastream/models"
 	"novastream/services/customlists"
+	historypkg "novastream/services/history"
 	metadatapkg "novastream/services/metadata"
 	"novastream/services/playback"
 	"novastream/services/watchlist"
@@ -170,6 +175,10 @@ func (h *DisplayListHandler) get(w http.ResponseWriter, r *http.Request) {
 	}
 	if source == "loved-stored" {
 		h.getLovedStored(w, r, userID, languageQuery)
+		return
+	}
+	if source == "continue-watching-cached" {
+		h.getCachedContinueWatching(w, r, userID, languageQuery)
 		return
 	}
 	if source == "collection-cached" {
@@ -476,6 +485,189 @@ func cachedCollectionError(w http.ResponseWriter, status int, code string) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
 	_ = json.NewEncoder(w).Encode(map[string]string{"code": code, "error": "Cached collection unavailable"})
+}
+
+type cachedContinueWatchingReader interface {
+	GetCachedContinueWatchingPool(string, time.Time) (*historypkg.CachedContinueWatchingPool, error)
+	CachedContinueWatchingPoolCurrent(string, string, time.Time) bool
+}
+type cachedWatchingSuppression struct {
+	hidden []models.HiddenItem
+	aside  []models.WatchlistItem
+	stamp  [32]byte
+	tokens map[string]struct{}
+}
+
+func (h *DisplayListHandler) cachedWatchingSuppression(userID string) (cachedWatchingSuppression, error) {
+	var result cachedWatchingSuppression
+	if h.HiddenItemsService == nil || h.CustomListsService == nil {
+		return result, errors.New("suppression reader unavailable")
+	}
+	hidden, err := h.HiddenItemsService.List(userID)
+	if err != nil {
+		return result, err
+	}
+	result.hidden = hidden
+	lists, err := h.CustomListsService.ListLists(userID)
+	if err != nil {
+		return result, err
+	}
+	for _, list := range lists {
+		if !strings.EqualFold(strings.TrimSpace(list.Name), "Set Aside") {
+			continue
+		}
+		items, err := h.CustomListsService.ListItems(userID, list.ID)
+		if err != nil {
+			return result, err
+		}
+		result.aside = append(result.aside, items...)
+	}
+	// Private suppression records are never response fields or diagnostics.
+	raw, err := json.Marshal(struct {
+		Hidden []models.HiddenItem
+		Aside  []models.WatchlistItem
+	}{result.hidden, result.aside})
+	if err != nil {
+		return result, err
+	}
+	result.stamp = sha256.Sum256(raw)
+	result.tokens = make(map[string]struct{})
+	add := func(kind, id string, aliases map[string]string) {
+		identity := mediaidentity.Resolve(mediaidentity.Input{MediaType: kind, ID: id, ExternalIDs: aliases})
+		for token := range identity.Tokens {
+			result.tokens[identity.MediaType+"\x00"+token] = struct{}{}
+		}
+	}
+	for _, item := range result.hidden {
+		add(item.MediaType, item.ID, item.ExternalIDs)
+	}
+	for _, item := range result.aside {
+		add(item.MediaType, item.ID, item.ExternalIDs)
+	}
+	return result, nil
+}
+func (s cachedWatchingSuppression) hides(row historypkg.CachedContinueWatchingItem) bool {
+	identity := mediaidentity.Resolve(mediaidentity.Input{MediaType: row.MediaType, ID: row.SeriesID, ExternalIDs: row.ExternalIDs})
+	for token := range identity.Tokens {
+		if _, ok := s.tokens[identity.MediaType+"\x00"+token]; ok {
+			return true
+		}
+	}
+	return false
+}
+func (h *DisplayListHandler) getCachedContinueWatching(w http.ResponseWriter, r *http.Request, userID string, language displayListOriginalLanguageQuery) {
+	w.Header().Set("Cache-Control", "private, no-store")
+	fail := func(status int, code string) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(status)
+		_ = json.NewEncoder(w).Encode(map[string]string{"code": code, "error": "Cached Continue Watching unavailable"})
+	}
+	if auth.IsShareLinkRequest(r) || auth.GetSessionScope(r) != "" {
+		fail(403, "profile_session_required")
+		return
+	}
+	if err := validateCachedWatchingQuery(r, parseDisplayListQuery(r)); err != nil {
+		http.Error(w, err.Error(), 400)
+		return
+	}
+	if h.MetadataHandler == nil || h.MetadataHandler.UsersService == nil || h.HistoryHandler == nil {
+		fail(503, "continue_watching_reader_unavailable")
+		return
+	}
+	profile, found := h.MetadataHandler.UsersService.Get(userID)
+	if !found || profile.ID != userID || !auth.IsMaster(r) && (auth.GetAccountID(r) == "" || profile.AccountID != auth.GetAccountID(r)) {
+		fail(404, "profile_not_found")
+		return
+	}
+	if !profileaccess.CheckResource(w, r, userID, "") {
+		return
+	}
+	if profile.IsKidsProfile {
+		fail(403, "kids_continue_watching_unavailable")
+		return
+	}
+	if _, ok := h.metadataForUser(userID).(cachedOriginalLanguageReader); !ok {
+		fail(503, "continue_watching_reader_unavailable")
+		return
+	}
+	reader, ok := h.HistoryHandler.Service.(cachedContinueWatchingReader)
+	if !ok {
+		fail(503, "continue_watching_reader_unavailable")
+		return
+	}
+	pool, err := reader.GetCachedContinueWatchingPool(userID, time.Now())
+	if err != nil || pool == nil || !pool.Complete || pool.ID == "" || pool.ObservedAt.After(time.Now()) || !pool.ExpiresAt.After(time.Now()) || pool.ExpiresAt.Sub(pool.ObservedAt) > 10*time.Minute {
+		fail(409, "continue_watching_snapshot_unavailable")
+		return
+	}
+	suppression, err := h.cachedWatchingSuppression(userID)
+	if err != nil {
+		fail(503, "continue_watching_reader_unavailable")
+		return
+	}
+	matches := h.originalLanguageMatcher(userID, language)
+	rows := make([]historypkg.CachedContinueWatchingItem, 0, len(pool.Items))
+	for _, row := range pool.Items {
+		if suppression.hides(row) {
+			continue
+		}
+		if language.active() && !matches(row.SeriesID, row.MediaType) {
+			continue
+		}
+		rows = append(rows, row)
+	}
+	rows, alphabet := queryCachedWatchingItems(rows, parseDisplayListQuery(r))
+	total := len(rows)
+	limit, offset := parseLimitOffset(r)
+	if offset >= len(rows) {
+		rows = []historypkg.CachedContinueWatchingItem{}
+	} else {
+		rows = rows[offset:]
+		if limit > 0 && limit < len(rows) {
+			rows = rows[:limit]
+		}
+	}
+	if r.Context().Err() != nil {
+		return
+	}
+	// Recheck the original profile, mutable suppressions and observation before
+	// publication, without rebuilding a pool or extending its original expiry.
+	currentSuppression, err := h.cachedWatchingSuppression(userID)
+	if err != nil {
+		fail(503, "continue_watching_reader_unavailable")
+		return
+	}
+	latest, found := h.MetadataHandler.UsersService.Get(userID)
+	if !found || latest.ID != profile.ID || latest.AccountID != profile.AccountID || latest.IsKidsProfile != profile.IsKidsProfile || !latest.UpdatedAt.Equal(profile.UpdatedAt) {
+		fail(409, "continue_watching_snapshot_unavailable")
+		return
+	}
+	if !profileaccess.CheckResource(w, r, userID, "") {
+		return
+	}
+	if currentSuppression.stamp != suppression.stamp || !reader.CachedContinueWatchingPoolCurrent(userID, pool.ID, time.Now()) {
+		fail(409, "continue_watching_snapshot_unavailable")
+		return
+	}
+	observation := struct {
+		ID         string    `json:"id"`
+		ObservedAt time.Time `json:"observedAt"`
+		ExpiresAt  time.Time `json:"expiresAt"`
+		Complete   bool      `json:"complete"`
+	}{pool.ID, pool.ObservedAt, pool.ExpiresAt, true}
+	response := struct {
+		Source          string                                  `json:"source"`
+		Items           []historypkg.CachedContinueWatchingItem `json:"items"`
+		Total           int                                     `json:"total"`
+		AlphabetBuckets []string                                `json:"alphabetBuckets,omitempty"`
+		Supported       bool                                    `json:"originalLanguageFilterSupported"`
+		Pool            any                                     `json:"pool"`
+	}{"continue-watching-cached", rows, total, alphabet, true, observation}
+	if r.Context().Err() != nil {
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(response)
 }
 
 func (h *DisplayListHandler) getCachedCollection(w http.ResponseWriter, r *http.Request, userID string, language displayListOriginalLanguageQuery) {

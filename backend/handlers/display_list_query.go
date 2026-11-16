@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"novastream/models"
+	historypkg "novastream/services/history"
 )
 
 func queryWatchlistItems(items []models.WatchlistItem, query displayListQueryOptions) ([]models.WatchlistItem, []string, []string) {
@@ -576,7 +577,7 @@ func queryLovedStoredItems(items []lovedStoredItem, q displayListQueryOptions) (
 
 func displayListOriginalLanguageSupportedSource(source string) bool {
 	switch source {
-	case "watchlist", "custom-list", "custom_user_list", "custom-user-list", "permanent-prequeue", "hidden", "loved-stored", "collection-cached":
+	case "watchlist", "custom-list", "custom_user_list", "custom-user-list", "permanent-prequeue", "hidden", "loved-stored", "collection-cached", "continue-watching-cached":
 		return true
 	default:
 		return false
@@ -670,5 +671,58 @@ func queryCachedCollectionTitles(items []models.Title, q displayListQueryOptions
 		}
 		return a.ID < b.ID
 	})
+	return result, alphabet
+}
+
+func validateCachedWatchingQuery(r *http.Request, q displayListQueryOptions) error {
+	if err := validateLovedStoredQuery(r, q); err != nil {
+		return err
+	}
+	if q.SortBy == "added" {
+		return fmt.Errorf("cached continue watching supports only default, name and year sorting")
+	}
+	allowed := map[string]bool{}
+	for _, key := range []string{"source", "limit", "offset", "homeView", "titleFilter", "filterMediaType", "sortBy", "sortDirection", "alphabet", "originalLanguages", "includeUnknownOriginalLanguage", "watchStatus", "genres", "ratingSource", "hideWatched", "hideUnreleased", "includeUnwatchedCounts", "includeFacets", "token", "profileUnlock", "profileId", "userId", "clientId"} {
+		allowed[key] = true
+	}
+	values, err := url.ParseQuery(r.URL.RawQuery)
+	if err != nil {
+		return fmt.Errorf("invalid cached continue watching query")
+	}
+	for key, items := range values {
+		if !allowed[key] {
+			return fmt.Errorf("unsupported cached continue watching requirement: %s", key)
+		}
+		if key == "originalLanguages" || key == "includeUnknownOriginalLanguage" {
+			continue
+		}
+		for _, item := range items {
+			if len(items) > 0 && item != items[0] {
+				return fmt.Errorf("conflicting cached continue watching query")
+			}
+		}
+	}
+	for _, key := range []string{"limit", "offset"} {
+		if raw, exists := values[key]; exists {
+			value, err := strconv.Atoi(raw[0])
+			if err != nil || value < 0 || value > 1000000 || strconv.Itoa(value) != raw[0] {
+				return fmt.Errorf("invalid cached continue watching pagination")
+			}
+		}
+	}
+	return nil
+}
+
+func queryCachedWatchingItems(items []historypkg.CachedContinueWatchingItem, q displayListQueryOptions) ([]historypkg.CachedContinueWatchingItem, []string) {
+	index := make([]models.WatchlistItem, len(items))
+	for i, item := range items {
+		index[i] = models.WatchlistItem{ID: strconv.Itoa(i), Name: item.SeriesTitle, MediaType: item.MediaType, Year: item.Year}
+	}
+	ordered, _, alphabet := queryWatchlistItems(index, q)
+	result := make([]historypkg.CachedContinueWatchingItem, 0, len(ordered))
+	for _, row := range ordered {
+		i, _ := strconv.Atoi(row.ID)
+		result = append(result, items[i])
+	}
 	return result, alphabet
 }
