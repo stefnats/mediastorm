@@ -3078,6 +3078,80 @@ paths:
         '503':
           description: Export service is unavailable.
 
+  /api/live/recordings/{recordingID}/parts/{partIndex}/timing:
+    get:
+      tags: [live]
+      operationId: getRecordingPartTiming
+      summary: Read a previously observed container duration estimate
+      description: |
+        Passive repository and memory-only lookup for one closed part of a
+        terminal completed, failed or cancelled capture-v1 recording. Requires
+        the same current full-session, stored owner and PIN authority as parts
+        export. Restored or unproven ledgers are unavailable. No media stat/open,
+        process, provider or timestamp refresh occurs. Missing, expired or
+        changed-ledger observations return unknown, never an inferred duration.
+        Observations are process-local, bounded to 128 entries and 15 minutes.
+        A cached file binding describes only the file observed at observedAt;
+        GET does not check that file again. Neither duration nor binding is an
+        exact media duration, timeline, joined sum, file capability or age grant.
+      parameters: &recordingPartTimingParameters
+        - name: recordingID
+          in: path
+          required: true
+          schema: {type: string}
+        - name: partIndex
+          in: path
+          required: true
+          schema: {type: integer, minimum: 1, maximum: 256}
+        - name: profileId
+          in: query
+          schema: {type: string}
+      responses: &recordingPartTimingResponses
+        '200':
+          description: A previous container estimate or explicit unknown.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RecordingPartTiming'
+        '400':
+          $ref: '#/components/responses/Error'
+        '401':
+          $ref: '#/components/responses/Error'
+        '403':
+          $ref: '#/components/responses/Error'
+        '404':
+          $ref: '#/components/responses/Error'
+        '409':
+          description: Active, restored, unclosed, invalid or changed recording/part.
+        '416':
+          description: Byte ranges are unsupported.
+        '429':
+          description: Both process slots or this part's inspection are occupied.
+        '503':
+          description: Timing service is unavailable.
+
+  /api/live/recordings/{recordingID}/parts/{partIndex}/timing/refresh:
+    post:
+      tags: [live]
+      operationId: refreshRecordingPartTiming
+      summary: Explicitly inspect one closed recording part
+      description: |
+        An empty-body explicit operation; no automatic list, finish, playback or
+        export probing occurs. Opens only this part under the recording root and
+        passes the already opened regular FD to FFprobe. MPEGTS demuxing and the
+        fd protocol are forced; caller paths and URLs are never process inputs.
+        Two inspections may run concurrently without a work queue. Each is bound
+        to ten seconds or the earlier original request/session/account expiry.
+        Authority, ledger, FD identity, size and mtime are rechecked during work
+        and before publication; cancellation retains FD and slot until Wait/join.
+        Unsupported, inconsistent or non-finite inventory returns unknown.
+        A positive duration is always container_estimate, not exact media/PTS
+        duration, continuity, a combined timeline, remux or authorization proof.
+        FD and metadata checks do not prove immutable contents against in-place
+        modification with restored metadata. No provider is contacted.
+      parameters: *recordingPartTimingParameters
+      responses: *recordingPartTimingResponses
+
 components:
   securitySchemes:
     accountSession:
@@ -3286,6 +3360,25 @@ components:
             $ref: '#/components/schemas/Error'
 
   schemas:
+    RecordingPartTiming:
+      type: object
+      required: [recordingId, partIndex, state]
+      additionalProperties: false
+      properties:
+        recordingId: {type: string}
+        partIndex: {type: integer, minimum: 1, maximum: 256}
+        state: {type: string, enum: [unknown, container_estimate]}
+        reason:
+          type: string
+          enum: [no_observation, ledger_changed, observation_expired, probe_unavailable, unsupported_container]
+        containerDurationMs: {type: integer, format: int64, minimum: 1}
+        observedAt: {type: string, format: date-time}
+        expiresAt: {type: string, format: date-time}
+        binding:
+          type: string
+          description: Opaque observation identifier, never a file/access capability.
+        observedBytes: {type: integer, format: int64, minimum: 1}
+
     SABFallbackPage:
       type: object
       additionalProperties: false

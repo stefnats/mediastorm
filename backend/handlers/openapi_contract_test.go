@@ -1127,6 +1127,7 @@ func TestOpenAPIContract(t *testing.T) {
 	t.Run("station_favorites", func(t *testing.T) { stationFavoritesOpenAPIContract(t, v) })
 
 	t.Run("recording_parts_export", func(t *testing.T) { recordingExportOpenAPIContract(t, v) })
+	t.Run("recording_part_timing", func(t *testing.T) { recordingPartTimingOpenAPIContract(t, v) })
 
 	t.Run("local_library_language", func(t *testing.T) { localLibraryLanguageOpenAPIContract(t, v) })
 
