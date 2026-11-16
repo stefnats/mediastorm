@@ -19,6 +19,7 @@ import (
 	"novastream/internal/httpheaders"
 	"novastream/internal/mediaresolve"
 	"novastream/models"
+	"novastream/services/mediaevidence"
 	usenetsvc "novastream/services/usenet"
 )
 
@@ -74,12 +75,17 @@ var usenetTrackProbePlayableExtensionPriority = map[string]int{
 // probe fetches the NZB, registers it in the virtual FS, then runs ffprobe via WebDAV.
 // Returns (audioTracks, subtitleTracks, errMsg). errMsg is non-empty on failure.
 func (p *usenetTrackProber) probe(ctx context.Context, candidate models.NZBResult) ([]models.NZBAudioTrack, []models.NZBSubtitleTrack, string) {
+	audio, subtitles, _, message := p.probeWithEvidence(ctx, candidate)
+	return audio, subtitles, message
+}
+
+func (p *usenetTrackProber) probeWithEvidence(ctx context.Context, candidate models.NZBResult) ([]models.NZBAudioTrack, []models.NZBSubtitleTrack, *models.MediaEvidence, string) {
 	downloadURL := strings.TrimSpace(candidate.DownloadURL)
 	if downloadURL == "" {
 		downloadURL = strings.TrimSpace(candidate.Link)
 	}
 	if downloadURL == "" {
-		return nil, nil, "no download URL in candidate"
+		return nil, nil, nil, "no download URL in candidate"
 	}
 
 	// Fetch NZB bytes (second fetch; health check already fetched internally)
@@ -89,7 +95,7 @@ func (p *usenetTrackProber) probe(ctx context.Context, candidate models.NZBResul
 	}
 	nzbBytes, fileName, err := p.fetchNZB(ctx, downloadURL, userAgent)
 	if err != nil {
-		return nil, nil, fmt.Sprintf("fetch NZB: %v", err)
+		return nil, nil, nil, fmt.Sprintf("fetch NZB: %v", err)
 	}
 
 	// Detach the heavy WebDAV/Usenet work from the request context so a client
@@ -103,17 +109,17 @@ func (p *usenetTrackProber) probe(ctx context.Context, candidate models.NZBResul
 		streamURL, authHeader, handled, err := p.externalResolver.ResolveExternalUsenetForProbe(detached, candidate, nzbBytes, fileName)
 		if handled {
 			if err != nil {
-				return nil, nil, fmt.Sprintf("external usenet resolve: %v", err)
+				return nil, nil, nil, fmt.Sprintf("external usenet resolve: %v", err)
 			}
 			if strings.TrimSpace(streamURL) == "" {
-				return nil, nil, "external usenet resolve returned no stream URL"
+				return nil, nil, nil, "external usenet resolve returned no stream URL"
 			}
-			audio, subs, probeErr := p.runFFProbe(detached, streamURL, authHeader)
+			audio, subs, facts, probeErr := p.runFFProbeWithEvidence(detached, streamURL, authHeader)
 			if probeErr != nil {
-				return nil, nil, fmt.Sprintf("ffprobe: %v", probeErr)
+				return nil, nil, nil, fmt.Sprintf("ffprobe: %v", probeErr)
 			}
 			log.Printf("[usenet-tracks] external probe complete title=%q audio=%d subtitle=%d", candidate.Title, len(audio), len(subs))
-			return audio, subs, ""
+			return audio, subs, mediaevidence.Probed(candidate, streamURL, "", 0, facts, "", nil, time.Now()), ""
 		}
 	}
 
@@ -122,27 +128,27 @@ func (p *usenetTrackProber) probe(ctx context.Context, candidate models.NZBResul
 	defer cancel()
 	storagePath, err := p.importer.ProcessNZBImmediately(processCtx, fileName, nzbBytes)
 	if err != nil {
-		return nil, nil, fmt.Sprintf("process NZB: %v", err)
+		return nil, nil, nil, fmt.Sprintf("process NZB: %v", err)
 	}
 
 	resolvedPath, err := p.resolveProbeMediaPath(candidate, storagePath)
 	if err != nil {
-		return nil, nil, err.Error()
+		return nil, nil, nil, err.Error()
 	}
 
 	// Build WebDAV URL for ffprobe
 	probeURL := p.buildProbeURL(resolvedPath)
 	if probeURL == "" {
-		return nil, nil, "WebDAV not configured"
+		return nil, nil, nil, "WebDAV not configured"
 	}
 
-	audio, subs, probeErr := p.runFFProbe(detached, probeURL, "")
+	audio, subs, facts, probeErr := p.runFFProbeWithEvidence(detached, probeURL, "")
 	if probeErr != nil {
-		return nil, nil, fmt.Sprintf("ffprobe: %v", probeErr)
+		return nil, nil, nil, fmt.Sprintf("ffprobe: %v", probeErr)
 	}
 
 	log.Printf("[usenet-tracks] probe complete title=%q audio=%d subtitle=%d", candidate.Title, len(audio), len(subs))
-	return audio, subs, ""
+	return audio, subs, mediaevidence.Probed(candidate, probeURL, "", 0, facts, "", nil, time.Now()), ""
 }
 
 func (p *usenetTrackProber) resolveProbeMediaPath(candidate models.NZBResult, storagePath string) (string, error) {
@@ -320,6 +326,11 @@ func (p *usenetTrackProber) buildProbeURL(storagePath string) string {
 }
 
 func (p *usenetTrackProber) runFFProbe(ctx context.Context, probeURL string, headers string) ([]models.NZBAudioTrack, []models.NZBSubtitleTrack, error) {
+	audio, subtitles, _, err := p.runFFProbeWithEvidence(ctx, probeURL, headers)
+	return audio, subtitles, err
+}
+
+func (p *usenetTrackProber) runFFProbeWithEvidence(ctx context.Context, probeURL string, headers string) ([]models.NZBAudioTrack, []models.NZBSubtitleTrack, *models.MediaProbeFacts, error) {
 	// Generous cap: large remuxes serve probe bytes slowly over WebDAV-from-Usenet
 	// (header + cues may require scattered on-demand segment fetches).
 	probeCtx, cancel := context.WithTimeout(ctx, 90*time.Second)
@@ -343,20 +354,15 @@ func (p *usenetTrackProber) runFFProbe(ctx context.Context, probeURL string, hea
 	cmd.Stderr = &stderr
 
 	if err := cmd.Run(); err != nil {
-		return nil, nil, fmt.Errorf("%w (stderr: %s)", err, stderr.String())
+		return nil, nil, nil, fmt.Errorf("%w (stderr: %s)", err, stderr.String())
 	}
 
 	var result struct {
-		Streams []struct {
-			Index       int               `json:"index"`
-			CodecType   string            `json:"codec_type"`
-			CodecName   string            `json:"codec_name"`
-			Tags        map[string]string `json:"tags"`
-			Disposition map[string]int    `json:"disposition"`
-		} `json:"streams"`
+		Streams []mediaevidence.ProbeStream `json:"streams"`
 	}
+
 	if err := json.Unmarshal(stdout.Bytes(), &result); err != nil {
-		return nil, nil, fmt.Errorf("parse output: %w", err)
+		return nil, nil, nil, fmt.Errorf("parse output: %w", err)
 	}
 
 	var audioTracks []models.NZBAudioTrack
@@ -392,7 +398,11 @@ func (p *usenetTrackProber) runFFProbe(ctx context.Context, probeURL string, hea
 		}
 	}
 
-	return audioTracks, subtitleTracks, nil
+	var facts *models.MediaProbeFacts
+	if len(result.Streams) > 0 {
+		facts = mediaevidence.ProbeFacts(result.Streams, time.Now().UTC())
+	}
+	return audioTracks, subtitleTracks, facts, nil
 }
 
 // isVideoFilePath returns true when path ends with a recognised video extension.
@@ -542,6 +552,11 @@ func (h *UsenetHandler) CheckHealth(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusBadGateway)
 		return
 	}
+	if res != nil {
+		copy := *res
+		res = &copy
+		res.MediaEvidence = nil
+	}
 	if h.healthMemory != nil && res != nil {
 		h.healthMemory.RecordUsenetHealth(request.Result, res)
 	}
@@ -550,13 +565,14 @@ func (h *UsenetHandler) CheckHealth(w http.ResponseWriter, r *http.Request) {
 	if request.ProbeForTracks && res != nil && res.Healthy {
 		res.TracksProbed = true
 		if h.trackProber != nil {
-			audio, subs, probeErr := h.trackProber.probe(r.Context(), request.Result)
+			audio, subs, evidence, probeErr := h.trackProber.probeWithEvidence(r.Context(), request.Result)
 			if probeErr != "" {
 				log.Printf("[usenet-tracks] probe failed for %q: %s", request.Result.Title, probeErr)
 				res.TrackProbeError = probeErr
 			} else {
 				res.AudioTracks = audio
 				res.SubtitleTracks = subs
+				res.MediaEvidence = evidence
 			}
 		} else {
 			res.TrackProbeError = "track probing not configured (requires WebDAV and ffprobe)"
@@ -564,5 +580,8 @@ func (h *UsenetHandler) CheckHealth(w http.ResponseWriter, r *http.Request) {
 	}
 
 	w.Header().Set("Content-Type", "application/json")
+	if res != nil {
+		res.MediaEvidence = models.CurrentMediaEvidence(res.MediaEvidence, time.Now())
+	}
 	_ = json.NewEncoder(w).Encode(res)
 }

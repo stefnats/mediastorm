@@ -114,7 +114,8 @@ type SubtitleTrackInfo struct {
 
 // PrequeueStatusResponse is the full status of a prequeue entry
 type PrequeueStatusResponse struct {
-	AutomaticLibrarySelection bool `json:"automaticLibrarySelection,omitempty"`
+	MediaEvidence             *models.MediaEvidence `json:"mediaEvidence,omitempty"`
+	AutomaticLibrarySelection bool                  `json:"automaticLibrarySelection,omitempty"`
 
 	PrequeueID         string                   `json:"prequeueId"`
 	Status             PrequeueStatus           `json:"status"`
@@ -188,11 +189,14 @@ type PrequeueStatusResponse struct {
 
 // PrequeueEntry is the internal state of a prequeue item
 type PrequeueEntry struct {
-	AutomaticLibrarySelection bool   `json:"automaticLibrarySelection,omitempty"`
-	LibraryItemID             string `json:"libraryItemId,omitempty"`
-	LibrarySourceType         string `json:"librarySourceType,omitempty"`
-	LibraryIdentity           string `json:"libraryIdentity,omitempty"`
-	LibraryEpisodeVerified    bool   `json:"libraryEpisodeVerified,omitempty"`
+	MediaEvidence               *models.MediaEvidence `json:"mediaEvidence,omitempty"`
+	MediaEvidenceReportRevision string                `json:"mediaEvidenceReportRevision,omitempty"`
+	MediaEvidenceClientID       string                `json:"mediaEvidenceClientId,omitempty"`
+	AutomaticLibrarySelection   bool                  `json:"automaticLibrarySelection,omitempty"`
+	LibraryItemID               string                `json:"libraryItemId,omitempty"`
+	LibrarySourceType           string                `json:"librarySourceType,omitempty"`
+	LibraryIdentity             string                `json:"libraryIdentity,omitempty"`
+	LibraryEpisodeVerified      bool                  `json:"libraryEpisodeVerified,omitempty"`
 
 	ID               string                   `json:"id"`
 	TitleID          string                   `json:"titleId"`
@@ -324,6 +328,7 @@ func copyPrequeueEntryForRead(entry *PrequeueEntry) *PrequeueEntry {
 	}
 
 	copy := *entry
+	copy.MediaEvidence = models.CopyMediaEvidence(entry.MediaEvidence)
 	if entry.TargetEpisode != nil {
 		targetEpisode := *entry.TargetEpisode
 		if entry.TargetEpisode.Image != nil {

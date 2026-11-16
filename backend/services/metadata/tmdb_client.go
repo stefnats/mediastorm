@@ -1476,6 +1476,7 @@ func (c *tmdbClient) seriesDetailsFetch(ctx context.Context, tmdbID int64) (*mod
 		}
 	}
 	retrievedAt := time.Now().UTC()
+	c.recordOriginalLanguage(title, payload.ID, payload.OriginalLanguage, retrievedAt)
 	title.CertificationEvidence = parseTMDBSeriesCertificationEvidence(payload.ContentRatings, payload.ID, retrievedAt, c.certificationExpiry(retrievedAt))
 	if c.cache != nil && payload.ID > 0 {
 		_ = c.cache.set(tvCertificationEvidenceCacheKey(payload.ID), title.CertificationEvidence)
@@ -2385,6 +2386,7 @@ func (c *tmdbClient) movieDetailsFetch(ctx context.Context, tmdbID int64) (*mode
 	if originalLanguage := strings.TrimSpace(movie.OriginalLanguage); originalLanguage != "" {
 		title.Language = originalLanguage
 	}
+	c.recordOriginalLanguage(title, movie.ID, movie.OriginalLanguage, time.Now().UTC())
 	if len(movie.ProductionCountries) > 0 {
 		title.CountryCode = strings.TrimSpace(movie.ProductionCountries[0].Code)
 	}

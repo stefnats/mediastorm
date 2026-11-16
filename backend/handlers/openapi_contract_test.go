@@ -1121,6 +1121,8 @@ func TestOpenAPIContract(t *testing.T) {
 
 	t.Run("title_reminders", func(t *testing.T) { reminderOpenAPIContract(t, v) })
 
+	t.Run("media_evidence_health", func(t *testing.T) { mediaEvidenceHealthContract(t, v) })
+
 	t.Run("coverage", func(t *testing.T) {
 		covered := v.Covered()
 		var missing []string

@@ -1256,6 +1256,7 @@ func (h *PrequeueHandler) GetStatus(w http.ResponseWriter, r *http.Request) {
 	}
 
 	resp := entry.ToResponse()
+	resp.MediaEvidence = h.currentPreparationEvidence(r, entry)
 
 	// In demo mode, set displayName to hide actual filenames
 	if h.demoMode {
@@ -1405,6 +1406,9 @@ func (h *PrequeueHandler) AdoptMigration(w http.ResponseWriter, r *http.Request)
 		e.SubtitleSessions = nil
 		e.Error = ""
 		e.MigrationAdopted = true
+		e.MediaEvidence = nil
+		e.MediaEvidenceReportRevision = ""
+		e.MediaEvidenceClientID = ""
 
 		if req.Result.Title != "" || req.Result.GUID != "" {
 			resultCopy := req.Result
@@ -2184,6 +2188,7 @@ func (h *PrequeueHandler) runPrequeueWorker(prequeueID, titleID, titleName, imdb
 	selectedAudioTrack := -1
 	selectedSubtitleTrack := -1
 	probeStart := time.Now()
+	h.recordPreparationEvidence(prequeueID, clientID, cachedProbeResult)
 
 	if (h.metadataProber != nil && h.userSettingsSvc != nil) || (len(localScopes) == 1 && localScopes[0].automaticLibrarySelection && cachedProbeResult != nil) {
 		h.updatePrequeueProgress(prequeueID, "selecting_tracks", "", 0, 0)
@@ -2231,6 +2236,7 @@ func (h *PrequeueHandler) runPrequeueWorker(prequeueID, titleID, titleName, imdb
 			if err != nil {
 				log.Printf("[prequeue] Unified probe failed (non-fatal): %v", err)
 			} else if fullResult != nil {
+				h.recordPreparationEvidence(prequeueID, clientID, fullResult)
 				audioStreams = fullResult.AudioStreams
 				subtitleStreams = fullResult.SubtitleStreams
 				hasDV = fullResult.HasDolbyVision

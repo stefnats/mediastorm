@@ -14,6 +14,7 @@ import (
 	"novastream/internal/mediaidentity"
 	"novastream/internal/requestsecurity"
 	"novastream/models"
+	"novastream/services/mediaevidence"
 	"novastream/utils/filter"
 )
 
@@ -639,6 +640,7 @@ func (s *SearchService) Search(ctx context.Context, opts SearchOptions) ([]model
 		log.Printf("[debrid] %s search produced %d results for %q in %s", sr.name, len(sr.results), parsed.Title, sr.elapsed.Round(10*time.Millisecond))
 		for _, res := range sr.results {
 			nzb := normalizeScrapeResult(res)
+			mediaevidence.ObserveCandidate(&nzb, time.Now().UTC())
 			decorateResultWithParsedMetadata(&nzb, target)
 			// Add absolute episode number if provided (for anime)
 			if opts.AbsoluteEpisodeNumber > 0 {

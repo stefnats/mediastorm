@@ -139,6 +139,7 @@ func (h *DebridHandler) CheckCached(w http.ResponseWriter, r *http.Request) {
 
 	var request struct {
 		Result         models.NZBResult `json:"result"`
+		ProfileID      string           `json:"profileId,omitempty"`
 		QuickOnly      bool             `json:"quickOnly"`
 		VerifyUncached bool             `json:"verifyUncached"`
 	}
@@ -153,6 +154,12 @@ func (h *DebridHandler) CheckCached(w http.ResponseWriter, r *http.Request) {
 		res *debrid.DebridHealthCheck
 		err error
 	)
+	if request.ProfileID != "" {
+		if request.Result.Attributes == nil {
+			request.Result.Attributes = map[string]string{}
+		}
+		request.Result.Attributes["profileId"] = request.ProfileID
+	}
 	if request.QuickOnly {
 		res, err = h.healthService.CheckQuickCacheOnly(r.Context(), request.Result)
 	} else if request.VerifyUncached {
@@ -166,6 +173,11 @@ func (h *DebridHandler) CheckCached(w http.ResponseWriter, r *http.Request) {
 	}
 
 	w.Header().Set("Content-Type", "application/json")
+	if res != nil {
+		copy := *res
+		res = &copy
+		res.MediaEvidence = models.CurrentMediaEvidence(res.MediaEvidence, time.Now())
+	}
 	_ = json.NewEncoder(w).Encode(res)
 }
 

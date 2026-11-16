@@ -82,6 +82,7 @@ func copyTitleCertificationEvidence(title *models.Title) *models.Title {
 	}
 	copy := *title
 	copy.CertificationEvidence = models.CopyCertificationEvidence(title.CertificationEvidence)
+	copy.OriginalLanguageEvidence = models.CopyOriginalLanguageEvidence(title.OriginalLanguageEvidence)
 	return &copy
 }
 
@@ -105,6 +106,7 @@ func (s *Service) hydrateCachedTVCertificationEvidence(title *models.Title, id i
 }
 
 func (s *Service) hydrateCachedCertificationEvidence(title *models.Title) {
+	s.hydrateCachedOriginalLanguageEvidence(title)
 	if s == nil || s.cache == nil || title == nil || title.TMDBID <= 0 {
 		return
 	}

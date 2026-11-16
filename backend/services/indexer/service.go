@@ -32,6 +32,7 @@ import (
 	"novastream/models"
 	"novastream/services/debrid"
 	"novastream/services/demomedia"
+	"novastream/services/mediaevidence"
 	"novastream/utils/filter"
 	"novastream/utils/language"
 
@@ -4549,6 +4550,7 @@ func (s *Service) fetchTorznab(ctx context.Context, idx config.IndexerConfig, op
 	}
 
 	results := make([]models.NZBResult, 0, len(feed.Channel.Items))
+	observedAt := time.Now().UTC()
 	for _, item := range feed.Channel.Items {
 		attrs := feedAttributes(item)
 
@@ -4573,6 +4575,7 @@ func (s *Service) fetchTorznab(ctx context.Context, idx config.IndexerConfig, op
 			Attributes:  attrs,
 			ServiceType: svcType,
 		}
+		mediaevidence.ObserveCandidate(&result, observedAt)
 		results = append(results, result)
 	}
 
