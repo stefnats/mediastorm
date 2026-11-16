@@ -1139,3 +1139,27 @@ timeline, export/remux or cross-device resume claim.
 
 Both packets remain only in the forks. No production activation, real provider
 request, private playlist publication or new upstream submission occurred.
+
+## Fork-only explicit provider occupancy uncertainty
+
+The [capacity report](https://github.com/stefnats/mediastorm/tree/feature/provider-occupancy-uncertainty)
+now explicitly returns unknown external usage. Provider account totals and local
+reservations lack common trusted measurement time and per-client ownership, so
+the API never subtracts them or invents an outside count, range or zero. A valid
+provider aggregate zero is retained as an observation independently of a missing
+limit. Cached provider check completion and freshly sampled local completion are
+labelled separately; neither is represented as provider measurement time.
+
+All 4,214 affected cases passed with 21 optional skips, plus 282 race cases,
+36 API contract cases and both component builds. Actual embedded settings-browser
+checks run all three existing manual/automatic/uncertainty flows, including cached
+timestamps, expiry and zero automatic provider calls. Root and independent review
+verified all six files (three production), full patch/archive, binary, runner
+hashes and raw reports. The clean integrated backend passed 9,866 cases with 38
+optional skips across 106 packages and built at the same recorded commit.
+No admission, manager, configuration or transport policy is changed here. This
+closes honest reporting of uncertainty, not measured external occupancy.
+[Exact six-file delta](https://github.com/stefnats/mediastorm/compare/1c245bda189dba35729f8624f10491468bb3aa52...0892cd709fdf9fc7d8dcaec69d3595d5ba2027a0).
+
+The packet remains only in the fork; no production activation, real provider,
+private playlist or new upstream submission occurred.
