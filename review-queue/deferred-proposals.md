@@ -560,3 +560,52 @@ policy was introduced. Other auxiliary endpoint ownership, server transport
 coverage and protected parent controls remain follow-up work. Physical receivers,
 rendering, focus and touch were not tested. No provider, private playlist, device
 installation, production activation or new upstream PR/comment occurred.
+
+## Fork-only preparation boundaries and thumbnail transport
+
+The [dormant backend preparation port](https://github.com/stefnats/mediastorm/tree/feature/vod-boundaries)
+checks current account applicability before profile selection or provider work
+in resolve, batch, queue and prequeue/retry/adoption/status paths. Unknown/error
+state never becomes inactive. Configured full sessions require an explicit
+profile matching the stored owner; caller titles, paths and result attributes
+cannot choose an owner. Bounded body/query/path selectors must agree, including
+duplicate selector occurrences. Canonical checked profile/client values reach
+the actual downstream operation.
+
+Private worker correlation retains current session/PIN/policy revisions and the
+original expiry. Superseded workers cannot overwrite successor setup, progress,
+source, evidence or Ready state. Parent cancellation, values and shorter probe
+timeouts are retained. A distinct cleanup-only context can cancel owned work
+during a policy lookup outage without authorizing demand or becoming an inactive
+fallback. Old/unbound queues and child cold preparation remain unsupported.
+No public policy, constructor installation, Main route or persistence was added.
+Video/HLS, auxiliary/delegated media, actual input binding, protected parent
+controls and cold preparation permits remain follow-up prerequisites.
+
+Validation: 3,926 affected cases with 36 optional skips, 366 repeated race cases,
+40 API cases and both builds passed. Repeated/subset counts overlap. The combined
+clean commit passes 9,352 cases with 38 explicit opt-in skips, isolated PostgreSQL,
+local browser fixtures and an exact matching clean-commit server binary.
+[Exact nine-file delta](https://github.com/stefnats/mediastorm/compare/753897d601c5e22d6e579495a2325d377ec70264...f4d5bdf035e18c36b6fa11800208193a11f1443a).
+
+The [native thumbnail correction](https://github.com/stefnats/mediastorm-androidtv/tree/fix/native-thumbnail-ownership)
+replaces global headers/loader use in both player scrubbers and prefetch paths
+with an original-owner pipeline. Backend credentials are attached only to the
+exact own scheme/host/port, reverse-proxy prefix and registered image route.
+Every redirect checks the destination. External queries and distinct provider
+authorization remain intact; exact captured backend secrets in an external URL
+cause rejection before HTTP. Relative query parameters are preserved.
+
+Identity/lifetime checks cover request creation, network results and the owned
+cache adapter. All 1,390 native cases passed, including 18 new cases and real
+synthetic two-origin HTTP checks. Both APKs built; five private prefills are empty,
+and source/APK/registry hashes were checked independently.
+[Exact nine-file delta](https://github.com/stefnats/mediastorm-androidtv/compare/0a15453cabc9bcfbcf3dba733019c74e5710065a...7ad505e1c1e64295b4af425a93b63d7d108e1ef1).
+The tests do not claim actual Coil/device instrumentation, remote age grants or
+full auxiliary enforcement. Global artwork outside this dedicated thumbnail
+pipeline remains a separate follow-up.
+
+Both branches inherit fork prerequisites and need isolated extraction plus scope
+agreement before upstream submission. Independent production/frozen-source
+reviews are clean. No new upstream PR/comment, private playlist use, real provider
+request, service activation, deployment or physical-device test occurred.
