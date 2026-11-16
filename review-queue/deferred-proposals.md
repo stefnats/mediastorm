@@ -1008,3 +1008,48 @@ The complete clean combined commit5f9afdd2d473b638f78a10cd2d97638d317d8687 passe
 a server build carrying that same unmodified revision. The failed earlier full
 run remains separate evidence. No production, real provider, private playlist,
 public family activation or new upstream submission occurred.
+
+## Fork-only saved-list original-language filters
+
+[Backend](https://github.com/stefnats/mediastorm/tree/feature/catalogue-language)
+and [TV/phone](https://github.com/stefnats/mediastorm-androidtv/tree/feature/native-catalogue-language)
+filter the complete visible saved Watchlist, Custom List or Permanent Prequeue
+before sorting, effective total and pagination. Up to 32 registered canonical
+ISO639-3 codes may be selected, with unknown as an explicit alternative or the
+only selection. Original catalogue language does not prove an available audio
+track. Unsupported active queries fail visibly; remote discovery, Library and
+other unsupported lists do not display ineffective controls.
+
+Facts come from current cached provider observations bound to the saved typed ID
+or an existing unambiguous raw-provider mapping, never saved side IDs or manual
+language scalars. No extra source/probe/provider search or timestamp refresh is
+introduced. Existing cache housekeeping and baseline list enrichment remain.
+Normalized stored HomeView/sentinel lists retain their complete index beyond the
+old discovery 500-window. Hidden entries are removed before facts or pagination.
+No immutable across-page dataset or file/age grant is claimed.
+
+Native controls require a strict boolean support marker in the same reply; there
+is no extra capability request or silent fallback to unfiltered pages. Original
+profile, immutable options and request generations fence page, reload and Random
+results. Permanent Prequeue accepts real ranked and legacy flat shapes, failing
+whole malformed pages rather than dropping rows and corrupting offsets. Other
+nested legacy adapters and list-management writes remain separate follow-ups.
+
+Validation: backend 4,394 affected cases passed with 39 optional skips, 342 repeated
+race cases, 36 OpenAPI cases and both builds. All 1,621 native tests passed,
+including 39 new cases, and both APKs built. Independent review/root verification
+checked all 16 backend/four production and 23 native/seven production files,
+patches, archives, raw reports, APKs and five empty prefills. Ten actual Go responses
+and six actual native query-helper exports match byte-for-byte in both directions.
+Tests exercise real handlers/OpenAPI, actual metadata cache readers, synthetic
+accounts/session/ownership/PIN middleware, native helpers/model/decoder and a
+600-matching-title saved-list case. They do not record an Android send, network
+login, physical UI or device playback.
+
+[Backend delta](https://github.com/stefnats/mediastorm/compare/2ad63a73967bb327e09a836a80df5de15bcbdd80...1dfcf8b4924025950cb37ae5d13ec1e5bd496963)
+and [native delta](https://github.com/stefnats/mediastorm-androidtv/compare/615ae62aefea71afaf18590ccb4ebc0223763130...3a0598006b5ce26fb68289c0528c7853b4f8b1eb).
+The clean combined commita32e978f3439d17f5476bf840c46dddb7c275332 retains the separate
+station fixture isolation and passes 9,804 cases with 38 optional skips and 106
+successful packages, isolated PostgreSQL/local browser fixtures and a server build
+carrying that same unmodified revision. No production activation, real provider,
+private playlist or new upstream submission occurred.
