@@ -57,11 +57,12 @@ func isValidIconFilename(filename string) bool {
 
 // Service manages persistence of NovaStream user profiles.
 type Service struct {
-	mu         sync.RWMutex
-	path       string
-	storageDir string
-	store      *datastore.DataStore
-	users      map[string]models.User
+	mu          sync.RWMutex
+	path        string
+	storageDir  string
+	store       *datastore.DataStore
+	users       map[string]models.User
+	persistence *persistenceState
 }
 
 // useDB returns true when the service is backed by PostgreSQL.
@@ -125,7 +126,7 @@ func (s *Service) ListAll() []models.User {
 
 	users := make([]models.User, 0, len(s.users))
 	for _, u := range s.users {
-		users = append(users, u)
+		users = append(users, cloneUser(u))
 	}
 
 	sort.Slice(users, func(i, j int) bool {
@@ -146,7 +147,7 @@ func (s *Service) ListForAccount(accountID string) []models.User {
 	users := make([]models.User, 0)
 	for _, u := range s.users {
 		if u.AccountID == accountID {
-			users = append(users, u)
+			users = append(users, cloneUser(u))
 		}
 	}
 
@@ -197,7 +198,7 @@ func (s *Service) Get(id string) (models.User, bool) {
 	defer s.mu.RUnlock()
 
 	user, ok := s.users[id]
-	return user, ok
+	return cloneUser(user), ok
 }
 
 // Create registers a new user with the provided name.
@@ -983,7 +984,7 @@ func (s *Service) AddKidsAllowedList(id, listURL string) (models.User, error) {
 	// Check if already in the list
 	for _, existing := range user.KidsAllowedLists {
 		if existing == listURL {
-			return user, nil // Already exists
+			return cloneUser(user), nil // Already exists
 		}
 	}
 
@@ -1076,7 +1077,7 @@ func (s *Service) GetUsersByMdblistAccountID(mdblistAccountID string) []models.U
 	var users []models.User
 	for _, user := range s.users {
 		if user.MdblistAccountID == mdblistAccountID {
-			users = append(users, user)
+			users = append(users, cloneUser(user))
 		}
 	}
 	return users
@@ -1121,7 +1122,7 @@ func (s *Service) GetUsersByTraktAccountID(traktAccountID string) []models.User 
 	var users []models.User
 	for _, user := range s.users {
 		if user.TraktAccountID == traktAccountID {
-			users = append(users, user)
+			users = append(users, cloneUser(user))
 		}
 	}
 	return users
@@ -1165,7 +1166,7 @@ func (s *Service) GetUsersBySimklAccountID(simklAccountID string) []models.User 
 	var users []models.User
 	for _, user := range s.users {
 		if user.SimklAccountID == simklAccountID {
-			users = append(users, user)
+			users = append(users, cloneUser(user))
 		}
 	}
 	return users
@@ -1206,7 +1207,7 @@ func (s *Service) GetUsersByScrobAccountID(scrobAccountID string) []models.User 
 	var result []models.User
 	for _, user := range s.users {
 		if user.ScrobAccountID == scrobAccountID {
-			result = append(result, user)
+			result = append(result, cloneUser(user))
 		}
 	}
 	return result
@@ -1251,7 +1252,7 @@ func (s *Service) GetUsersByPlexAccountID(plexAccountID string) []models.User {
 	var users []models.User
 	for _, user := range s.users {
 		if user.PlexAccountID == plexAccountID {
-			users = append(users, user)
+			users = append(users, cloneUser(user))
 		}
 	}
 	return users
@@ -1287,6 +1288,10 @@ func (s *Service) ensureDefaultUser() error {
 	// Only create Primary Profile if there are no users at all
 	if len(s.users) > 0 {
 		return nil
+	}
+
+	if s.useDB() {
+		return s.bootstrapDefaultLocked()
 	}
 
 	// Use the master account ID for the default profile on fresh installs.
@@ -1327,15 +1332,9 @@ func (s *Service) load() error {
 	defer s.mu.Unlock()
 
 	if s.useDB() {
-		users, err := s.store.Users().List(context.Background())
-		if err != nil {
-			return fmt.Errorf("load users from db: %w", err)
-		}
-		s.users = make(map[string]models.User, len(users))
-		for _, u := range users {
-			s.users[u.ID] = u
-		}
-		return nil
+		ctx, cancel := context.WithTimeout(context.Background(), userPersistenceBudget)
+		defer cancel()
+		return s.loadDatabaseLocked(ctx)
 	}
 
 	file, err := os.Open(s.path)
@@ -1391,6 +1390,8 @@ func (s *Service) load() error {
 		s.users[user.ID] = user
 	}
 
+	s.confirmJSONLocked()
+
 	// Save migrated data
 	if needsSave {
 		return s.saveLocked()
@@ -1399,10 +1400,7 @@ func (s *Service) load() error {
 	return nil
 }
 
-func (s *Service) saveLocked() error {
-	if s.useDB() {
-		return s.syncToDB()
-	}
+func (s *Service) saveJSONLocked() error {
 
 	// diskUser bypasses User.MarshalJSON so that PinHash is persisted to disk.
 	// MarshalJSON strips PinHash for API security, but we need it on disk.
@@ -1450,41 +1448,4 @@ func (s *Service) saveLocked() error {
 	}
 
 	return nil
-}
-
-// syncToDB writes the full in-memory users state to PostgreSQL.
-func (s *Service) syncToDB() error {
-	ctx := context.Background()
-	return s.store.WithTx(ctx, func(tx *datastore.Tx) error {
-		// Get existing DB state to detect deletes
-		existing, err := tx.Users().List(ctx)
-		if err != nil {
-			return err
-		}
-		dbIDs := make(map[string]bool, len(existing))
-		for _, u := range existing {
-			dbIDs[u.ID] = true
-		}
-		// Upsert all in-memory users
-		for _, u := range s.users {
-			user := u
-			if dbIDs[u.ID] {
-				if err := tx.Users().Update(ctx, &user); err != nil {
-					return err
-				}
-			} else {
-				if err := tx.Users().Create(ctx, &user); err != nil {
-					return err
-				}
-			}
-			delete(dbIDs, u.ID)
-		}
-		// Delete users removed from memory
-		for id := range dbIDs {
-			if err := tx.Users().Delete(ctx, id); err != nil {
-				return err
-			}
-		}
-		return nil
-	})
 }
