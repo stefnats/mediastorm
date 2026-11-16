@@ -2,6 +2,7 @@ package handlers
 
 import (
 	"context"
+	"crypto/rand"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -10,6 +11,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 
 	"novastream/config"
@@ -22,6 +24,25 @@ func stationM3U(rows ...string) string { return "#EXTM3U\n" + strings.Join(rows,
 func stationM3URow(id, name, group, language string) string {
 	return fmt.Sprintf("#EXTINF:-1 tvg-id=%q tvg-language=%q group-title=%q,%s\nhttps://example.invalid/never-open/%s", id, language, group, name, id)
 }
+
+// Persistent playlist caches outlive loopback servers whose ports can be reused.
+// Keep each synthetic source distinct without changing its asserted URL path.
+func stationPlaylistURL(t *testing.T, raw string) string {
+	t.Helper()
+	u, err := url.Parse(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var nonce [16]byte
+	if _, err := rand.Read(nonce[:]); err != nil {
+		t.Fatal(err)
+	}
+	query := u.Query()
+	query.Set("stationFixture", fmt.Sprintf("%x", nonce))
+	u.RawQuery = query.Encode()
+	return u.String()
+}
+
 func stationChannelCall(t *testing.T, h *LiveHandler, query string, body any) LiveChannelsResponse {
 	t.Helper()
 	method := http.MethodGet
@@ -70,7 +91,7 @@ func TestStationFavoritesExpandAcrossAllowedM3UListsBeforeFiltersAndPages(t *tes
 	defer server.Close()
 	enabled := true
 	mgr := config.NewManager(filepath.Join(t.TempDir(), "config.json"))
-	sources := []config.LivePlaylistSource{{ID: "a", Name: "A", Mode: "m3u", PlaylistURL: server.URL + "/a", Enabled: &enabled}, {ID: "b", Name: "B", Mode: "m3u", PlaylistURL: server.URL + "/b", Enabled: &enabled}, {ID: "restricted", Name: "Restricted", Mode: "m3u", PlaylistURL: server.URL + "/restricted", Enabled: &enabled, AllowedProfiles: []string{"other"}}}
+	sources := []config.LivePlaylistSource{{ID: "a", Name: "A", Mode: "m3u", PlaylistURL: stationPlaylistURL(t, server.URL+"/a"), Enabled: &enabled}, {ID: "b", Name: "B", Mode: "m3u", PlaylistURL: stationPlaylistURL(t, server.URL+"/b"), Enabled: &enabled}, {ID: "restricted", Name: "Restricted", Mode: "m3u", PlaylistURL: stationPlaylistURL(t, server.URL+"/restricted"), Enabled: &enabled, AllowedProfiles: []string{"other"}}}
 	if err := mgr.Save(config.Settings{Live: config.LiveSettings{Sources: sources}}); err != nil {
 		t.Fatal(err)
 	}
@@ -81,6 +102,12 @@ func TestStationFavoritesExpandAcrossAllowedM3UListsBeforeFiltersAndPages(t *tes
 	h := NewLiveHandler(server.Client(), false, "", 0, 0, 0, false, mgr, prefs)
 	h.SetUsersService(stationProfiles{})
 	all := stationChannelCall(t, h, "", nil)
+	mu.Lock()
+	fetchedA, fetchedB, fetchedRestricted := requests["/a"], requests["/b"], requests["/restricted"]
+	mu.Unlock()
+	if fetchedA == 0 || fetchedB == 0 || fetchedRestricted != 0 {
+		t.Fatal("first request did not fetch its own allowed synthetic playlists")
+	}
 	var station, hiddenID string
 	for _, c := range all.Channels {
 		if c.Name == "RTL HD" {
@@ -125,7 +152,7 @@ func TestStationFavoritesExpandAcrossAllowedM3UListsBeforeFiltersAndPages(t *tes
 	if shown.Total != 2 || shown.Channels[0].StationVariants != 2 {
 		t.Fatal("explicit ShowHidden could not restore profile-hidden alternate")
 	}
-	sources = append(sources, config.LivePlaylistSource{ID: "c", Name: "C", Mode: "m3u", PlaylistURL: server.URL + "/c", Enabled: &enabled})
+	sources = append(sources, config.LivePlaylistSource{ID: "c", Name: "C", Mode: "m3u", PlaylistURL: stationPlaylistURL(t, server.URL+"/c"), Enabled: &enabled})
 	if err = mgr.Save(config.Settings{Live: config.LiveSettings{Sources: sources}}); err != nil {
 		t.Fatal(err)
 	}
@@ -142,16 +169,23 @@ func TestStationFavoritesExpandAcrossAllowedM3UListsBeforeFiltersAndPages(t *tes
 
 func TestStationFavoritesPinBeforeSourceCountCapWithoutBypassingAllowedCategories(t *testing.T) {
 	list := stationM3U(stationM3URow("a.de", "A", "General", "de"), stationM3URow("b.de", "B", "General", "de"), stationM3URow("RTL.de", "RTL HD", "General", "de"), stationM3URow("RTLHD.de", "RTL Television FHD", "Denied", "de"))
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { _, _ = w.Write([]byte(list)) }))
+	var playlistRequests atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		playlistRequests.Add(1)
+		_, _ = w.Write([]byte(list))
+	}))
 	defer server.Close()
 	enabled := true
 	mgr := config.NewManager(filepath.Join(t.TempDir(), "config.json"))
-	if err := mgr.Save(config.Settings{Live: config.LiveSettings{Sources: []config.LivePlaylistSource{{ID: "a", Name: "A", Mode: "m3u", PlaylistURL: server.URL, Enabled: &enabled}}, Filtering: config.LiveTVFilterSettings{EnabledCategories: []string{"General"}, MaxChannels: 2}}}); err != nil {
+	if err := mgr.Save(config.Settings{Live: config.LiveSettings{Sources: []config.LivePlaylistSource{{ID: "a", Name: "A", Mode: "m3u", PlaylistURL: stationPlaylistURL(t, server.URL), Enabled: &enabled}}, Filtering: config.LiveTVFilterSettings{EnabledCategories: []string{"General"}, MaxChannels: 2}}}); err != nil {
 		t.Fatal(err)
 	}
 	h := NewLiveHandler(server.Client(), false, "", 0, 0, 0, false, mgr, nil)
 	station, _ := liveStationIdentity(LiveChannel{Name: "RTL HD", TvgID: "RTL.de", TvgLanguage: "de"}, nil)
 	legacy := stationChannelCall(t, h, "", nil)
+	if playlistRequests.Load() != 1 {
+		t.Fatal("first request did not fetch its own synthetic playlist")
+	}
 	if legacy.Total != 2 || legacy.Channels[0].Name != "A" || legacy.Channels[1].Name != "B" {
 		t.Fatal("legacy prefix cap changed")
 	}
@@ -272,14 +306,21 @@ func TestStationFavoritesRealM3UExplicitCountryMembership(t *testing.T) {
 		`#EXTINF:-1 tvg-id="RTL" tvg-country="MX" tvg-language="es",RTL HD`+"\nhttps://example.invalid/mx",
 		`#EXTINF:-1 tvg-id="RTL" tvg-country="ES" tvg-language="es",RTL FHD`+"\nhttps://example.invalid/es2",
 	)
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { _, _ = w.Write([]byte(list)) }))
+	var playlistRequests atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		playlistRequests.Add(1)
+		_, _ = w.Write([]byte(list))
+	}))
 	defer server.Close()
 	mgr := config.NewManager(filepath.Join(t.TempDir(), "config.json"))
-	if err := mgr.Save(config.Settings{Live: config.LiveSettings{Mode: "m3u", PlaylistURL: server.URL}}); err != nil {
+	if err := mgr.Save(config.Settings{Live: config.LiveSettings{Mode: "m3u", PlaylistURL: stationPlaylistURL(t, server.URL)}}); err != nil {
 		t.Fatal(err)
 	}
 	h := NewLiveHandler(server.Client(), false, "", 0, 0, 0, false, mgr, nil)
 	all := stationChannelCall(t, h, "", nil)
+	if playlistRequests.Load() != 1 {
+		t.Fatal("first request did not fetch its own synthetic playlist")
+	}
 	var station string
 	for _, channel := range all.Channels {
 		if channel.TvgCountry == "ES" {
