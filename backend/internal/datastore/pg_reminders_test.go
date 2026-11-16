@@ -67,6 +67,13 @@ func TestReminderPostgresFreshUpgradeConcurrencyRevokeRestartAndRollback(t *test
 				if err != nil {
 					t.Fatal(err)
 				}
+				db = stdlib.OpenDBFromPool(pool)
+				err = goose.UpToContext(ctx, db, "migrations", 75)
+				version, versionErr := goose.GetDBVersionContext(ctx, db)
+				db.Close()
+				if err != nil || versionErr != nil || version != 75 {
+					t.Fatal("explicit migration74 to75 upgrade failed")
+				}
 			}
 			if err := runMigrations(ctx, pool); err != nil {
 				t.Fatal(err)
@@ -78,7 +85,7 @@ func TestReminderPostgresFreshUpgradeConcurrencyRevokeRestartAndRollback(t *test
 			db := stdlib.OpenDBFromPool(pool)
 			version, err = goose.GetDBVersionContext(ctx, db)
 			db.Close()
-			if err != nil || version != 75 {
+			if err != nil || version < 75 {
 				t.Fatal("migration75 was not applied")
 			}
 			if _, err := pool.Exec(ctx, `INSERT INTO accounts(id,username,password_hash)VALUES('fixture','synthetic-reminders','fixture-hash');INSERT INTO users(id,account_id,name)VALUES('one','fixture','Synthetic One'),('two','fixture','Synthetic Two')`); err != nil {
@@ -186,6 +193,13 @@ func TestReminderPostgresFreshUpgradeConcurrencyRevokeRestartAndRollback(t *test
 			var exists *string
 			if err := pool.QueryRow(ctx, `SELECT to_regclass('reminder_events')::text`).Scan(&exists); err != nil || exists != nil {
 				t.Fatal("migration75 down left reminder table")
+			}
+			db = stdlib.OpenDBFromPool(pool)
+			err = goose.UpToContext(ctx, db, "migrations", 75)
+			version, versionErr := goose.GetDBVersionContext(ctx, db)
+			db.Close()
+			if err != nil || versionErr != nil || version != 75 {
+				t.Fatal("explicit migration75 reapply failed")
 			}
 			if err := runMigrations(ctx, pool); err != nil {
 				t.Fatal(err)

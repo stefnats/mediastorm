@@ -20,8 +20,6 @@ import (
 	"github.com/google/uuid"
 
 	"novastream/internal/datastore"
-	"novastream/internal/livecapacity"
-	"novastream/internal/liveusage"
 	"novastream/models"
 )
 
@@ -52,14 +50,15 @@ var (
 )
 
 type Service struct {
-	repo           datastore.RecordingRepository
-	rules          datastore.RecordingRuleRepository
-	epg            ScheduleProvider
-	channels       ChannelProvider
-	epgoffset      func(string) time.Duration
-	ffmpegPath     string
-	outputDir      string
-	remuxRecording func(string) error
+	repo            datastore.RecordingRepository
+	rules           datastore.RecordingRuleRepository
+	epg             ScheduleProvider
+	channels        ChannelProvider
+	epgoffset       func(string) time.Duration
+	ffmpegPath      string
+	outputDir       string
+	remuxRecording  func(string) error
+	syncCaptureFile func(*os.File) error
 
 	mu       sync.Mutex
 	statusMu sync.Mutex
@@ -193,7 +192,14 @@ func (s *Service) ruleLoop() {
 }
 
 func (s *Service) List(filter models.RecordingListFilter) ([]models.Recording, error) {
-	return s.repo.List(context.Background(), filter)
+	items, err := s.repo.List(context.Background(), filter)
+	if err != nil {
+		return nil, err
+	}
+	for i := range items {
+		s.captureSnapshot(&items[i])
+	}
+	return items, nil
 }
 
 func (s *Service) Get(id string) (*models.Recording, error) {
@@ -204,6 +210,7 @@ func (s *Service) Get(id string) (*models.Recording, error) {
 	if recording == nil {
 		return nil, ErrRecordingNotFound
 	}
+	s.captureSnapshot(recording)
 	return recording, nil
 }
 
@@ -344,7 +351,16 @@ func (s *Service) Cancel(id string) error {
 		recording.ActualEndAt = &now
 		recording.UpdatedAt = now
 		recording.Error = ""
-		return s.repo.Update(context.Background(), recording)
+		if err := s.repo.Update(context.Background(), recording); err != nil {
+			return err
+		}
+		s.mu.Lock()
+		cancel := s.active[recording.ID]
+		s.mu.Unlock()
+		if cancel != nil {
+			cancel()
+		}
+		return nil
 	}
 }
 
@@ -358,8 +374,32 @@ func (s *Service) Delete(id string) error {
 		// recreate a single occurrence the user removed from the queue.
 		return s.Cancel(recording.ID)
 	}
-	if recording.Status == models.RecordingStatusRunning || recording.Status == models.RecordingStatusStarting {
+	s.statusMu.Lock()
+	defer s.statusMu.Unlock()
+	recording, err = s.Get(id)
+	if err != nil {
+		return err
+	}
+	s.mu.Lock()
+	active := s.active[id] != nil || s.starting[id]
+	s.mu.Unlock()
+	if active || recording.Status == models.RecordingStatusRunning || recording.Status == models.RecordingStatusStarting {
 		return ErrCannotDeleteActive
+	}
+	if recording.Capture != nil {
+		if recording.Capture.Version == 1 && !recording.Capture.Restored && len(recording.Capture.Parts) <= models.MaxRecordingParts {
+			for _, part := range recording.Capture.Parts {
+				if path, e := s.ownedPartFile(*recording, part.Index); e == nil {
+					if e = os.Remove(path); e != nil && !errors.Is(e, os.ErrNotExist) {
+						return fmt.Errorf("delete recording part: %w", e)
+					}
+				}
+			}
+			if dir, e := s.recordingDirectory(*recording); e == nil {
+				_ = os.Remove(dir)
+			}
+		}
+		return s.repo.Delete(context.Background(), recording.ID)
 	}
 	if strings.TrimSpace(recording.OutputPath) != "" {
 		if err := os.Remove(recording.OutputPath); err != nil && !errors.Is(err, os.ErrNotExist) {
@@ -737,208 +777,7 @@ func (s *Service) runDueRecordings() {
 	}
 }
 
-func (s *Service) startRecording(recording models.Recording) {
-	// Immediate creation and a scheduler pass can arrive together. One job
-	// must never reserve two inputs or have two writers truncating its file.
-	s.mu.Lock()
-	if s.starting[recording.ID] {
-		s.mu.Unlock()
-		return
-	}
-	if s.starting == nil {
-		s.starting = make(map[string]bool)
-	}
-	s.starting[recording.ID] = true
-	s.mu.Unlock()
-	defer func() { s.mu.Lock(); delete(s.starting, recording.ID); s.mu.Unlock() }()
-	now := time.Now().UTC()
-	stopAt := recording.EndAt.Add(time.Duration(recording.PaddingAfterSeconds) * time.Second)
-	if !stopAt.After(now) {
-		recording.Status = models.RecordingStatusFailed
-		recording.Error = "recording window expired before start"
-		recording.ActualEndAt = &now
-		recording.UpdatedAt = now
-		if err := s.repo.Update(context.Background(), &recording); err != nil {
-			log.Printf("[recordings] mark expired recording failed: %v", err)
-		}
-		return
-	}
-	if err := s.authorizeSource(&recording); err != nil {
-		s.finalizeFailure(recording, now, err.Error())
-		return
-	}
-	var managedLease *livecapacity.Lease
-	var releaseProvider = func() {}
-	var releaseOnce sync.Once
-	releaseCapacity := func() { releaseOnce.Do(releaseProvider) }
-	defer releaseCapacity()
-	reserver, reserves := s.channels.(CapacityReserver)
-	managed, owns := s.channels.(ManagedCapacityReserver)
-	if reserves || owns {
-		reserveCtx, reserveCancel := context.WithTimeout(context.Background(), 15*time.Second)
-		var err error
-		if owns {
-			managedLease, err = managed.ReserveManagedRecording(reserveCtx, recording)
-			if err == nil {
-				releaseProvider = managedLease.Release
-			}
-		} else {
-			releaseProvider, err = reserver.ReserveRecording(reserveCtx, recording)
-		}
-		reserveCancel()
-		if err != nil {
-			// A failing legacy reserver may return a nil callback.
-			releaseProvider = func() {}
-			if errors.Is(err, livecapacity.ErrLimit) {
-				recording.Error = "Provider connection limit reached; waiting for a free IPTV connection"
-				recording.UpdatedAt = now
-				if updateErr := s.repo.Update(context.Background(), &recording); updateErr != nil {
-					log.Printf("[recordings] update capacity conflict failed: %v", updateErr)
-				}
-				return
-			}
-			s.finalizeFailure(recording, now, "recording provider capacity unavailable")
-			return
-		}
-	}
-	recording.Error = ""
-	recording.Status = models.RecordingStatusStarting
-	recording.OutputPath = s.buildOutputPath(recording)
-	recording.UpdatedAt = now
-	if err := s.repo.Update(context.Background(), &recording); err != nil {
-		log.Printf("[recordings] update starting status failed: %v", err)
-		return
-	}
-	if strings.TrimSpace(s.ffmpegPath) == "" {
-		s.finalizeFailure(recording, now, "ffmpeg is not configured")
-		return
-	}
-	if err := os.MkdirAll(filepath.Dir(recording.OutputPath), 0o755); err != nil {
-		s.finalizeFailure(recording, now, fmt.Sprintf("create output directory: %v", err))
-		return
-	}
-
-	ctx, cancel := context.WithCancel(s.ctx)
-	recording.Status = models.RecordingStatusRunning
-	recording.ActualStartAt = &now
-	recording.UpdatedAt = now
-	if err := s.repo.Update(context.Background(), &recording); err != nil {
-		cancel()
-		log.Printf("[recordings] update running status failed: %v", err)
-		return
-	}
-
-	s.mu.Lock()
-	s.active[recording.ID] = cancel
-	s.mu.Unlock()
-	var closeOnce sync.Once
-	closeInput := func() {
-		closeOnce.Do(func() {
-			s.statusMu.Lock()
-			s.mu.Lock()
-			delete(s.active, recording.ID)
-			s.mu.Unlock()
-			releaseCapacity()
-			s.statusMu.Unlock()
-		})
-	}
-	if managedLease != nil {
-		managedLease.SetStop(func(stopContext context.Context) error { return s.InterruptForTakeover(stopContext, recording.ID) })
-	}
-	liveusage.GetTracker().StartRecording(recording.ID, recording.UserID)
-	defer func() { closeInput(); liveusage.GetTracker().EndRecording(recording.ID); cancel() }()
-
-	log.Printf("[recordings] recording start id=%s title=%q channel=%q source=%s window=%s..%s stopAt=%s",
-		recording.ID, recording.Title, recording.ChannelName, redactSourceURL(recording.SourceURL),
-		recording.StartAt.Format(time.RFC3339), recording.EndAt.Format(time.RFC3339), stopAt.Format(time.RFC3339))
-
-	attempt := 0
-	lastErrMsg := ""
-	for {
-		if time.Until(stopAt) <= 0 {
-			break
-		}
-		attempt++
-
-		result := s.runRecordingAttempt(ctx, recording, stopAt, attempt)
-		finishedAt := time.Now().UTC()
-		if ctx.Err() != nil {
-			closeInput()
-			s.handleInterruptedRecording(recording.ID, finishedAt)
-			return
-		}
-		// A retry whose process cannot start before the deadline has no new
-		// source evidence. Preserve the preceding early-end error.
-		if errors.Is(result.err, context.DeadlineExceeded) && !time.Now().Before(stopAt) && result.written == 0 {
-			break
-		}
-		if result.stoppedAtSchedule {
-			// Wall-clock stop reached: this attempt finished the recording,
-			// unless it was a last-second retry that captured nothing.
-			if result.written > 0 {
-				lastErrMsg = ""
-			}
-			break
-		}
-		if result.errMsg != "" {
-			lastErrMsg = result.errMsg
-		} else {
-			lastErrMsg = "source stream ended before scheduled stop time"
-		}
-		if time.Until(stopAt) <= 0 {
-			break
-		}
-
-		timer := time.NewTimer(recordingRetryDelay)
-		select {
-		case <-ctx.Done():
-			timer.Stop()
-			closeInput()
-			s.handleInterruptedRecording(recording.ID, time.Now().UTC())
-			return
-		case <-timer.C:
-		}
-	}
-
-	closeInput()
-	s.statusMu.Lock()
-	defer s.statusMu.Unlock()
-	latest, err := s.Get(recording.ID)
-	if err != nil {
-		log.Printf("[recordings] reload recording after ffmpeg exit failed: %v", err)
-		return
-	}
-	finishedAt := time.Now().UTC()
-	if latest.Status == models.RecordingStatusCancelled {
-		s.finalizeCancelledRecording(latest)
-		return
-	}
-	// Retry outputs reset timestamps even when the final attempt failed.
-	if attempt > 1 {
-		lastErrMsg = s.repairRecordingOutput(latest, lastErrMsg)
-	}
-
-	if info, err := os.Stat(latest.OutputPath); err == nil {
-		latest.OutputSizeBytes = info.Size()
-	}
-	latest.ActualEndAt = &finishedAt
-	latest.UpdatedAt = finishedAt
-	if latest.OutputSizeBytes > 0 && lastErrMsg == "" {
-		latest.Status = models.RecordingStatusCompleted
-		latest.Error = ""
-	} else {
-		if lastErrMsg == "" {
-			lastErrMsg = "recording ended without writing media data"
-		}
-		latest.Status = models.RecordingStatusFailed
-		latest.Error = truncateRecordingError(lastErrMsg)
-	}
-	log.Printf("[recordings] recording finished id=%s status=%s attempts=%d bytes=%d error=%q",
-		latest.ID, latest.Status, attempt, latest.OutputSizeBytes, latest.Error)
-	if err := s.repo.Update(context.Background(), latest); err != nil {
-		log.Printf("[recordings] finalize recording update failed: %v", err)
-	}
-}
+func (s *Service) startRecording(recording models.Recording) { s.startCaptureRecording(recording) }
 
 // Appending a new MPEG-TS muxer output after a reconnect resets its PTS/DTS.
 // Remux the completed file so players see one continuous seekable timeline.
@@ -986,10 +825,9 @@ type recordingAttemptResult struct {
 // than ffmpeg's -t, which counts stream timestamps: live sources with forward
 // timestamp jumps made -t end captures minutes early.
 func (s *Service) runRecordingAttempt(ctx context.Context, recording models.Recording, stopAt time.Time, attempt int) recordingAttemptResult {
-	startedAt := time.Now()
 	flags := os.O_CREATE | os.O_WRONLY
 	if attempt == 1 {
-		flags |= os.O_TRUNC
+		flags |= os.O_EXCL
 	} else {
 		flags |= os.O_APPEND
 	}
@@ -1000,6 +838,11 @@ func (s *Service) runRecordingAttempt(ctx context.Context, recording models.Reco
 		return recordingAttemptResult{err: err, errMsg: msg}
 	}
 	defer outputFile.Close()
+	return s.runCaptureProcess(ctx, recording, stopAt, attempt, outputFile)
+}
+
+func (s *Service) runCaptureProcess(ctx context.Context, recording models.Recording, stopAt time.Time, attempt int, outputFile *os.File) recordingAttemptResult {
+	startedAt := time.Now()
 	var startSize int64
 	if info, err := outputFile.Stat(); err == nil {
 		startSize = info.Size()

@@ -21,29 +21,30 @@ const (
 )
 
 type Recording struct {
-	ID                   string          `json:"id"`
-	UserID               string          `json:"userId"`
-	RuleID               string          `json:"ruleId,omitempty"`
-	Type                 RecordingType   `json:"type"`
-	Status               RecordingStatus `json:"status"`
-	ChannelID            string          `json:"channelId"`
-	TvgID                string          `json:"tvgId,omitempty"`
-	ChannelName          string          `json:"channelName"`
-	Title                string          `json:"title"`
-	Description          string          `json:"description,omitempty"`
-	SourceURL            string          `json:"sourceUrl"`
-	StartAt              time.Time       `json:"startAt"`
-	EndAt                time.Time       `json:"endAt"`
-	PaddingBeforeSeconds int             `json:"paddingBeforeSeconds"`
-	PaddingAfterSeconds  int             `json:"paddingAfterSeconds"`
-	OutputPath           string          `json:"outputPath,omitempty"`
-	OutputSizeBytes      int64           `json:"outputSizeBytes,omitempty"`
-	ActualStartAt        *time.Time      `json:"actualStartAt,omitempty"`
-	ActualEndAt          *time.Time      `json:"actualEndAt,omitempty"`
-	Error                string          `json:"error,omitempty"`
-	CreatedAt            time.Time       `json:"createdAt"`
-	UpdatedAt            time.Time       `json:"updatedAt"`
-	ScheduleKey          string          `json:"-"`
+	Capture              *RecordingCapture `json:"capture,omitempty"`
+	ID                   string            `json:"id"`
+	UserID               string            `json:"userId"`
+	RuleID               string            `json:"ruleId,omitempty"`
+	Type                 RecordingType     `json:"type"`
+	Status               RecordingStatus   `json:"status"`
+	ChannelID            string            `json:"channelId"`
+	TvgID                string            `json:"tvgId,omitempty"`
+	ChannelName          string            `json:"channelName"`
+	Title                string            `json:"title"`
+	Description          string            `json:"description,omitempty"`
+	SourceURL            string            `json:"sourceUrl"`
+	StartAt              time.Time         `json:"startAt"`
+	EndAt                time.Time         `json:"endAt"`
+	PaddingBeforeSeconds int               `json:"paddingBeforeSeconds"`
+	PaddingAfterSeconds  int               `json:"paddingAfterSeconds"`
+	OutputPath           string            `json:"outputPath,omitempty"`
+	OutputSizeBytes      int64             `json:"outputSizeBytes,omitempty"`
+	ActualStartAt        *time.Time        `json:"actualStartAt,omitempty"`
+	ActualEndAt          *time.Time        `json:"actualEndAt,omitempty"`
+	Error                string            `json:"error,omitempty"`
+	CreatedAt            time.Time         `json:"createdAt"`
+	UpdatedAt            time.Time         `json:"updatedAt"`
+	ScheduleKey          string            `json:"-"`
 }
 
 type RecordingRuleMatchType string

@@ -31,24 +31,24 @@ func TestConfirmedTakeoverStopsActualRecorderAndPreservesPartialMedia(t *testing
 	service.ctx = context.Background()
 	manager := livecapacity.NewManager()
 	service.channels = managedRecordingChannels{manager}
-	repaired := make(chan struct{})
-	allowRepair := make(chan struct{})
-	var repairBlocked atomic.Bool
+	flushing := make(chan struct{})
+	allowFlush := make(chan struct{})
+	service.syncCaptureFile = func(file *os.File) error {
+		close(flushing)
+		<-allowFlush
+		return file.Sync()
+	}
 	service.remuxRecording = func(string) error {
-		close(repaired)
-		if repairBlocked.Load() {
-			<-allowRepair
-		}
+		t.Error("immutable capture parts must not be remuxed")
 		return nil
 	}
 	done := make(chan struct{})
 	go func() { defer close(done); service.startRecording(recording) }()
 	t.Cleanup(func() {
-		repairBlocked.Store(false)
 		select {
-		case <-allowRepair:
+		case <-allowFlush:
 		default:
-			close(allowRepair)
+			close(allowFlush)
 		}
 		_ = service.Cancel(recording.ID)
 		select {
@@ -84,21 +84,40 @@ func TestConfirmedTakeoverStopsActualRecorderAndPreservesPartialMedia(t *testing
 		t.Fatal("warning interrupted recorder")
 	}
 	// No confirmation request means cancel/dismiss and has no server mutation.
-	repairBlocked.Store(true)
 	policy.Confirmation = prompt.Token
 	bounded, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
-	replacement, err := manager.AcquireWithTakeover(bounded, "provider", "", 1, actor, policy)
-	if err != nil {
-		t.Fatal(err)
+	type takeoverResult struct {
+		lease *livecapacity.Lease
+		err   error
 	}
-	defer replacement.Release()
-	// The input has closed, even if local file repair is still pending.
+	acquired := make(chan takeoverResult, 1)
+	go func() {
+		lease, err := manager.AcquireWithTakeover(bounded, "provider", "", 1, actor, policy)
+		acquired <- takeoverResult{lease, err}
+	}()
 	select {
-	case <-repaired:
+	case <-flushing:
 	case <-time.After(time.Second):
-		t.Fatal("partial media repair was not reached")
+		t.Fatal("partial media flush was not reached")
 	}
+	if manager.Current("provider") != 1 {
+		t.Fatal("old private slot released before partial file flush")
+	}
+	select {
+	case result := <-acquired:
+		if result.lease != nil {
+			result.lease.Release()
+		}
+		t.Fatal("takeover acquired a slot before partial file flush completed")
+	default:
+	}
+	close(allowFlush)
+	result := <-acquired
+	if result.err != nil {
+		t.Fatal(result.err)
+	}
+	defer result.lease.Release()
 	current, _ = service.Get(recording.ID)
 	if current.Status != models.RecordingStatusCancelled || !strings.Contains(current.Error, "incomplete recording") || current.OutputPath != output {
 		t.Fatal("interrupted job did not retain incomplete status and output")
@@ -106,11 +125,10 @@ func TestConfirmedTakeoverStopsActualRecorderAndPreservesPartialMedia(t *testing
 	if body, err := os.ReadFile(output); err != nil || string(body) != "synthetic-partial-media" {
 		t.Fatal("partial recording was changed or removed")
 	}
-	close(allowRepair)
 	<-done
 	current, _ = service.Get(recording.ID)
 	if current.OutputSizeBytes != int64(len("synthetic-partial-media")) || current.Status != models.RecordingStatusCancelled || !strings.Contains(current.Error, "incomplete recording") {
-		t.Fatal("final repair lost interruption result")
+		t.Fatal("final flush lost interruption result")
 	}
 }
 

@@ -20,6 +20,7 @@ import (
 	"novastream/config"
 	"novastream/internal/datastore"
 	"novastream/models"
+	recordingcapture "novastream/services/recordings"
 	"novastream/services/reminders"
 )
 
@@ -1181,6 +1182,13 @@ func (s *Service) importDatabaseBytes(data []byte) error {
 		return err
 	}
 	ctx := context.Background()
+	quiesceCtx, stopQuiesce := context.WithTimeout(ctx, 30*time.Second)
+	releaseCaptures, quiesceErr := recordingcapture.QuiesceForRestore(quiesceCtx)
+	stopQuiesce()
+	if quiesceErr != nil {
+		return fmt.Errorf("recordings are still closing; restore was not started")
+	}
+	defer releaseCaptures()
 	err = s.store.WithTx(ctx, func(tx *datastore.Tx) error {
 		if err := tx.LockRemindersForRestore(ctx); err != nil {
 			return err
@@ -1448,6 +1456,7 @@ func (s *Service) importDatabaseBytes(data []byte) error {
 		}
 		for i := range export.Recordings {
 			recording := export.Recordings[i]
+			models.RestoreRecordingCapture(&recording)
 			if err := tx.Recordings().Create(ctx, &recording); err != nil {
 				return fmt.Errorf("restore recording %s: %w", recording.ID, err)
 			}

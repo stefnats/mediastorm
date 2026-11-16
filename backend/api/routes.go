@@ -541,7 +541,7 @@ func Register(
 		protected.HandleFunc("/live/recordings/{recordingID}", recordingsHandler.Get).Methods(http.MethodGet)
 		protected.HandleFunc("/live/recordings/{recordingID}", recordingsHandler.Options).Methods(http.MethodOptions)
 		protected.HandleFunc("/live/recordings/{recordingID}", recordingsHandler.Delete).Methods(http.MethodDelete)
-		protected.HandleFunc("/live/recordings/{recordingID}/stream", recordingsHandler.Stream).Methods(http.MethodGet)
+		protected.HandleFunc("/live/recordings/{recordingID}/stream", recordingsHandler.Stream).Methods(http.MethodGet, http.MethodHead)
 		protected.HandleFunc("/live/recordings/{recordingID}/stream", recordingsHandler.Options).Methods(http.MethodOptions)
 		protected.HandleFunc("/live/recordings/{recordingID}/cancel", recordingsHandler.Cancel).Methods(http.MethodPost)
 		protected.HandleFunc("/live/recordings/{recordingID}/cancel", recordingsHandler.Options).Methods(http.MethodOptions)

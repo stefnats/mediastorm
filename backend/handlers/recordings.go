@@ -121,7 +121,7 @@ func (h *RecordingsHandler) List(w http.ResponseWriter, r *http.Request) {
 		recordingsList = []models.Recording{}
 	}
 	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(map[string]any{"recordings": recordingsList})
+	_ = json.NewEncoder(w).Encode(map[string]any{"recordings": publicRecordings(recordingsList)})
 }
 
 func (h *RecordingsHandler) Get(w http.ResponseWriter, r *http.Request) {
@@ -145,7 +145,7 @@ func (h *RecordingsHandler) Get(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(recording)
+	_ = json.NewEncoder(w).Encode(publicRecording(*recording))
 }
 
 func (h *RecordingsHandler) CreateEPG(w http.ResponseWriter, r *http.Request) {
@@ -191,7 +191,7 @@ func (h *RecordingsHandler) CreateEPG(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusCreated)
-	_ = json.NewEncoder(w).Encode(recording)
+	_ = json.NewEncoder(w).Encode(publicRecording(recording))
 }
 
 func (h *RecordingsHandler) CreateTimeBlock(w http.ResponseWriter, r *http.Request) {
@@ -237,7 +237,7 @@ func (h *RecordingsHandler) CreateTimeBlock(w http.ResponseWriter, r *http.Reque
 	}
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusCreated)
-	_ = json.NewEncoder(w).Encode(recording)
+	_ = json.NewEncoder(w).Encode(publicRecording(recording))
 }
 
 func (h *RecordingsHandler) Cancel(w http.ResponseWriter, r *http.Request) {
@@ -323,6 +323,12 @@ func (h *RecordingsHandler) Stream(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "recording is not ready for playback", http.StatusConflict)
 		return
 	}
+	selected := *recording
+	recording = &selected
+	allowed, growing := h.bindRecordingPart(w, r, recording)
+	if !allowed {
+		return
+	}
 	outputPath := strings.TrimSpace(recording.OutputPath)
 	if outputPath == "" {
 		http.Error(w, "recording file unavailable", http.StatusNotFound)
@@ -335,6 +341,16 @@ func (h *RecordingsHandler) Stream(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var trackedWriter http.ResponseWriter = w
+	if r.Method == http.MethodHead {
+		file, err := os.Open(outputPath)
+		if err != nil {
+			http.Error(w, "recording file unavailable", 404)
+			return
+		}
+		defer file.Close()
+		http.ServeContent(w, r, filepath.Base(outputPath), info.ModTime(), file)
+		return
+	}
 	streamRequest := r
 	if r.Method == http.MethodGet {
 		tracker := GetStreamTracker()
@@ -370,7 +386,7 @@ func (h *RecordingsHandler) Stream(w http.ResponseWriter, r *http.Request) {
 				info.Size(), diagnosticWriter.bytesWritten)
 		}()
 	}
-	if recording.Status == models.RecordingStatusRunning {
+	if growing {
 		rangeHeader := strings.TrimSpace(streamRequest.Header.Get("Range"))
 		log.Printf("[recordings] streaming running recording id=%s mode=growing range=%q path=%s", recordingID, rangeHeader, outputPath)
 		if err := h.streamGrowingRecording(trackedWriter, streamRequest, recordingID, outputPath); err != nil && !errors.Is(err, streamRequest.Context().Err()) {
@@ -515,10 +531,20 @@ func (h *RecordingsHandler) streamGrowingRecording(w http.ResponseWriter, r *htt
 		}
 
 		latest, getErr := h.service.Get(recordingID)
-		if getErr == nil && latest != nil && latest.Status != models.RecordingStatusRunning {
-			if statErr == nil && info.Size() <= offset {
-				return nil
+		stillGrowing := getErr == nil && latest != nil && latest.Status == models.RecordingStatusRunning
+		if stillGrowing && latest.Capture != nil {
+			stillGrowing = latest.Capture.Version == 1 && !latest.Capture.Restored && latest.Capture.Phase == "capturing" && latest.OutputPath == outputPath
+			var first *models.RecordingPart
+			for _, part := range latest.Capture.Parts {
+				if part.Bytes > 0 && part.StreamPath != "" && (first == nil || part.Index < first.Index) {
+					copy := part
+					first = &copy
+				}
 			}
+			stillGrowing = stillGrowing && first != nil && first.EndedAt == nil
+		}
+		if !stillGrowing && (statErr != nil || info.Size() <= offset) {
+			return nil
 		}
 	}
 }

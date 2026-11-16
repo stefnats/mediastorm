@@ -2,6 +2,7 @@ package datastore
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
@@ -20,7 +21,7 @@ func (r *pgRecordingRepo) Get(ctx context.Context, id string) (*models.Recording
 	row := r.pool.QueryRow(ctx, `
 		SELECT id, user_id, COALESCE(rule_id, ''), schedule_key, type, status, channel_id, tvg_id, channel_name, title, description,
 		       source_url, start_at, end_at, padding_before_seconds, padding_after_seconds,
-		       output_path, output_size_bytes, actual_start_at, actual_end_at, error, created_at, updated_at
+		       output_path, output_size_bytes, actual_start_at, actual_end_at, error, created_at, updated_at, capture_state
 		FROM recordings WHERE id = $1`, id)
 	return scanRecording(row)
 }
@@ -48,7 +49,7 @@ func (r *pgRecordingRepo) List(ctx context.Context, filter models.RecordingListF
 	query := `
 		SELECT id, user_id, COALESCE(rule_id, ''), schedule_key, type, status, channel_id, tvg_id, channel_name, title, description,
 		       source_url, start_at, end_at, padding_before_seconds, padding_after_seconds,
-		       output_path, output_size_bytes, actual_start_at, actual_end_at, error, created_at, updated_at
+		       output_path, output_size_bytes, actual_start_at, actual_end_at, error, created_at, updated_at, capture_state
 		FROM recordings`
 	if len(clauses) > 0 {
 		query += " WHERE " + strings.Join(clauses, " AND ")
@@ -77,21 +78,25 @@ func (r *pgRecordingRepo) List(ctx context.Context, filter models.RecordingListF
 }
 
 func (r *pgRecordingRepo) Create(ctx context.Context, recording *models.Recording) error {
-	_, err := r.pool.Exec(ctx, `
+	capture, err := json.Marshal(recording.Capture)
+	if err != nil {
+		return fmt.Errorf("marshal recording capture: %w", err)
+	}
+	_, err = r.pool.Exec(ctx, `
 		INSERT INTO recordings (
 			id, user_id, rule_id, schedule_key, type, status, channel_id, tvg_id, channel_name, title, description, source_url,
 			start_at, end_at, padding_before_seconds, padding_after_seconds,
-			output_path, output_size_bytes, actual_start_at, actual_end_at, error, created_at, updated_at
+			output_path, output_size_bytes, actual_start_at, actual_end_at, error, created_at, updated_at, capture_state
 		) VALUES (
 			$1,$2,NULLIF($3, ''),$4,$5,$6,$7,$8,$9,$10,$11,$12,
 			$13,$14,$15,$16,
-			$17,$18,$19,$20,$21,$22,$23
+			$17,$18,$19,$20,$21,$22,$23,$24
 		)`,
 		recording.ID, recording.UserID, strings.TrimSpace(recording.RuleID), recording.ScheduleKey, string(recording.Type), string(recording.Status), recording.ChannelID, recording.TvgID,
 		recording.ChannelName, recording.Title, recording.Description, recording.SourceURL,
 		recording.StartAt, recording.EndAt, recording.PaddingBeforeSeconds, recording.PaddingAfterSeconds,
 		recording.OutputPath, recording.OutputSizeBytes, recording.ActualStartAt, recording.ActualEndAt, recording.Error,
-		recording.CreatedAt, recording.UpdatedAt)
+		recording.CreatedAt, recording.UpdatedAt, capture)
 	if err != nil {
 		return fmt.Errorf("create recording: %w", err)
 	}
@@ -99,7 +104,11 @@ func (r *pgRecordingRepo) Create(ctx context.Context, recording *models.Recordin
 }
 
 func (r *pgRecordingRepo) Update(ctx context.Context, recording *models.Recording) error {
-	_, err := r.pool.Exec(ctx, `
+	capture, err := json.Marshal(recording.Capture)
+	if err != nil {
+		return fmt.Errorf("marshal recording capture: %w", err)
+	}
+	_, err = r.pool.Exec(ctx, `
 		UPDATE recordings
 		SET status = $2,
 		    channel_id = $3,
@@ -117,12 +126,13 @@ func (r *pgRecordingRepo) Update(ctx context.Context, recording *models.Recordin
 		    actual_start_at = $15,
 		    actual_end_at = $16,
 		    error = $17,
-		    updated_at = $18
+		    updated_at = $18,
+		    capture_state = $19
 		WHERE id = $1`,
 		recording.ID, string(recording.Status), recording.ChannelID, recording.TvgID, recording.ChannelName,
 		recording.Title, recording.Description, recording.SourceURL, recording.StartAt, recording.EndAt,
 		recording.PaddingBeforeSeconds, recording.PaddingAfterSeconds, recording.OutputPath, recording.OutputSizeBytes,
-		recording.ActualStartAt, recording.ActualEndAt, recording.Error, recording.UpdatedAt)
+		recording.ActualStartAt, recording.ActualEndAt, recording.Error, recording.UpdatedAt, capture)
 	if err != nil {
 		return fmt.Errorf("update recording: %w", err)
 	}
@@ -151,6 +161,9 @@ func (r *pgRecordingRepo) MarkStaleActiveAsFailed(ctx context.Context, now time.
 		SET status = 'failed',
 		    error = CASE WHEN error = '' THEN 'recording interrupted by backend restart' ELSE error END,
 		    actual_end_at = COALESCE(actual_end_at, $1),
+		    capture_state = CASE WHEN capture_state->>'version' = '1'
+		      THEN capture_state || '{"phase":"interrupted","incomplete":true,"stationId":"","runId":""}'::jsonb
+		      ELSE capture_state END,
 		    updated_at = $1
 		WHERE status IN ('starting', 'running')`, now)
 	if err != nil {
@@ -165,6 +178,7 @@ func scanRecording(row interface {
 	var recording models.Recording
 	var typ string
 	var status string
+	var capture []byte
 	err := row.Scan(
 		&recording.ID,
 		&recording.UserID,
@@ -189,12 +203,18 @@ func scanRecording(row interface {
 		&recording.Error,
 		&recording.CreatedAt,
 		&recording.UpdatedAt,
+		&capture,
 	)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, nil
 	}
 	if err != nil {
 		return nil, fmt.Errorf("scan recording: %w", err)
+	}
+	if len(capture) > 0 && string(capture) != "null" {
+		if err := json.Unmarshal(capture, &recording.Capture); err != nil {
+			return nil, fmt.Errorf("decode recording capture: %w", err)
+		}
 	}
 	recording.Type = models.RecordingType(typ)
 	recording.Status = models.RecordingStatus(status)

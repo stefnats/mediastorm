@@ -43,7 +43,7 @@ func TestRecordingCapacityConflictWaitsWithoutOpeningOrTruncatingOutput(t *testi
 	s.channels = capacityChannels{m, "account"}
 	s.startRecording(job)
 	latest, _ := s.Get(job.ID)
-	if latest.Status != models.RecordingStatusPending || latest.OutputPath != job.OutputPath || !strings.Contains(latest.Error, "waiting") {
+	if latest.Status != models.RecordingStatusPending || latest.OutputPath != "" || latest.Capture == nil || !latest.Capture.Incomplete || len(latest.Capture.Gaps) != 1 || !strings.Contains(latest.Error, "waiting") {
 		t.Fatalf("conflict changed output or lost pending job: %+v", latest)
 	}
 	if m.Current("account") != 1 {

@@ -7,8 +7,10 @@ import (
 	"io"
 	"mime"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 
@@ -47,6 +49,83 @@ func ParseStreamPath(path string) (string, bool) {
 	return raw, true
 }
 
+// A reserved part selector must be canonical; malformed selectors must never
+// silently fall back to the first file. Other legacy filename tails remain
+// informational and retain the existing recording-ID lookup behavior.
+func parsePartStreamPath(path string) (string, int, bool, bool) {
+	id, ok := ParseStreamPath(path)
+	if !ok {
+		return "", 0, false, false
+	}
+	raw := strings.TrimPrefix(strings.TrimSpace(path), streamPathPrefix)
+	_, tail, hasTail := strings.Cut(raw, "/")
+	if !hasTail {
+		return id, 0, false, true
+	}
+	decoded := tail
+	for depth := 0; depth < 4; depth++ {
+		next, err := url.PathUnescape(decoded)
+		if err != nil || next == decoded {
+			break
+		}
+		for _, segment := range strings.Split(next, "/") {
+			if strings.EqualFold(segment, "parts") {
+				return id, 0, true, false
+			}
+		}
+		decoded = next
+		if depth == 3 && strings.Contains(decoded, "%") {
+			return id, 0, true, false
+		}
+	}
+	segments := strings.Split(tail, "/")
+	for _, segment := range segments {
+		if !strings.EqualFold(segment, "parts") {
+			continue
+		}
+		if len(segments) != 2 || segments[0] != "parts" || !safeRecordingComponent(id) {
+			return id, 0, true, false
+		}
+		index, err := strconv.Atoi(segments[1])
+		if err != nil || index < 1 || index > models.MaxRecordingParts || strconv.Itoa(index) != segments[1] {
+			return id, 0, true, false
+		}
+		return id, index, true, true
+	}
+	return id, 0, false, true
+}
+
+// selectedPart validates the complete bounded ledger before choosing a file.
+// A zero-byte failed attempt is not the legacy playable first file.
+func (p *StreamProvider) selectedPart(recording *models.Recording, index int, explicit bool) (string, *models.RecordingPart, error) {
+	capture := recording.Capture
+	if capture == nil || capture.Version != 1 || capture.Restored || len(capture.Parts) > models.MaxRecordingParts || len(capture.Gaps) > models.MaxRecordingGaps {
+		return "", nil, streaming.ErrNotFound
+	}
+	indices := make([]int, 0, len(capture.Parts))
+	seen := make(map[int]bool, len(capture.Parts))
+	for _, part := range capture.Parts {
+		if part.Index < 1 || part.Index > models.MaxRecordingParts || seen[part.Index] {
+			return "", nil, streaming.ErrNotFound
+		}
+		seen[part.Index] = true
+		if explicit && part.Index == index || !explicit && part.Bytes > 0 {
+			indices = append(indices, part.Index)
+		}
+	}
+	sort.Ints(indices)
+	for _, current := range indices {
+		file, part, err := p.service.ResolvePartFile(recording.ID, current)
+		if err == nil {
+			return file, part, nil
+		}
+		if !errors.Is(err, ErrRecordingPartUnavailable) && !errors.Is(err, ErrRecordingNotFound) && !errors.Is(err, os.ErrNotExist) {
+			return "", nil, err
+		}
+	}
+	return "", nil, streaming.ErrNotFound
+}
+
 // StreamProvider adapts the recordings service to the streaming.Provider /
 // streaming.DirectURLProvider interfaces so completed (and in-progress)
 // recordings can be transmuxed through the existing HLS pipeline.
@@ -64,7 +143,7 @@ func (p *StreamProvider) resolveFile(path string) (string, string, error) {
 	if p == nil || p.service == nil {
 		return "", "", streaming.ErrNotFound
 	}
-	id, ok := ParseStreamPath(path)
+	id, index, explicit, ok := parsePartStreamPath(path)
 	if !ok {
 		return "", "", streaming.ErrNotFound
 	}
@@ -74,6 +153,13 @@ func (p *StreamProvider) resolveFile(path string) (string, string, error) {
 			return "", "", streaming.ErrNotFound
 		}
 		return "", "", err
+	}
+	if explicit || recording.Capture != nil {
+		file, _, err := p.selectedPart(recording, index, explicit)
+		if err != nil {
+			return "", "", err
+		}
+		return file, filepath.Base(file), nil
 	}
 	filePath := strings.TrimSpace(recording.OutputPath)
 	if filePath == "" {
@@ -89,7 +175,7 @@ func (p *StreamProvider) IsGrowing(_ context.Context, path string) (bool, error)
 	if p == nil || p.service == nil {
 		return false, streaming.ErrNotFound
 	}
-	id, ok := ParseStreamPath(path)
+	id, index, explicit, ok := parsePartStreamPath(path)
 	if !ok {
 		return false, streaming.ErrNotFound
 	}
@@ -100,7 +186,14 @@ func (p *StreamProvider) IsGrowing(_ context.Context, path string) (bool, error)
 		}
 		return false, err
 	}
-	return recordingIsGrowing(recording.Status), nil
+	if explicit || recording.Capture != nil {
+		_, part, err := p.selectedPart(recording, index, explicit)
+		if err != nil {
+			return false, err
+		}
+		return recordingIsGrowing(recording.Status) && recording.Capture.Phase == "capturing" && !capturePartClosed(part), nil
+	}
+	return recordingFirstPartGrowing(recording), nil
 }
 
 func recordingIsGrowing(status models.RecordingStatus) bool {
@@ -164,7 +257,10 @@ func (p *StreamProvider) Stream(_ context.Context, req streaming.Request) (*stre
 
 	if req.RangeHeader == "" {
 		headers.Set("Content-Length", strconv.FormatInt(size, 10))
-		return &streaming.Response{Body: file, Headers: headers, Status: http.StatusOK, ContentLength: size, Filename: fileName}, nil
+		return &streaming.Response{Body: struct {
+			io.Reader
+			io.Closer
+		}{Reader: io.LimitReader(file, size), Closer: file}, Headers: headers, Status: http.StatusOK, ContentLength: size, Filename: fileName}, nil
 	}
 
 	start, end, err := parseRecordingRange(req.RangeHeader, size)

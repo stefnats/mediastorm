@@ -5177,6 +5177,59 @@ components:
               id: {type: string}
               name: {type: string}
 
+    RecordingPublic:
+      type: object
+      required: [id, userId, type, status, channelId, channelName, title, sourceUrl, startAt, endAt]
+      description: Public recording metadata. Provider URLs are blank and outputPath is only an informational basename; playback uses the owned recording ID. Private repository and backup locations remain separate.
+      properties:
+        id: {type: string}
+        userId: {type: string}
+        type: {type: string, enum: [epg, time_block]}
+        status: {type: string, enum: [pending, starting, running, completed, failed, cancelled]}
+        channelId: {type: string}
+        channelName: {type: string}
+        title: {type: string}
+        sourceUrl: {type: string, enum: ['']}
+        outputPath: {type: string, pattern: '^[^/\\]*$'}
+        outputSizeBytes: {type: integer, minimum: 0, description: Size of the first playable file only; never the summed size of separate parts.}
+        startAt: {type: string, format: date-time}
+        endAt: {type: string, format: date-time}
+        capture: {$ref: '#/components/schemas/RecordingCapture'}
+    RecordingCapture:
+      type: object
+      additionalProperties: false
+      required: [version, phase, incomplete, sourceChanges, parts, gaps]
+      description: Preserved input sections, not a continuous or content-verified programme. Multiple or interrupted parts remain incomplete. No concatenation, whole-capture timeline, source URL or filesystem location is exposed.
+      properties:
+        version: {type: integer, enum: [1]}
+        phase: {type: string, enum: [capturing, waiting_capacity, finished, interrupted]}
+        incomplete: {type: boolean}
+        sourceChanges: {type: integer, minimum: 0, maximum: 256}
+        parts: {type: array, maxItems: 256, items: {$ref: '#/components/schemas/RecordingPart'}}
+        gaps: {type: array, maxItems: 256, items: {$ref: '#/components/schemas/RecordingGap'}}
+    RecordingPart:
+      type: object
+      additionalProperties: false
+      required: [index, startedAt, bytes]
+      properties:
+        index: {type: integer, minimum: 1, maximum: 256}
+        sourceId: {type: string}
+        channelId: {type: string}
+        startedAt: {type: string, format: date-time}
+        endedAt: {type: string, format: date-time}
+        bytes: {type: integer, minimum: 0, description: Measured file-size snapshot. Until endedAt and endReason are present this is provisional and may be zero before measurement or media arrival.}
+        endReason: {type: string, enum: [schedule, source_ended, capture_failed, cancelled, shutdown, restart]}
+        streamPath: {type: string, pattern: '^recording:[A-Za-z0-9_-]+/parts/[1-9][0-9]{0,2}$', description: 'Present only for measured nonempty owned parts. Resolve by recording ID and canonical part index, never a caller file path.'}
+    RecordingGap:
+      type: object
+      additionalProperties: false
+      required: [startedAt, reason]
+      description: Observed recorder transition bounds, not an exact analysis of missing broadcast frames or guaranteed continuous coverage.
+      properties:
+        startedAt: {type: string, format: date-time}
+        endedAt: {type: string, format: date-time}
+        reason: {type: string, enum: [source_retry, capacity, access_changed]}
+
     OriginalLanguageEvidence:
       type: object
       required: [language, source, sourceTitleId, observedAt, expiresAt]

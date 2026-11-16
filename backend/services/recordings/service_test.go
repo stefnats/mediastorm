@@ -107,7 +107,7 @@ func TestCompileRecordingRegexCaseSensitivity(t *testing.T) {
 	}
 }
 
-func TestStartRecordingRetriesTransientFailure(t *testing.T) {
+func TestStartRecordingPreservesRetryPartsWithoutClaimingContinuity(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("fake binary shell script is POSIX-only")
 	}
@@ -147,8 +147,8 @@ exit 0
 	if err != nil {
 		t.Fatalf("Get() error = %v", err)
 	}
-	if latest.Status != models.RecordingStatusCompleted {
-		t.Fatalf("Status = %q, want %q (error=%q)", latest.Status, models.RecordingStatusCompleted, latest.Error)
+	if latest.Status != models.RecordingStatusFailed || latest.Capture == nil || !latest.Capture.Incomplete || len(latest.Capture.Parts) < 2 {
+		t.Fatalf("retry must remain an honest incomplete capture: %+v", latest)
 	}
 	if latest.OutputSizeBytes == 0 {
 		t.Fatal("expected output bytes after retry")
@@ -158,8 +158,16 @@ exit 0
 		t.Fatalf("ReadFile() error = %v", err)
 	}
 	got := string(content)
-	if !strings.Contains(got, "chunk-1") || !strings.Contains(got, "chunk-2") {
-		t.Fatalf("output = %q, want appended chunks from both attempts", got)
+	if !strings.Contains(got, "chunk-1") || strings.Contains(got, "chunk-2") {
+		t.Fatalf("first file was concatenated or overwritten: %q", got)
+	}
+	second, _, err := svc.ResolvePartFile(recording.ID, 2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(second)
+	if err != nil || !strings.Contains(string(data), "chunk-2") {
+		t.Fatal("retry bytes were not preserved separately")
 	}
 }
 
@@ -212,11 +220,15 @@ exit 1
 	if latest.OutputSizeBytes == 0 {
 		t.Fatal("expected partial bytes to remain on disk for inspection")
 	}
-	if repairs != 1 {
-		t.Fatalf("repairs = %d, want 1 even after capture failure", repairs)
+	if repairs != 0 {
+		t.Fatal("immutable capture parts were remuxed")
 	}
-	if latest.OutputSizeBytes != int64(len("repaired-partial-media")) {
-		t.Fatalf("size = %d, want repaired file size", latest.OutputSizeBytes)
+	data, err := os.ReadFile(latest.OutputPath)
+	if err != nil || string(data) != "broken-1\n" || latest.OutputSizeBytes != int64(len(data)) {
+		t.Fatal("first partial input was overwritten or its size summed across parts")
+	}
+	if latest.Capture == nil || !latest.Capture.Incomplete || len(latest.Capture.Parts) == 0 {
+		t.Fatal("failed attempts lost durable part metadata")
 	}
 }
 
@@ -415,7 +427,7 @@ exit 0
 	if latest.Status != models.RecordingStatusFailed {
 		t.Fatalf("Status = %q, want %q", latest.Status, models.RecordingStatusFailed)
 	}
-	if latest.Error != "source stream ended before scheduled stop time" {
+	if latest.Error != "source stream ended before scheduled stop; preserved parts are incomplete" {
 		t.Fatalf("Error = %q, want source-ended message", latest.Error)
 	}
 }
