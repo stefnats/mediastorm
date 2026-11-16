@@ -593,7 +593,7 @@ replaces global headers/loader use in both player scrubbers and prefetch paths
 with an original-owner pipeline. Backend credentials are attached only to the
 exact own scheme/host/port, reverse-proxy prefix and registered image route.
 Every redirect checks the destination. External queries and distinct provider
-authorization remain intact; exact captured backend secrets in an external URL
+authorization remain intact; exact captured backend secret query values in an external URL
 cause rejection before HTTP. Relative query parameters are preserved.
 
 Identity/lifetime checks cover request creation, network results and the owned
@@ -609,3 +609,27 @@ Both branches inherit fork prerequisites and need isolated extraction plus scope
 agreement before upstream submission. Independent production/frozen-source
 reviews are clean. No new upstream PR/comment, private playlist use, real provider
 request, service activation, deployment or physical-device test occurred.
+
+## Fork-only global artwork credentials
+
+The [artwork correction](https://github.com/stefnats/mediastorm-androidtv/tree/fix/native-artwork-credentials)
+binds account and profile-unlock headers to the exact backend origin, reverse-proxy
+prefix and protected library artwork route. Public image routes retain only the
+transport credentials required by paired access. Unrelated API routes receive no
+helper-injected backend credentials. Both application image-loader factories use
+the corrected client.
+
+Each network hop removes only credentials actually injected by the helper when
+the destination no longer permits them. Distinct provider authorization remains
+intact. Exact captured secret query values on external URLs are rejected before
+HTTP; this is not arbitrary URI/path/userinfo scanning. Query parameters and proxy
+paths remain preserved. The snapshot starts at HTTP call creation, without adding
+a caller-wide ownership protocol, cache/content authorization or age grant.
+
+Validation: all 1,410 native tests passed, including 20 new cases and synthetic
+HTTP redirect checks. Both APKs built. Source manifests, raw XML, APK hashes,
+packaged registry and five empty private debug prefills were independently checked.
+[Exact six-file delta](https://github.com/stefnats/mediastorm-androidtv/compare/7ad505e1c1e64295b4af425a93b63d7d108e1ef1...05dc364b873c4f0d03917b39c8070ff7f0b4757f).
+No actual Coil/device instrumentation, production activation, real provider access
+or new upstream submission occurred. Original preparation-operation context is
+the next native work package.
