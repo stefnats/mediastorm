@@ -1304,3 +1304,38 @@ including the actual new browser test, then builds at the same clean commit.
 [Exact seven-file feature delta](https://github.com/stefnats/mediastorm/compare/399c7f10aefa9b48f970aa6182f9b672c88f79df...8d90049df7edc26d1522c56e5714aeb149f74036).
 No production activation, real provider, private playlist or new upstream
 submission occurred. Physical Safari/native-device acceptance remains separate.
+
+## Fork-only original home row lifetime
+
+The [home ownership correction](https://github.com/stefnats/mediastorm-androidtv/tree/fix/native-home-context)
+keeps home settings, rows, previews, live/hub feeds and deferred work bound to the
+original epoch and producer. Row supervision is a real child of its caller;
+mobile entries and TV state retire by epoch rather than profile ID alone. The
+three narrow screen/state carriers restart the correct store after retirement.
+New generations cancel old prefills and completions. Known terminal denial
+retires remaining jobs and visible rows, while an explicit new full load can
+reauthorize. Automatic partial/staleness work cannot revive a denied run.
+
+Legitimate progressive COMPLETE passes and calendar retries remain alive after
+the first card pass. Actual positive Store tests verify both. A separate actual
+scheduling RED showed COMPLETE starting after a known shared-feed denial; its
+full sixteen-file candidate source/patch/manifest and raw XML/log/exit are kept.
+The ordering fix validates already requested shared data before followups in
+both All and non-All views, without starting a disabled feed. Another actual
+Store test holds an accepted COMPLETE noncancellably, introduces partial denial,
+then verifies the late answer cannot republish rows or trigger automatic work.
+
+All 1,815 native cases passed, including 37 new cases, and both APKs built.
+Independent review and root verification checked all sixteen files (eleven
+production), full patch, 229 JUnit files, APK hashes/DEX symbols, registry and five
+empty private prefills. Tests execute the actual Store with narrow IO/platform
+ports, shared context, row adapters, caches and entry/state factories. Compose
+recomposition, complete successful Android ApiClient.send, device activation and
+Launcher transport remain source/compile-reviewed or explicitly outside this
+packet. Runner hashes for the historical RED were pinned after it started;
+pre-start pinning is not claimed. Earlier preliminary runs remain historical.
+
+This is row-work ownership through the Launcher handoff, not an all-Launcher,
+all-ListsTab, all-writers or age/parent authorization migration.
+[Exact sixteen-file delta](https://github.com/stefnats/mediastorm-androidtv/compare/07bf51502e7c46a3ed4f58bd51346d5a4928efed...fb27be664f33e89283fd48553f34de6bc14fdd94).
+No production activation, private playlist or new upstream submission occurred.
