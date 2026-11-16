@@ -406,3 +406,38 @@ Combined c1f04b9ed3f1d220208e7d23f08548bfd49fa11b passes 9,007 cases with
 The binary has matching clean commit metadata. Catalogue-wide/original-language
 filtering and physical device acceptance remain separate work. No private playlist,
 real provider/indexer query, upstream PR/comment, deployment or application start.
+
+## Fork-only internal regional VOD decision core
+
+This six-file [internal backend foundation](https://github.com/stefnats/mediastorm/tree/feature/kids-vod-foundation)
+adds no main wiring, routes, public policy switch, persistence or migration.
+Existing guards and playback behavior are unchanged. It is not complete VOD
+authorization coverage or family safety acceptance.
+
+Explicit regional policy decisions require current owned profiles, effective
+sessions and exact server-owned cached resource/file/episode bindings. Unknown
+or imported decisions cannot become a legacy fallback. An explicit disabled
+policy produces NotApplicable, never a positive regional grant. Raw TMDB DE
+metadata or US scalar ratings do not authorize an edition or episode.
+
+Only fresh parent-confirmed exact-source exceptions can allow. The existing
+parent-authentication guard is reused for each mutation; delayed confirmations
+recheck ownership/session/resource/policy. Private per-instance capabilities
+cannot be imported or transferred. Bounded leases expire at the earliest
+parent/source/session boundary and respond to revocation or trusted invalidation
+without provider polling. HTTP adapters still need ownership, PIN, source/library
+checks and actual byte/provider gate wiring. Cold unresolved sources stay unknown;
+no preparation permission or file identity is invented from release hashes.
+
+Validation: 86 ordinary cases including the real parent-authentication guard with
+synthetic account verification, 258 repeated race cases, full package build and
+server build. Race cases overlap the ordinary suite. Independent source/hash
+review is clean. Combined 918510883de83ff1de2827887c941a34654ee24d passes
+9,081 cases with 38 explicit opt-in skips, synthetic PostgreSQL/local browser
+fixtures and a matching clean-commit server binary.
+
+[Exact six-file delta](https://github.com/stefnats/mediastorm/compare/c1f04b9ed3f1d220208e7d23f08548bfd49fa11b...918510883de83ff1de2827887c941a34654ee24d).
+The branch inherits fork prerequisites and requires extraction before upstream
+review. Public parent controls, all route/reuse/stream gates, internal transport
+binding, native denial handling and safe offline ownership remain separate steps.
+No private playlist, real provider, production change or new upstream PR/comment.
