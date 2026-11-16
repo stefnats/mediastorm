@@ -23,12 +23,12 @@ type rootHLSSessionFixture struct {
 	last    time.Time
 }
 
-func newRootHLSSessionFixture(t *testing.T, mode vodApplicabilityMode, kid bool) *rootHLSSessionFixture {
+func newRootHLSSessionFixture(t *testing.T, mode vodApplicabilityMode, kid bool, legacy ...bool) *rootHLSSessionFixture {
 	t.Helper()
 	root := t.TempDir()
 	manager := NewHLSManager(root, "", "", nil)
 	t.Cleanup(manager.Shutdown)
-	state := newVODTestState(t, mode, kid)
+	state := newVODTestState(t, mode, false)
 	last := time.Now().Add(-time.Hour)
 	claim, err := manager.claimHLSSessionDirectory("synthetic-hls")
 	if err != nil {
@@ -45,10 +45,27 @@ func newRootHLSSessionFixture(t *testing.T, mode vodApplicabilityMode, kid bool)
 	}
 	session := &HLSSession{ID: "synthetic-hls", ProfileID: "profile", ClientID: "device", Path: "debrid/synthetic/input.mkv", OriginalPath: "debrid/synthetic/input.mkv", OutputDir: dir, LastAccess: last, LastSegmentRequest: last, Completed: true, Duration: 4, CreatedAt: last, StreamStartTime: last}
 	session.vodDirectory = claim
+	// Consumer fixture: capture the real original owner and normal runtime
+	// publication. It does not mint an input/file/handoff grant; actual input
+	// and process lifecycle are proven by the separate real-media HTTP tests.
+	handler := &VideoHandler{hlsManager: manager}
+	if len(legacy) == 0 || !legacy[0] {
+		if err := handler.installHLSInputBoundary(state.boundary); err != nil {
+			t.Fatal(err)
+		}
+		ownerRequest := state.request(http.MethodGet, "/api/video/hls/start?profileId=profile", "")
+		input, allowed := handler.beginVODHLSInput(httptest.NewRecorder(), ownerRequest, session.Path)
+		if !allowed {
+			t.Fatal("consumer fixture owner capture failed")
+		}
+		t.Cleanup(input.finishSetup)
+		session.vodInput = input
+	}
 	if !manager.publishHLSSession(session) {
 		t.Fatal("normal runtime publication rejected its private directory claim")
 	}
-	return &rootHLSSessionFixture{handler: &VideoHandler{hlsManager: manager, vodBoundary: state.boundary}, manager: manager, state: state, session: session, payload: payload, last: last}
+	state.change(func(s *vodTestState) { p := s.profiles["profile"]; p.IsKidsProfile = kid; s.profiles["profile"] = p })
+	return &rootHLSSessionFixture{handler: handler, manager: manager, state: state, session: session, payload: payload, last: last}
 }
 func (f *rootHLSSessionFixture) request(action string) *http.Request {
 	method := http.MethodGet
@@ -175,10 +192,7 @@ func TestHLSVODSessionOwnedReadAndLegacyControls(t *testing.T) {
 				if mode == "inactive" {
 					state = vodExplicitInactive
 				}
-				f := newRootHLSSessionFixture(t, state, false)
-				if mode == "nil legacy" {
-					f.handler.vodBoundary = nil
-				}
+				f := newRootHLSSessionFixture(t, state, false, mode == "nil legacy")
 				w := httptest.NewRecorder()
 				f.invoke(action, w, f.request(action))
 				if w.Code != http.StatusOK {

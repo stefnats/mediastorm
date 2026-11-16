@@ -358,6 +358,7 @@ func (t *throttledReader) Read(p []byte) (n int, err error) {
 
 // HLSSession represents an active HLS transcoding session
 type HLSSession struct {
+	vodInput     *vodHLSInput
 	vodIdentity  *hlsSessionIdentity
 	vodDirectory *hlsDirectoryClaim
 	ID           string
@@ -1429,6 +1430,10 @@ func waitForSubtitleFile(vttPath string, requireCue bool, maxWait time.Duration)
 
 // HLSManager manages HLS transcoding sessions
 type HLSManager struct {
+	vodInputMu         sync.Mutex
+	vodInputHandler    *VideoHandler
+	vodInputs          map[*vodHLSInput]bool
+	vodInputsClosed    bool
 	sessionLifecycleMu sync.Mutex
 	sessions           map[string]*HLSSession
 	mu                 sync.RWMutex
@@ -1748,6 +1753,10 @@ func generateSessionID() string {
 // to the actual debrid CDN URL. By resolving once upfront, we avoid repeated redirect
 // resolution during probing and FFmpeg input, which can cause timeouts.
 func (m *HLSManager) resolveExternalURL(ctx context.Context, externalURL string) (string, error) {
+	if m.hlsInputConfigured() {
+		return "", errVODOwner
+	}
+
 	videoTracef("[hls] resolving external URL")
 	requestURL, requestHeaders := streamheaders.Extract(externalURL)
 
@@ -1838,6 +1847,10 @@ func (m *HLSManager) resolveExternalURL(ctx context.Context, externalURL string)
 // getDirectURL attempts to get a direct HTTP URL for the session source
 // Returns the URL and true if available, empty string and false otherwise
 func (m *HLSManager) getDirectURL(ctx context.Context, session *HLSSession) (string, bool) {
+	if m.hlsInputConfigured() {
+		return "", false
+	}
+
 	// If the path is already an external URL, return it directly
 	// Note: The URL should already be resolved in CreateSession, so we just return it
 	if strings.HasPrefix(session.Path, "http://") || strings.HasPrefix(session.Path, "https://") {
@@ -1962,6 +1975,10 @@ func (m *HLSManager) buildLocalWebDAVURLFromPath(path string) (string, bool) {
 
 // CreateSession starts a new HLS transcoding session
 func (m *HLSManager) CreateSession(ctx context.Context, path string, originalPath string, hasDV bool, dvProfile string, hasHDR bool, forceAAC bool, startOffset float64, transcodingOffset float64, audioTrackIndex int, subtitleTrackIndex int, profileID string, profileName string, clientIP string, castMode bool, prequeueType string, playbackTarget string, durationHint float64, castReceiverHost string) (*HLSSession, error) {
+	if m.hlsInputConfigured() {
+		return nil, errVODOwner
+	}
+
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
@@ -2285,6 +2302,10 @@ func resolvedSessionDuration(probedDuration, durationHint float64) float64 {
 
 // CreateYouTubeSession starts an HLS session from separate YouTube video/audio URLs.
 func (m *HLSManager) CreateYouTubeSession(ctx context.Context, videoURL, audioURL, originalURL, proxyURL, profileID, profileName, clientIP string) (*HLSSession, error) {
+	if m.hlsInputConfigured() {
+		return nil, errVODOwner
+	}
+
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
@@ -2479,6 +2500,10 @@ func ffmpegHTTPProxyArgs(proxyURL string) []string {
 }
 
 func (m *HLSManager) startYouTubeTranscoding(ctx context.Context, session *HLSSession, videoURL, audioURL, proxyURL string) error {
+	if m.hlsInputConfigured() {
+		return errVODOwner
+	}
+
 	if m.ffmpegPath == "" {
 		return fmt.Errorf("ffmpeg path not configured")
 	}
@@ -2623,6 +2648,10 @@ func youtubeTranscodingArgs(videoURL, audioURL, proxyURL, playlistPath, segmentP
 // CreateLiveSession creates an HLS session for live TV streams
 // Unlike VOD sessions, live sessions don't have a known duration and don't support seeking
 func (m *HLSManager) CreateLiveSession(ctx context.Context, liveURL, provider, bucketKey, profileID, profileName, clientIP, playbackTarget string, tuning LiveTuningSettings, liveCCExtractionEnabled bool) (*HLSSession, error) {
+	if m.hlsInputConfigured() {
+		return nil, errVODOwner
+	}
+
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
@@ -2831,6 +2860,10 @@ func (m *HLSManager) GetLiveUsage(provider, bucketKey string, maxStreams int) Li
 // and the next segment number when restarting a starved one, which appends to the existing playlist
 // instead of truncating it.
 func (m *HLSManager) startLiveTranscoding(ctx context.Context, session *HLSSession, resumeFrom int) error {
+	if m.hlsInputConfigured() {
+		return errVODOwner
+	}
+
 	// Cleanup marks Stopped under the same lock before removing the output.
 	// A delayed worker must not recreate that directory after Stop returned.
 	session.mu.Lock()
@@ -3250,6 +3283,10 @@ func (m *HLSManager) startLiveTranscoding(ctx context.Context, session *HLSSessi
 // FFmpeg slot; after liveMaxRestarts inside liveRestartWindow the session is left to fail, which is
 // what surfaces a dead channel to the user instead of an eternal spinner.
 func (m *HLSManager) superviseLiveTranscoding(ctx context.Context, session *HLSSession) error {
+	if m.hlsInputConfigured() {
+		return errVODOwner
+	}
+
 	var restarts int
 	windowStart := time.Now()
 	rebuilding := false
@@ -3632,6 +3669,10 @@ func (m *HLSManager) fixDVCodecTag(session *HLSSession) error {
 
 // startTranscoding begins FFmpeg HLS transcoding
 func (m *HLSManager) startTranscoding(ctx context.Context, session *HLSSession, forceAAC bool) error {
+	if m.hlsInputConfigured() {
+		return errVODOwner
+	}
+
 	startTime := time.Now()
 	session.disableUnsafeDirectCast(m.castCapabilities(session))
 	stableCastMode := session.usesStableCastTimeline()
@@ -5777,6 +5818,11 @@ type SeekResponse struct {
 // This is faster than creating a new session since it reuses the existing session structure
 // Query param: time=<seconds> specifies the target seek position in absolute media time
 func (m *HLSManager) Seek(w http.ResponseWriter, r *http.Request, sessionID string) {
+	if m.hlsInputConfigured() {
+		vodDeny(w, kidsvod.CodeUnsupportedSource)
+		return
+	}
+
 	session, exists := m.GetSession(sessionID)
 	if !exists {
 		http.Error(w, "session not found", http.StatusNotFound)
@@ -6338,7 +6384,10 @@ func (m *HLSManager) ServePlaylist(w http.ResponseWriter, r *http.Request, sessi
 		playlistContent = strings.TrimRight(playlistContent, "\n") + "\n#EXT-X-ENDLIST\n"
 	}
 
-	playlistContent = appendAuthTokenToPlaylist(playlistContent, hlsChildAuthQuery(r, authToken))
+	playlistContent, authOK := m.playlistAuth(w, r, sessionID, playlistContent, hlsChildAuthQuery(r, authToken))
+	if !authOK {
+		return
+	}
 	playlistContent = appendSegmentCacheBusterToPlaylist(playlistContent, seekGeneration)
 
 	w.Header().Set("Content-Type", "application/vnd.apple.mpegurl")
@@ -6496,7 +6545,10 @@ func (m *HLSManager) ServeMasterPlaylist(w http.ResponseWriter, r *http.Request,
 	log.Printf("[hls] session %s: master playlist subtitle selection requested=%d defaultIndex=%d defaultName=%q defaultLanguage=%q totalTextTracks=%d",
 		sessionID, session.SubtitleTrackIndex, defaultTrackIndex, defaultTrackName, defaultTrackLanguage, len(subtitleStreams))
 
-	playlistContent := appendAuthTokenToPlaylist(builder.String(), hlsChildAuthQuery(r, authToken))
+	playlistContent, authOK := m.playlistAuth(w, r, sessionID, builder.String(), hlsChildAuthQuery(r, authToken))
+	if !authOK {
+		return
+	}
 
 	w.Header().Set("Content-Type", "application/vnd.apple.mpegurl")
 	w.Header().Set("Cache-Control", "no-cache")
@@ -6558,7 +6610,10 @@ func (m *HLSManager) ServeSubtitlePlaylist(w http.ResponseWriter, r *http.Reques
 		subtitleTrack,
 		time.Now().UnixNano(),
 	)
-	playlistContent = appendAuthTokenToPlaylist(playlistContent, hlsChildAuthQuery(r, authToken))
+	playlistContent, authOK := m.playlistAuth(w, r, sessionID, playlistContent, hlsChildAuthQuery(r, authToken))
+	if !authOK {
+		return
+	}
 
 	w.Header().Set("Content-Type", "application/vnd.apple.mpegurl")
 	w.Header().Set("Cache-Control", "no-cache")
@@ -6569,6 +6624,10 @@ func (m *HLSManager) ServeSubtitlePlaylist(w http.ResponseWriter, r *http.Reques
 }
 
 func (m *HLSManager) restartCastTranscodingForSegment(session *HLSSession, requestedSegment int) {
+	if m.hlsInputConfigured() {
+		return
+	}
+
 	highestAvailable := m.findHighestSegmentNumber(session)
 	plan, shouldRestart := castSegmentRestartPlan(session, requestedSegment, highestAvailable)
 	if !shouldRestart {
@@ -6611,6 +6670,10 @@ func (m *HLSManager) restartCastTranscodingForSegment(session *HLSSession, reque
 // the stable Cast timeline at plan.SegmentStartNumber. Callers own the decision
 // (timeline jump, quality change); this only performs the swap.
 func (m *HLSManager) restartCastTranscodingAt(session *HLSSession, plan castSegmentRestart) {
+	if m.hlsInputConfigured() {
+		return
+	}
+
 	session.mu.Lock()
 	session.SeekInProgress = true
 	if session.Cancel != nil {
@@ -7299,6 +7362,10 @@ func (s *HLSSession) subtitleExtractionInProgress(track int) bool {
 // This allows switching subtitle tracks without recreating the HLS session
 // trackIndex is the absolute ffprobe stream index (same as session.SubtitleTrackIndex)
 func (m *HLSManager) extractSubtitleTrackToVTT(ctx context.Context, session *HLSSession, trackIndex int, outputPath string) error {
+	if m.hlsInputConfigured() {
+		return errVODOwner
+	}
+
 	// Probe subtitle streams to map absolute stream index to relative subtitle index
 	subtitleStreams, err := m.probeSubtitleStreams(ctx, session.Path)
 	if err != nil {
@@ -7450,6 +7517,10 @@ func normalizeWebDAVPrefix(prefix string) string {
 }
 
 func (m *HLSManager) fetchHeaderPrefix(ctx context.Context, path string, length int64) ([]byte, error) {
+	if m.hlsInputConfigured() {
+		return nil, errVODOwner
+	}
+
 	if length <= 0 {
 		return nil, nil
 	}
@@ -7533,6 +7604,11 @@ func (m *HLSManager) CleanupSession(sessionID string) {
 }
 
 func (m *HLSManager) cleanupDetachedHLSSession(sessionID string, session *HLSSession, outputDir string) {
+	if session.vodInput != nil && !session.vodInput.stopAndWait() {
+		log.Printf("[hls] input cleanup still pending; preserving owned output")
+		return
+	}
+
 	// Mark the session before killing FFmpeg so the transcoding goroutine cannot
 	// interpret the forced exit as a recoverable premature completion.
 	session.mu.Lock()
@@ -7683,6 +7759,7 @@ func (m *HLSManager) cleanupOldSessions() {
 
 // Shutdown stops the cleanup loop and cleans up all sessions
 func (m *HLSManager) Shutdown() {
+	m.shutdownHLSInputs()
 	log.Printf("[hls] shutting down HLS manager, cleaning up all sessions")
 
 	close(m.cleanupDone)

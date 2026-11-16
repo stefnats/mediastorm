@@ -4309,6 +4309,21 @@ func isConnectionError(err error) bool {
 
 // StartHLSSession creates a new HLS transcoding session for Dolby Vision content
 func (h *VideoHandler) StartHLSSession(w http.ResponseWriter, r *http.Request) {
+	if h.configuredHLSInput() {
+		path := resolveScopedPlaybackPath(r, r.URL.Query().Get("path"))
+		if strings.HasPrefix(path, "/webdav/") {
+			path = strings.TrimPrefix(path, "/webdav")
+		} else if strings.HasPrefix(path, "webdav/") {
+			path = "/" + strings.TrimPrefix(path, "webdav/")
+		}
+		if path == "" {
+			http.Error(w, "missing path parameter", http.StatusBadRequest)
+			return
+		}
+		h.startVODPipeHLS(w, r, path)
+		return
+	}
+
 	if h.hlsManager == nil {
 		http.Error(w, "HLS not enabled", http.StatusServiceUnavailable)
 		return
@@ -4564,6 +4579,11 @@ type youtubeCaptionTrack struct {
 
 // StartYouTubeHLSSession creates an HLS session from high-quality separate YouTube video/audio streams.
 func (h *VideoHandler) StartYouTubeHLSSession(w http.ResponseWriter, r *http.Request) {
+	if h.configuredHLSInput() {
+		vodDeny(w, kidsvod.CodeUnsupportedSource)
+		return
+	}
+
 	if h.hlsManager == nil {
 		http.Error(w, "HLS not enabled", http.StatusServiceUnavailable)
 		return
@@ -5317,6 +5337,11 @@ func resolveStremioLiveStreamResource(ctx context.Context, streamResourceURL, pr
 
 // StartLiveHLSSession creates a new HLS session for live TV streams
 func (h *VideoHandler) StartLiveHLSSession(w http.ResponseWriter, r *http.Request) {
+	if h.configuredHLSInput() {
+		vodDeny(w, kidsvod.CodeUnsupportedSource)
+		return
+	}
+
 	if h.hlsManager == nil {
 		http.Error(w, "HLS not enabled", http.StatusServiceUnavailable)
 		return
@@ -6190,6 +6215,10 @@ func (h *VideoHandler) GetSubtitleExtractManager() *SubtitleExtractManager {
 // CreateHLSSession implements the HLSCreator interface for prequeue.
 // This creates an HLS session for HDR content so the frontend can use native player.
 func (h *VideoHandler) CreateHLSSession(ctx context.Context, path string, hasDV bool, dvProfile string, hasHDR bool, audioTrackIndex int, subtitleTrackIndex int, profileID string, startOffset float64, prequeueType string) (*HLSSessionResult, error) {
+	if h.configuredHLSInput() {
+		return nil, errVODOwner
+	}
+
 	if h == nil {
 		return nil, errors.New("video handler is nil")
 	}

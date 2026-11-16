@@ -98,6 +98,10 @@ const (
 
 // GetCachedProbe retrieves a cached probe result if available and not expired
 func (m *HLSManager) GetCachedProbe(path string) *UnifiedProbeResult {
+	if m.hlsInputConfigured() {
+		return nil
+	}
+
 	m.probeCacheMu.RLock()
 	defer m.probeCacheMu.RUnlock()
 
@@ -116,6 +120,10 @@ func (m *HLSManager) GetCachedProbe(path string) *UnifiedProbeResult {
 
 // CacheProbe stores a probe result in the cache with TTL
 func (m *HLSManager) CacheProbe(path string, result *UnifiedProbeResult) {
+	if m.hlsInputConfigured() {
+		return
+	}
+
 	m.probeCacheMu.Lock()
 	defer m.probeCacheMu.Unlock()
 
@@ -142,6 +150,10 @@ func (m *HLSManager) cleanupProbeCache() {
 // probeAllMetadata consolidates what was previously 4 separate ffprobe calls (duration, color, audio, subtitles).
 // Results are cached for probeCacheTTL (2h) to avoid redundant probes between prequeue and HLS.
 func (m *HLSManager) probeAllMetadata(ctx context.Context, path string) (*UnifiedProbeResult, error) {
+	if m.hlsInputConfigured() {
+		return nil, errVODOwner
+	}
+
 	if m.ffprobePath == "" {
 		return nil, fmt.Errorf("ffprobe not configured")
 	}
@@ -253,6 +265,10 @@ func (m *HLSManager) probeAllMetadata(ctx context.Context, path string) (*Unifie
 
 // probeAllMetadataFromURL probes all metadata directly from an external URL
 func (m *HLSManager) probeAllMetadataFromURL(ctx context.Context, url string) (*UnifiedProbeResult, error) {
+	if m.hlsInputConfigured() {
+		return nil, errVODOwner
+	}
+
 	log.Printf("[hls] probing all metadata from external URL (unified probe)")
 	probeURL, _ := streamheaders.Extract(url)
 
@@ -422,6 +438,10 @@ func (m *HLSManager) parseUnifiedProbeOutput(output []byte) (*UnifiedProbeResult
 
 // probeAudioStreams inspects audio streams for codec compatibility and exposes their ordering
 func (m *HLSManager) probeAudioStreams(ctx context.Context, path string) (streams []audioStreamInfo, hasTrueHD bool, hasCompatibleAudio bool, err error) {
+	if m.hlsInputConfigured() {
+		return nil, false, false, errVODOwner
+	}
+
 	if m.ffprobePath == "" {
 		return nil, false, true, nil // Assume compatible if we can't probe
 	}
@@ -544,6 +564,10 @@ func (m *HLSManager) probeAudioStreams(ctx context.Context, path string) (stream
 
 // probeAudioStreamsFromURL probes audio streams directly from an external URL
 func (m *HLSManager) probeAudioStreamsFromURL(ctx context.Context, url string) (streams []audioStreamInfo, hasTrueHD bool, hasCompatibleAudio bool, err error) {
+	if m.hlsInputConfigured() {
+		return nil, false, false, errVODOwner
+	}
+
 	log.Printf("[hls] probing audio streams from external URL: %s", requestsecurity.URLForLog(url))
 
 	// Use 60 second timeout for external URLs (need to download data over network)
@@ -605,6 +629,10 @@ func (m *HLSManager) probeAudioStreamsFromURL(ctx context.Context, url string) (
 
 // probeSubtitleStreams lists subtitle streams and preserves their ordering for FFmpeg mapping
 func (m *HLSManager) probeSubtitleStreams(ctx context.Context, path string) (streams []subtitleStreamInfo, err error) {
+	if m.hlsInputConfigured() {
+		return nil, errVODOwner
+	}
+
 	if m.ffprobePath == "" {
 		return nil, fmt.Errorf("ffprobe not configured")
 	}
@@ -730,6 +758,10 @@ func (m *HLSManager) probeSubtitleStreams(ctx context.Context, path string) (str
 
 // probeSubtitleStreamsFromURL probes subtitle streams directly from an external URL
 func (m *HLSManager) probeSubtitleStreamsFromURL(ctx context.Context, url string) (streams []subtitleStreamInfo, err error) {
+	if m.hlsInputConfigured() {
+		return nil, errVODOwner
+	}
+
 	log.Printf("[hls] probing subtitle streams from external URL: %s", requestsecurity.URLForLog(url))
 
 	// Use 60 second timeout for external URLs (need to download data over network)
@@ -797,6 +829,10 @@ func (m *HLSManager) probeSubtitleStreamsFromURL(ctx context.Context, url string
 
 // probeDuration attempts to get the file duration using ffprobe
 func (m *HLSManager) probeDuration(ctx context.Context, cleanPath string) (float64, error) {
+	if m.hlsInputConfigured() {
+		return 0, errVODOwner
+	}
+
 	if m.ffprobePath == "" {
 		return 0, fmt.Errorf("ffprobe not configured")
 	}
@@ -871,6 +907,10 @@ func (m *HLSManager) probeDuration(ctx context.Context, cleanPath string) (float
 
 // probeDurationFromURL probes duration directly from an external URL
 func (m *HLSManager) probeDurationFromURL(ctx context.Context, url string) (float64, error) {
+	if m.hlsInputConfigured() {
+		return 0, errVODOwner
+	}
+
 	log.Printf("[hls] probing duration from external URL: %s", url)
 
 	// Use 60 second timeout for external URLs (need to download data over network)
@@ -905,6 +945,10 @@ func (m *HLSManager) probeDurationFromURL(ctx context.Context, url string) (floa
 // probeColorMetadata checks if the video has correct HDR color tagging
 // Returns color_transfer value (e.g., "smpte2084" for HDR, "bt709" for SDR/incorrect)
 func (m *HLSManager) probeColorMetadata(ctx context.Context, cleanPath string) (string, error) {
+	if m.hlsInputConfigured() {
+		return "", errVODOwner
+	}
+
 	if m.ffprobePath == "" {
 		return "", fmt.Errorf("ffprobe not configured")
 	}
@@ -971,6 +1015,10 @@ func (m *HLSManager) probeColorMetadata(ctx context.Context, cleanPath string) (
 
 // probeColorMetadataFromURL probes color metadata directly from an external URL
 func (m *HLSManager) probeColorMetadataFromURL(ctx context.Context, url string) (string, error) {
+	if m.hlsInputConfigured() {
+		return "", errVODOwner
+	}
+
 	log.Printf("[hls] probing color metadata from external URL: %s", url)
 
 	// Use 60 second timeout for external URLs (need to download data over network)
@@ -1004,6 +1052,10 @@ func (m *HLSManager) probeColorMetadataFromURL(ctx context.Context, url string) 
 // subtitles from the same position for proper sync.
 // Returns the keyframe PTS in seconds, or the original seekTime if probing fails.
 func (m *HLSManager) probeKeyframePosition(ctx context.Context, path string, seekTime float64) float64 {
+	if m.hlsInputConfigured() {
+		return 0
+	}
+
 	if m.ffprobePath == "" || seekTime <= 0 {
 		return seekTime
 	}
@@ -1037,6 +1089,10 @@ func (m *HLSManager) probeKeyframePosition(ctx context.Context, path string, see
 // Uses ffprobe to find the nearest keyframe at or after the requested time.
 // This tells us where FFmpeg will actually start when using input seeking.
 func (m *HLSManager) probeKeyframePositionFromURL(ctx context.Context, url string, seekTime float64) float64 {
+	if m.hlsInputConfigured() {
+		return 0
+	}
+
 	log.Printf("[hls] probing keyframe position from URL at %.3fs", seekTime)
 
 	probeCtx, probeCancel := context.WithTimeout(ctx, 30*time.Second)

@@ -64,6 +64,7 @@ type hlsSessionSnapshot struct {
 	session                                                *HLSSession
 	identity                                               *hlsSessionIdentity
 	directory                                              *hlsDirectoryClaim
+	input                                                  *vodHLSInput
 	id, profile, client, path, original, requested, output string
 	generation                                             int
 	stopped                                                bool
@@ -83,7 +84,7 @@ func (s hlsSessionSnapshot) validRuntime() bool {
 	return s.manager != nil && s.session != nil && s.identity != nil && s.identity.manager == s.manager && s.identity.session == s.session && s.identity.id == s.id && s.identity.profile == s.profile && s.id != "" && s.generation >= 0 && s.resource() != "" && s.directory != nil && s.identity.directory == s.directory && s.directory.manager == s.manager && s.directory.id == s.id && s.directory.path == s.output && s.directory.published == s.session
 }
 func snapshotHLSLocked(m *HLSManager, s *HLSSession) hlsSessionSnapshot {
-	return hlsSessionSnapshot{manager: m, session: s, identity: s.vodIdentity, directory: s.vodDirectory, id: s.ID, profile: s.ProfileID, client: s.ClientID, path: s.Path, original: s.OriginalPath, requested: s.RequestedSource, output: s.OutputDir, generation: s.SeekGeneration, stopped: s.Stopped}
+	return hlsSessionSnapshot{manager: m, session: s, identity: s.vodIdentity, input: s.vodInput, directory: s.vodDirectory, id: s.ID, profile: s.ProfileID, client: s.ClientID, path: s.Path, original: s.OriginalPath, requested: s.RequestedSource, output: s.OutputDir, generation: s.SeekGeneration, stopped: s.Stopped}
 }
 
 func (m *HLSManager) publishHLSSession(s *HLSSession) bool {
@@ -97,8 +98,14 @@ func (m *HLSManager) publishHLSSession(s *HLSSession) bool {
 	if claim == nil || claim.manager != m || claim.id != s.ID || claim.path != s.OutputDir || claim.published != nil || claim.discarded {
 		return false
 	}
-	claim.published = s
 	s.vodIdentity = &hlsSessionIdentity{manager: m, session: s, id: s.ID, profile: s.ProfileID, directory: claim}
+	if s.vodInput != nil {
+		if !s.vodInput.bindPublication(s) {
+			s.vodIdentity = nil
+			return false
+		}
+	}
+	claim.published = s
 	m.sessions[s.ID] = s
 	return true
 }
@@ -155,6 +162,9 @@ func (s *vodHLSScope) check(ctx context.Context) error {
 		return err
 	}
 	if !s.cleanup {
+		if s.handler.hlsManager.hlsInputConfigured() && (s.snapshot.input == nil || s.snapshot.input.check(ctx) != nil) {
+			return errVODOwner
+		}
 		bounded, cancel := context.WithTimeout(ctx, 500*time.Millisecond)
 		defer cancel()
 		r := s.owner.request.Clone(bounded)
@@ -187,7 +197,15 @@ func (s *vodHLSScope) check(ctx context.Context) error {
 func (h *VideoHandler) beginHLSVOD(w http.ResponseWriter, r *http.Request, id string, cleanup bool) (http.ResponseWriter, *http.Request, func(), bool) {
 	noop := func() {}
 	if h.vodBoundary == nil {
+		if h.hlsManager != nil && h.hlsManager.hlsInputConfigured() {
+			vodDeny(w, kidsvod.CodeContextChanged)
+			return w, r, noop, false
+		}
 		return w, r, noop, true
+	}
+	if h.hlsManager == nil || !h.hlsManager.hlsInputConfigured() {
+		vodDeny(w, kidsvod.CodeUnsupportedSource)
+		return w, r, noop, false
 	}
 	snapshot, exists := h.hlsManager.snapshotHLSSession(id)
 	if !exists {
@@ -210,6 +228,11 @@ func (h *VideoHandler) beginHLSVOD(w http.ResponseWriter, r *http.Request, id st
 	}
 	owner, ok := h.vodBoundary.requestOwner(w, r, op, snapshot.profile, selectors...)
 	if !ok {
+		return w, r, noop, false
+	}
+	if captureHLSAuthValues(r, owner) != nil {
+		owner.release()
+		vodDeny(w, kidsvod.CodeAccessDenied)
 		return w, r, noop, false
 	}
 	if snapshot.client != "" && owner.client != snapshot.client {
