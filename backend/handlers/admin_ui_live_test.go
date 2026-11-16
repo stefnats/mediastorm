@@ -18,7 +18,7 @@ func TestLiveSectionShowsServerPlaybackControls(t *testing.T) {
 		}
 	}
 	slices.Sort(visible)
-	if !slices.Equal(visible, []string{"autoChannelFailover", "groupChannelsByStation", "timeshiftMinutes"}) {
+	if !slices.Equal(visible, []string{"autoAdoptProviderLimits", "autoChannelFailover", "groupChannelsByStation", "timeshiftMinutes"}) {
 		t.Fatalf("visible live fields = %v", visible)
 	}
 }

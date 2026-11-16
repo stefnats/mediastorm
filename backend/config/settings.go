@@ -801,6 +801,7 @@ type LiveStationMapping struct {
 
 // LiveSettings controls Live TV playlist caching behavior.
 type LiveSettings struct {
+	AutoAdoptProviderLimits  bool                 `json:"autoAdoptProviderLimits"` // Additional fresh checked-provider cap; manual limits remain unchanged
 	GroupChannelsByStation   bool                 `json:"groupChannelsByStation"`
 	AutoChannelFailover      bool                 `json:"autoChannelFailover"`
 	StationMappings          []LiveStationMapping `json:"stationMappings,omitempty"`

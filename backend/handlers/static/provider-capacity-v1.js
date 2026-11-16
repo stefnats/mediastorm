@@ -1,4 +1,4 @@
-// Account facts are advisory until the administrator saves a selected limit.
+// Fresh account facts may additionally cap new inputs only after global opt-in.
 (() => {
     'use strict';
     let active;
@@ -27,12 +27,13 @@
             const check = node('button', 'Check provider limit'); check.type = 'button'; check.className = 'btn btn-secondary';
             const use = node('button', 'Use reported limit'); use.type = 'button'; use.className = 'btn btn-primary'; use.disabled = true;
             buttons.append(check, use);
-            dialog.append(status, facts, node('p', 'Checking does not change your settings or open a stream. A selected limit takes effect only after saving settings.'), buttons);
+            dialog.append(status, facts, node('p', 'Checking does not save settings or open a stream. If automatic adoption is enabled, a fresh report can additionally cap new connections until it expires. Manual limits stay in place; reports are not refreshed automatically.'), buttons);
             let report = null;
             let loading = false;
             let controller = null;
             let sequence = 0;
             let stale = false;
+            let renderedFresh = null;
             const fresh = () => report && Number.isFinite(Date.parse(report.cacheExpiresAt)) && Date.parse(report.cacheExpiresAt) > Date.now();
             const usable = () => !stale && !loading && isCurrent() && fresh() && report.state === 'available' && Number.isInteger(report.reportedLimit) && report.reportedLimit > 0;
             const current = () => {
@@ -46,6 +47,7 @@
             const render = () => {
                 facts.replaceChildren();
                 if (!report) return;
+                renderedFresh = fresh();
                 const cap = Number.isInteger(report.configuredLimit) && report.configuredLimit > 0 ? report.configuredLimit : 'Not configured';
                 facts.append(node('p', 'Configured limit: ' + cap));
                 if (Number.isInteger(report.sharedConfiguredLimit) && report.sharedConfiguredLimit > 0 && report.sharedConfiguredLimit !== report.configuredLimit)
@@ -57,6 +59,14 @@
                 if (Number.isInteger(report.localConnections) && report.localConnections >= 0)
                     facts.append(node('p', 'Connections reserved by Mediastorm: ' + report.localConnections));
                 facts.append(node('p', 'Connection counts are snapshots. They do not reliably identify usage by other apps.'));
+                facts.append(node('p', report.automaticAdoptionEnabled
+                    ? 'Automatic adoption at check: enabled for fresh checked global-provider reports on the shared account budget. Expired, unavailable or changed-source reports use the manual limit.'
+                    : 'Automatic adoption at check: off. Use reported limit copies a value to the form; save settings to change the manual limit.'));
+                if (report.enforcementOrigin === 'provider_extra_cap' && Number.isInteger(report.automaticLimit) && report.automaticLimit > 0 && Date.parse(report.automaticExpiresAt) > Date.now())
+                    facts.append(node('p', 'Extra cap at check: ' + report.automaticLimit + ' for new connections. Running streams and recordings are retained.'));
+                if (Number.isInteger(report.enforcedLimit) && report.enforcedLimit >= 0)
+                    facts.append(node('p', 'Local admission cap at check: ' + (report.enforcedLimit > 0 ? report.enforcedLimit : 'Not configured')));
+
                 const checked = Date.parse(report.checkedAt);
                 if (Number.isFinite(checked)) facts.append(node('p', 'Checked: ' + new Date(checked).toLocaleString() + (report.cached ? ' (cached)' : '')));
                 use.disabled = !usable();
@@ -95,7 +105,8 @@
             const timer = setInterval(() => {
                 if (!current()) return;
                 use.disabled = !usable();
-                if (report?.state === 'available' && !fresh()) status.textContent = 'This report has expired. Check the provider again before using its limit.';
+                if (report && renderedFresh !== fresh()) render();
+                if (report?.state === 'available' && !fresh()) status.textContent = 'This report has expired. Check the saved provider again to see the current limit. Reports are not refreshed automatically.';
             }, 250);
             dialog.addEventListener('close', () => {
                 sequence++; controller?.abort(); clearInterval(timer); dialog.remove();

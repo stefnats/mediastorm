@@ -11,19 +11,34 @@ import (
 
 var ErrLimit = errors.New("live provider connection limit reached")
 
+type automaticLimitError struct{}
+
+func (*automaticLimitError) Error() string { return ErrLimit.Error() }
+func (*automaticLimitError) Unwrap() error { return ErrLimit }
+
+var errAutomaticLimit error = &automaticLimitError{}
+
 var Default = NewManager()
 
+// AutomaticLimit is an ephemeral, server-observed extra cap, not a persisted
+// manual limit or an estimate of connections used outside this process.
+type AutomaticLimit struct {
+	Limit     int
+	ExpiresAt time.Time
+}
+
 type Manager struct {
-	mu            sync.Mutex
-	buckets       map[string]*bucket
-	next          uint64
-	owners        map[*Lease]Owner
-	claims        map[string]*handoff
-	confirmations map[string]confirmation
-	draining      map[uint64]bool
-	revoked       map[string]time.Time
-	admitted      map[string]time.Time
-	changed       chan struct{}
+	mu                   sync.Mutex
+	buckets              map[string]*bucket
+	next                 uint64
+	owners               map[*Lease]Owner
+	claims               map[string]*handoff
+	confirmations        map[string]confirmation
+	draining             map[uint64]bool
+	revoked              map[string]time.Time
+	admitted             map[string]time.Time
+	changed              chan struct{}
+	automaticLimitReader func(string) AutomaticLimit
 }
 
 type bucket struct {
@@ -42,6 +57,34 @@ type Lease struct {
 func NewManager() *Manager {
 	return &Manager{buckets: make(map[string]*bucket), owners: make(map[*Lease]Owner),
 		claims: make(map[string]*handoff), confirmations: make(map[string]confirmation), draining: make(map[uint64]bool), revoked: make(map[string]time.Time), admitted: make(map[string]time.Time), changed: make(chan struct{})}
+}
+
+// SetAutomaticLimitReader installs a cache-only server policy reader. It runs
+// under the manager lock and must not call the manager, a provider, or callbacks
+// that acquire this lock. Nil preserves the existing manual-only policy.
+func (m *Manager) SetAutomaticLimitReader(reader func(string) AutomaticLimit) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.automaticLimitReader = reader
+}
+
+func (m *Manager) effectiveLimitLocked(key string, manual int) (int, AutomaticLimit) {
+	if m.automaticLimitReader != nil {
+		fact := m.automaticLimitReader(key)
+		now := time.Now()
+		if fact.Limit > 0 && fact.Limit <= 1_000_000 && fact.ExpiresAt.After(now) && !fact.ExpiresAt.After(now.Add(time.Minute)) && (manual <= 0 || fact.Limit < manual) {
+			return fact.Limit, fact
+		}
+	}
+	return manual, AutomaticLimit{}
+}
+
+func (m *Manager) automaticBlocksTakeoverLocked(key string) bool {
+	if b := m.buckets[key]; b != nil {
+		_, automatic := m.effectiveLimitLocked(key, b.limit)
+		return automatic.Limit > 0
+	}
+	return false
 }
 
 // Acquire atomically reserves a connection. Only consumers actually using the
@@ -74,7 +117,11 @@ func (m *Manager) acquireLocked(key, shareKey string, limit int, owner Owner) (*
 		return m.leaseLocked(key, id, owner), nil
 	}
 	reserved := m.reservedLocked(key, b)
-	if b.limit > 0 && len(b.connections)+reserved >= b.limit {
+	effective, automatic := m.effectiveLimitLocked(key, b.limit)
+	if effective > 0 && len(b.connections)+reserved >= effective {
+		if automatic.Limit > 0 {
+			return nil, errAutomaticLimit
+		}
 		return nil, ErrLimit
 	}
 	m.next++
@@ -104,7 +151,8 @@ func (l *Lease) MakePrivate() error {
 		return ErrLimit
 	}
 	if b.connections[l.connection] > 1 {
-		if b.limit > 0 && len(b.connections)+m.reservedLocked(l.bucket, b) >= b.limit {
+		effective, _ := m.effectiveLimitLocked(l.bucket, b.limit)
+		if effective > 0 && len(b.connections)+m.reservedLocked(l.bucket, b) >= effective {
 			return ErrLimit
 		}
 		b.connections[l.connection]--
@@ -159,13 +207,22 @@ func (m *Manager) Current(key string) int {
 // Usage includes reservations still opening or shutting down. Report the same
 // effective limit that admission enforces, including a stricter active alias.
 func (m *Manager) Usage(key string, limit int) (int, int) {
+	current, effective, _ := m.UsageWithAutomaticLimit(key, limit)
+	return current, effective
+}
+
+// UsageWithAutomaticLimit returns the actual applied policy under one lock.
+// A positive checked report tied with a sticky manual cap is still manual.
+func (m *Manager) UsageWithAutomaticLimit(key string, limit int) (int, int, AutomaticLimit) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	current := 0
 	if b := m.buckets[key]; b != nil {
+		current = len(b.connections)
 		if b.limit > 0 && (limit <= 0 || b.limit < limit) {
 			limit = b.limit
 		}
-		return len(b.connections), limit
 	}
-	return 0, limit
+	effective, automatic := m.effectiveLimitLocked(key, limit)
+	return current, effective, automatic
 }

@@ -63,7 +63,10 @@ func (e *ConfirmationRequired) Error() string {
 }
 func (e *ConfirmationRequired) Unwrap() error { return ErrLimit }
 
-type handoff struct{ victim uint64 }
+type handoff struct {
+	victim uint64
+	begun  bool
+}
 type confirmation struct {
 	bucket  string
 	account string
@@ -137,7 +140,7 @@ func (m *Manager) AcquireWithTakeover(ctx context.Context, key, shareKey string,
 		m.mu.Unlock()
 		return lease, nil
 	}
-	if !errors.Is(err, ErrLimit) || m.claims[key] != nil || previouslyAdmitted {
+	if !errors.Is(err, ErrLimit) || m.claims[key] != nil || previouslyAdmitted || errors.Is(err, errAutomaticLimit) || m.automaticBlocksTakeoverLocked(key) {
 		m.mu.Unlock()
 		return nil, err
 	}
@@ -160,7 +163,7 @@ func (m *Manager) AcquireWithTakeover(ctx context.Context, key, shareKey string,
 		m.mu.Unlock()
 		return nil, err
 	}
-	if m.claims[key] != nil || previouslyAdmitted {
+	if m.claims[key] != nil || previouslyAdmitted || errors.Is(err, errAutomaticLimit) || m.automaticBlocksTakeoverLocked(key) {
 		m.mu.Unlock()
 		return nil, ErrLimit
 	}
@@ -193,7 +196,6 @@ func (m *Manager) AcquireWithTakeover(ctx context.Context, key, shareKey string,
 	stops := make([]func(context.Context) error, 0, len(members))
 	for lease := range members {
 		stops = append(stops, m.owners[lease].Stop)
-		m.revokeLocked(m.owners[lease].RevocationKey, time.Now())
 	}
 	m.mu.Unlock()
 	defer m.clearClaim(key, claim)
@@ -205,6 +207,20 @@ func (m *Manager) AcquireWithTakeover(ctx context.Context, key, shareKey string,
 		if !policy.permitted(owner) {
 			return nil, ErrPermission
 		}
+		// The policy callback may block or change the checked report/settings.
+		// A new extra cap must be checked before revocation or any Stop call.
+		m.mu.Lock()
+		if m.automaticBlocksTakeoverLocked(key) {
+			m.mu.Unlock()
+			return nil, ErrLimit
+		}
+		if !claim.begun {
+			claim.begun = true
+			for lease := range members {
+				m.revokeLocked(m.owners[lease].RevocationKey, time.Now())
+			}
+		}
+		m.mu.Unlock()
 		if err := stop(ctx); err != nil {
 			return nil, &ShutdownError{cause: err}
 		}
@@ -242,6 +258,9 @@ func (m *Manager) clearClaim(key string, claim *handoff) {
 		return
 	}
 	delete(m.claims, key)
+	if !claim.begun {
+		delete(m.draining, claim.victim)
+	}
 	if b := m.buckets[key]; b != nil && len(b.connections) == 0 {
 		delete(m.buckets, key)
 	}

@@ -2628,7 +2628,7 @@ paths:
   /admin/api/live/provider-capacity:
     post:
       operationId: checkLiveProviderCapacity
-      summary: Check a saved provider account without opening a stream or changing limits
+      summary: Check a saved provider account without opening a stream or saving settings
       description: |
         Requires an administrator account-management cookie. The source must
         already be saved and enabled in global Live TV settings. Only Xtream
@@ -2640,8 +2640,13 @@ paths:
         for 30 seconds. Alias configurations share the same check. A zero,
         missing or invalid reported limit remains unknown, never a claim of
         unlimited capacity. Provider connection counts are snapshots and cannot
-        reliably identify external usage. Use of a reported limit changes only
-        the settings form; the administrator still needs to save the settings.
+        reliably identify external usage. Use reported limit copies a manual
+        value to the settings form and requires saving. When the global
+        autoAdoptProviderLimits opt-in is saved, already checked fresh reports
+        may additionally cap new connections without raising a manual cap.
+        Reports are never refreshed automatically; stale, unavailable or
+        changed-source reports use the existing manual policy. Running inputs
+        are not stopped by adoption.
       security:
         - accountSession: []
       requestBody:
@@ -3171,6 +3176,19 @@ components:
         sharedConfiguredLimit: {type: integer, minimum: 0}
         localConnections: {type: integer, minimum: 0}
         enforcedLimit: {type: integer, minimum: 0}
+        automaticAdoptionEnabled:
+          type: boolean
+          description: Global explicit opt-in for additional limits from already checked fresh saved-provider reports; no automatic discovery or refresh.
+        automaticLimit:
+          type: integer
+          minimum: 1
+          description: Present only when a fresh checked report is actually stricter than the current manual/shared cap in the locked admission snapshot.
+        automaticExpiresAt: {type: string, format: date-time}
+        enforcementOrigin:
+          type: string
+          enum: [manual, provider_extra_cap]
+          description: A fresh provider extra cap never raises a positive manual limit or stops running inputs; stale or unknown reports use existing manual policy.
+
 
     ProfileLivePermissions:
       type: object

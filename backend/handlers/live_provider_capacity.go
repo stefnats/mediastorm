@@ -42,12 +42,17 @@ type ProviderCapacityReport struct {
 	SharedConfiguredLimit     int        `json:"sharedConfiguredLimit"`
 	LocalConnections          int        `json:"localConnections"`
 	EnforcedLimit             int        `json:"enforcedLimit"`
+	AutomaticAdoptionEnabled  bool       `json:"automaticAdoptionEnabled"`
+	AutomaticLimit            *int       `json:"automaticLimit,omitempty"`
+	AutomaticExpiresAt        *time.Time `json:"automaticExpiresAt,omitempty"`
+	EnforcementOrigin         string     `json:"enforcementOrigin"`
 }
 
 type providerCapacityEntry struct {
-	done    chan struct{}
-	result  ProviderCapacityReport
-	expires time.Time
+	done     chan struct{}
+	result   ProviderCapacityReport
+	expires  time.Time
+	verified bool
 }
 
 // The key is a private digest of the saved endpoint, credentials and proxy.
@@ -307,9 +312,11 @@ func (h *LiveHandler) CheckProviderCapacity(w http.ResponseWriter, r *http.Reque
 		http.Error(w, "Saved enabled source not found", http.StatusNotFound)
 		return
 	}
+	observationKey := ""
 	report := ProviderCapacityReport{State: "unsupported", LimitOrigin: "unknown", Message: "This source has no supported account-information endpoint. Enter a confirmed manual limit."}
 	if endpoint, supported := providerCapacityEndpoint(source); supported {
 		key := liveDigest(endpoint.String(), source.ProxyURL)
+		observationKey = key
 		var cached bool
 		report, cached, err = h.providerCapacity.check(r.Context(), key, func(ctx context.Context) ProviderCapacityReport {
 			return h.fetchProviderCapacity(ctx, endpoint, source.ProxyURL)
@@ -328,6 +335,9 @@ func (h *LiveHandler) CheckProviderCapacity(w http.ResponseWriter, r *http.Reque
 		http.Error(w, "Source settings changed. Check the saved source again.", http.StatusConflict)
 		return
 	}
+	if observationKey != "" {
+		h.providerCapacity.confirmObservation(observationKey, report)
+	}
 	report.SourceID, report.ConfiguredLimit = input.SourceID, source.MaxStreams
 	report.SharedConfiguredLimit = source.MaxStreams
 	bucket, _ := deriveLiveSourceBucket(source.Mode, source)
@@ -336,7 +346,95 @@ func (h *LiveHandler) CheckProviderCapacity(w http.ResponseWriter, r *http.Reque
 			report.SharedConfiguredLimit = alias.MaxStreams
 		}
 	}
-	report.LocalConnections, report.EnforcedLimit = livecapacity.Default.Usage(bucket, report.SharedConfiguredLimit)
+	var automatic livecapacity.AutomaticLimit
+	report.LocalConnections, report.EnforcedLimit, automatic = livecapacity.Default.UsageWithAutomaticLimit(bucket, report.SharedConfiguredLimit)
+	report.AutomaticAdoptionEnabled = latest.Live.AutoAdoptProviderLimits
+	report.EnforcementOrigin = "manual"
+	if automatic.Limit > 0 {
+		report.AutomaticLimit = &automatic.Limit
+		report.AutomaticExpiresAt = &automatic.ExpiresAt
+		report.EnforcementOrigin = "provider_extra_cap"
+		report.Message = "At this check, the fresh provider report adds an extra cap for new connections. Manual limits stay in place and running streams and recordings are retained. Reports are not refreshed automatically."
+	}
+
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(report)
+}
+
+// availableLimit only peeks at a completed private observation. It never
+// starts a fetch, waits on an in-flight check, or refreshes its timestamps.
+func (c *providerCapacityChecks) availableLimit(key string) livecapacity.AutomaticLimit {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	entry := c.entries[key]
+	if entry == nil || !entry.verified {
+		return livecapacity.AutomaticLimit{}
+	}
+	select {
+	case <-entry.done:
+	default:
+		return livecapacity.AutomaticLimit{}
+	}
+	r := entry.result
+	now := c.clock()
+	if r.State != "available" || r.LimitOrigin != "provider_account" || r.ReportedLimit == nil || *r.ReportedLimit <= 0 || *r.ReportedLimit > 1_000_000 || r.CheckedAt == nil || r.CheckedAt.After(now) || r.CacheExpiresAt == nil || !r.CacheExpiresAt.After(now) || !r.CacheExpiresAt.After(*r.CheckedAt) || r.CacheExpiresAt.Sub(*r.CheckedAt) > time.Minute || !entry.expires.Equal(*r.CacheExpiresAt) {
+		return livecapacity.AutomaticLimit{}
+	}
+	return livecapacity.AutomaticLimit{Limit: *r.ReportedLimit, ExpiresAt: *r.CacheExpiresAt}
+}
+
+// AutomaticProviderLimit is the shared manager's cache-only policy reader.
+// Lock order is manager -> current settings file -> checks; report production
+// releases checks before querying manager usage. No provider or manager call
+// is permitted here. Unknown or conflicting account aliases use manual policy.
+// The existing settings file read occurs under the manager lock; no latency
+// guarantee or automatic provider refresh is implied.
+func (h *LiveHandler) AutomaticProviderLimit(bucket string) livecapacity.AutomaticLimit {
+	if h == nil || h.cfgManager == nil {
+		return livecapacity.AutomaticLimit{}
+	}
+	settings, err := h.cfgManager.Load()
+	if err != nil || !settings.Live.AutoAdoptProviderLimits {
+		return livecapacity.AutomaticLimit{}
+	}
+	identity := ""
+	for _, source := range resolvedLiveSources(buildGlobalLiveSource(settings)) {
+		sourceBucket, _ := deriveLiveSourceBucket(source.Mode, source)
+		if sourceBucket != bucket {
+			continue
+		}
+		endpoint, supported := providerCapacityEndpoint(source)
+		if !supported {
+			return livecapacity.AutomaticLimit{}
+		}
+		key := liveDigest(endpoint.String(), source.ProxyURL)
+		if identity != "" && identity != key {
+			return livecapacity.AutomaticLimit{}
+		}
+		identity = key
+	}
+	if identity == "" {
+		return livecapacity.AutomaticLimit{}
+	}
+	return h.providerCapacity.availableLimit(identity)
+}
+
+// A completed fetch alone is not an adopted observation. Only the existing
+// management producer, after its current saved-source recheck, confirms the
+// exact returned observation. Admission cannot race ahead of that recheck.
+func (c *providerCapacityChecks) confirmObservation(key string, report ProviderCapacityReport) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	entry := c.entries[key]
+	if entry == nil || report.CheckedAt == nil || report.CacheExpiresAt == nil {
+		return
+	}
+	select {
+	case <-entry.done:
+	default:
+		return
+	}
+	if entry.result.CheckedAt != nil && entry.result.CacheExpiresAt != nil && entry.result.CheckedAt.Equal(*report.CheckedAt) && entry.result.CacheExpiresAt.Equal(*report.CacheExpiresAt) {
+		entry.verified = true
+	}
 }

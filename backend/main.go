@@ -26,6 +26,7 @@ import (
 	"novastream/internal/datastore"
 	"novastream/internal/integration"
 	"novastream/internal/jellyfinbridge"
+	"novastream/internal/livecapacity"
 	"novastream/internal/mediaidentity"
 	"novastream/internal/pool"
 	"novastream/internal/slogutil"
@@ -1046,6 +1047,7 @@ func main() {
 
 	liveHandler := handlers.NewLiveHandler(nil, settings.Transmux.Enabled, settings.Transmux.FFmpegPath, settings.Live.PlaylistCacheTTLHours, settings.Live.ProbeSizeMB, settings.Live.AnalyzeDurationSec, settings.Live.LowLatency, cfgManager, userSettingsService)
 	liveHandler.SetUsersService(userService)
+	livecapacity.Default.SetAutomaticLimitReader(liveHandler.AutomaticProviderLimit)
 	localMediaHandler := handlers.NewLocalMediaHandler(localMediaService, userService, settings.Transmux.Enabled)
 	localMediaHandler.SetMetadataLanguageProviders(metadataService, cfgManager, userSettingsService)
 	localMediaHandler.SetRemoteMediaService(remoteMediaService)
