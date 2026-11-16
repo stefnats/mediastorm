@@ -716,3 +716,38 @@ Successful HTTP uses the production query/context helper seam; actual ApiClient
 methods prove stale rejection before HTTP, without claiming a successful full
 Android send, decoder or device test. No production or provider request occurred.
 Subtitle search/extraction/translation is the next independent native package.
+
+## Fork-only subtitle operation ownership
+
+The [subtitle correction](https://github.com/stefnats/mediastorm-androidtv/tree/fix/native-subtitle-context)
+retains the original player owner and private per-intent tickets through settings,
+search, download, extraction, translation, parsing, refresh and adoption. Actual
+TV/phone search effects use the same owned adapter without UI changes. Search
+rows bind by object identity and exact language; copied or superseded results
+cannot acquire a new ticket. Existing UI sorting retains original references.
+
+New manual choices retire previous automatic/download/translation work and cancel
+the registered in-flight translation refresh. Track refresh compares the actual
+shown object rather than a repeated display label. Terminal denials stop English,
+provider and extraction/translation fallback and use the existing guarded player
+abort. UI effects end through controlled cancellation. Ordinary search failures
+retain the existing clearly labelled English embedded-track fallback.
+
+Unreadable subtitle settings leave providers/translation unavailable; exceptions
+never silently enable translation. Cancellation and typed authorization failures
+remain distinct. Track-default loading retains one expected context and guards
+publication without causing an uncaught settings-screen effect failure.
+
+Validation: all 1,466 native tests passed, including 27 new cases; both APKs built.
+All ten source files, raw XML, APK hashes, registry, empty private prefills and
+actual consumer provenance were independently checked. The preliminary 1,464-test
+run was superseded before publication.
+[Exact ten-file delta](https://github.com/stefnats/mediastorm-androidtv/compare/5d9b482863a6472ad7c264da8ec5a2a42464e27a...98741671d25f5e6133c25a2f7712be0ccb641f7e).
+
+Actual adapter cancellation hooks are exercised with deferred runtime tests.
+Call.await cancelling its OkHttp call is separately source-verified, without
+claiming that complete Android ApiClient.send or physical playback was exercised.
+Successful HTTP tests use the production query/context helper seam; actual API
+methods prove stale rejection before HTTP. No new server content/age grant,
+production service, real provider, private playlist, device or upstream submission
+was used. HLS control context is the next paired audit.
