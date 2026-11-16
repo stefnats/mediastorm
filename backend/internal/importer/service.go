@@ -22,7 +22,6 @@ import (
 	"novastream/internal/database"
 	"novastream/internal/nzb/metadata"
 	"novastream/internal/pool"
-	"novastream/internal/sabnzbd"
 
 	"github.com/javi11/nzbparser"
 )
@@ -59,8 +58,8 @@ type Service struct {
 	metadataService *metadata.MetadataService // Metadata service for file processing
 	processor       *Processor
 	resolvedCache   *resolvedNZBCache
-	configGetter    config.ConfigGetter    // Config getter for dynamic configuration access
-	sabnzbdClient   *sabnzbd.SABnzbdClient // SABnzbd client for fallback
+	configGetter    config.ConfigGetter // Config getter for dynamic configuration access
+	fallbackSlots   chan struct{}
 	log             *slog.Logger
 
 	// Runtime state
@@ -98,7 +97,7 @@ func NewService(config ServiceConfig, metadataService *metadata.MetadataService,
 		processor:       processor,
 		resolvedCache:   newResolvedNZBCache(metadataService),
 		configGetter:    configGetter,
-		sabnzbdClient:   sabnzbd.NewSABnzbdClient(),
+		fallbackSlots:   make(chan struct{}, 2),
 		log:             slog.Default().With("component", "importer-service"),
 		ctx:             ctx,
 		cancel:          cancel,
@@ -588,67 +587,12 @@ func (s *Service) handleProcessingFailure(item *database.ImportQueueItem, proces
 	}
 }
 
-// attemptSABnzbdFallback attempts to send a failed import to an external SABnzbd instance
+// attemptSABnzbdFallback preserves the existing opt-in, terminal-error trigger.
+// Submission/acknowledgement is now durably correlated rather than log-only.
 func (s *Service) attemptSABnzbdFallback(item *database.ImportQueueItem, log *slog.Logger) {
-	// Get current configuration
-	cfg := s.configGetter()
-
-	// Check if SABnzbd is enabled and fallback is configured
-	if cfg.SABnzbd.Enabled == nil || !*cfg.SABnzbd.Enabled {
-		log.Debug("SABnzbd fallback not attempted - SABnzbd API not enabled", "queue_id", item.ID)
-		return
+	if err := s.submitSABFallback(item); err != nil {
+		log.Warn("SAB fallback handoff unavailable", "queue_id", item.ID)
 	}
-
-	if cfg.SABnzbd.FallbackHost == "" {
-		log.Debug("SABnzbd fallback not attempted - no fallback host configured", "queue_id", item.ID)
-		return
-	}
-
-	if cfg.SABnzbd.FallbackAPIKey == "" {
-		log.Warn("SABnzbd fallback not attempted - no API key configured", "queue_id", item.ID)
-		return
-	}
-
-	// Check if the NZB file still exists
-	if _, err := os.Stat(item.NzbPath); err != nil {
-		log.Warn("SABnzbd fallback not attempted - NZB file not found",
-			"queue_id", item.ID,
-			"file", item.NzbPath,
-			"error", err)
-		return
-	}
-
-	log.Info("Attempting to send failed import to external SABnzbd",
-		"queue_id", item.ID,
-		"file", item.NzbPath,
-		"fallback_host", cfg.SABnzbd.FallbackHost)
-
-	// Convert priority to SABnzbd format
-	priority := s.convertPriorityToSABnzbd(item.Priority)
-
-	// Send to external SABnzbd
-	nzoID, err := s.sabnzbdClient.SendNZBFile(
-		cfg.SABnzbd.FallbackHost,
-		cfg.SABnzbd.FallbackAPIKey,
-		item.NzbPath,
-		item.Category,
-		&priority,
-	)
-
-	if err != nil {
-		log.Error("Failed to send to external SABnzbd",
-			"queue_id", item.ID,
-			"file", item.NzbPath,
-			"fallback_host", cfg.SABnzbd.FallbackHost,
-			"error", err)
-		return
-	}
-
-	log.Info("Successfully sent failed import to external SABnzbd",
-		"queue_id", item.ID,
-		"file", item.NzbPath,
-		"fallback_host", cfg.SABnzbd.FallbackHost,
-		"sabnzbd_nzo_id", nzoID)
 }
 
 // ServiceStats holds statistics about the service

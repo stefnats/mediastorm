@@ -1,7 +1,9 @@
 package database
 
 import (
+	"context"
 	"database/sql"
+	"encoding/json"
 	"fmt"
 	"time"
 )
@@ -33,7 +35,11 @@ func (r *QueueRepository) AddToQueue(item *ImportQueueItem) error {
 		priority = CASE WHEN excluded.priority < priority THEN excluded.priority ELSE priority END,
 		category = excluded.category,
 		batch_id = excluded.batch_id,
-		metadata = excluded.metadata,
+		metadata = CASE
+          WHEN (CASE WHEN json_valid(import_queue.metadata) THEN json_type(import_queue.metadata, '$._sabFallbackV1') ELSE NULL END) IS NOT NULL
+          THEN json_set(CASE WHEN json_valid(excluded.metadata) THEN CASE WHEN json_type(excluded.metadata)='object' THEN excluded.metadata ELSE '{}' END ELSE '{}' END,
+            '$._sabFallbackV1', json_extract(import_queue.metadata, '$._sabFallbackV1'))
+          ELSE excluded.metadata END,
 		file_size = excluded.file_size,
 		status = excluded.status,
 		retry_count = 0,
@@ -77,18 +83,71 @@ func (r *QueueRepository) AddStoragePath(itemID int64, storagePath string) error
 }
 
 // UpdateMetadata updates the metadata JSON for a queue item.
-func (r *QueueRepository) UpdateMetadata(itemID int64, metadata *string) error {
-	query := `
-		UPDATE import_queue
-		SET metadata = ?, updated_at = datetime('now')
-		WHERE id = ?
-	`
+// SABFallbackMetadataKey is reserved for the importer's durable handoff receipt.
+const SABFallbackMetadataKey = "_sabFallbackV1"
 
-	if _, err := r.db.Exec(query, metadata, itemID); err != nil {
-		return fmt.Errorf("failed to update queue metadata: %w", err)
+// CompareAndSwapMetadata keeps concurrent writers from erasing a handoff claim.
+func (r *QueueRepository) CompareAndSwapMetadata(ctx context.Context, id int64, old, next *string, failedOnly bool) (bool, error) {
+	if err := ctx.Err(); err != nil {
+		return false, err
 	}
+	query := "UPDATE import_queue SET metadata=?, updated_at=datetime('now') WHERE id=? AND metadata IS ?"
+	if failedOnly {
+		query += " AND status='failed'"
+	}
+	db, ok := r.db.(interface {
+		ExecContext(context.Context, string, ...any) (sql.Result, error)
+	})
+	if !ok {
+		return false, fmt.Errorf("context-aware queue database required")
+	}
+	result, err := db.ExecContext(ctx, query, next, id, old)
+	if err != nil {
+		return false, err
+	}
+	count, err := result.RowsAffected()
+	return count == 1, err
+}
 
-	return nil
+// UpdateMetadata retains the reserved receipt when legacy playback metadata is
+// replaced. Other existing caller fields keep their historical replacement semantics.
+func (r *QueueRepository) UpdateMetadata(itemID int64, metadata *string) error {
+	for n := 0; n < 8; n++ {
+		item, err := r.GetQueueItem(itemID)
+		if err != nil {
+			return err
+		}
+		if item == nil {
+			return sql.ErrNoRows
+		}
+		next := metadata
+		var oldFields, newFields map[string]json.RawMessage
+		if item.Metadata != nil && json.Unmarshal([]byte(*item.Metadata), &oldFields) == nil {
+			if receipt, exists := oldFields[SABFallbackMetadataKey]; exists {
+				if metadata != nil && json.Unmarshal([]byte(*metadata), &newFields) != nil {
+					return fmt.Errorf("invalid queue metadata")
+				}
+				if newFields == nil {
+					newFields = map[string]json.RawMessage{}
+				}
+				newFields[SABFallbackMetadataKey] = receipt
+				raw, err := json.Marshal(newFields)
+				if err != nil {
+					return err
+				}
+				value := string(raw)
+				next = &value
+			}
+		}
+		changed, err := r.CompareAndSwapMetadata(context.Background(), itemID, item.Metadata, next, false)
+		if err != nil {
+			return err
+		}
+		if changed {
+			return nil
+		}
+	}
+	return fmt.Errorf("queue metadata changed concurrently")
 }
 
 // IsFileInQueue checks if a file is already in the queue (pending, retrying, or processing)
@@ -304,7 +363,11 @@ func (r *QueueRepository) AddBatchToQueue(items []*ImportQueueItem) error {
 			priority = CASE WHEN excluded.priority < priority THEN excluded.priority ELSE priority END,
 			category = excluded.category,
 			batch_id = excluded.batch_id,
-			metadata = excluded.metadata,
+			metadata = CASE
+              WHEN (CASE WHEN json_valid(import_queue.metadata) THEN json_type(import_queue.metadata, '$._sabFallbackV1') ELSE NULL END) IS NOT NULL
+              THEN json_set(CASE WHEN json_valid(excluded.metadata) THEN CASE WHEN json_type(excluded.metadata)='object' THEN excluded.metadata ELSE '{}' END ELSE '{}' END,
+                '$._sabFallbackV1', json_extract(import_queue.metadata, '$._sabFallbackV1'))
+              ELSE excluded.metadata END,
 			file_size = excluded.file_size,
 			updated_at = datetime('now')
 			WHERE status NOT IN ('processing', 'completed')
@@ -333,6 +396,18 @@ func (r *QueueRepository) AddBatchToQueue(items []*ImportQueueItem) error {
 
 // GetQueueItem retrieves a specific queue item by ID
 func (r *QueueRepository) GetQueueItem(id int64) (*ImportQueueItem, error) {
+	return r.GetQueueItemContext(context.Background(), id)
+}
+
+// GetQueueItemContext bounds observation/receipt access by the original caller.
+func (r *QueueRepository) GetQueueItemContext(ctx context.Context, id int64) (*ImportQueueItem, error) {
+	db, ok := r.db.(interface {
+		QueryRowContext(context.Context, string, ...any) *sql.Row
+	})
+	if !ok {
+		return nil, fmt.Errorf("context-aware queue database required")
+	}
+
 	query := `
 		SELECT id, nzb_path, relative_path, category, priority, status, created_at, updated_at,
 		       started_at, completed_at, retry_count, max_retries, error_message, batch_id, metadata, file_size, storage_path
@@ -340,7 +415,7 @@ func (r *QueueRepository) GetQueueItem(id int64) (*ImportQueueItem, error) {
 	`
 
 	var item ImportQueueItem
-	err := r.db.QueryRow(query, id).Scan(
+	err := db.QueryRowContext(ctx, query, id).Scan(
 		&item.ID, &item.NzbPath, &item.RelativePath, &item.Category, &item.Priority, &item.Status,
 		&item.CreatedAt, &item.UpdatedAt, &item.StartedAt, &item.CompletedAt,
 		&item.RetryCount, &item.MaxRetries, &item.ErrorMessage, &item.BatchID, &item.Metadata, &item.FileSize, &item.StoragePath,

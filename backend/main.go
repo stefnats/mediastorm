@@ -1396,6 +1396,13 @@ func main() {
 	r.HandleFunc("/admin/api/calendar", adminUIHandler.RequireAuth(adminUIHandler.GetCalendarData)).Methods(http.MethodGet)
 	r.HandleFunc("/admin/api/schema", adminUIHandler.RequireAuth(adminUIHandler.GetSchema)).Methods(http.MethodGet)
 	r.HandleFunc("/admin/api/status", adminUIHandler.RequireAuth(adminUIHandler.GetStatus)).Methods(http.MethodGet)
+	var fallbackAccounts datastore.AccountRepository
+	if store != nil {
+		fallbackAccounts = store.Accounts()
+	}
+	usenetFallbackHandler := handlers.NewUsenetFallbackHandler(nzbSystem.ImporterService(), sessionsService, fallbackAccounts)
+	registerUsenetFallbackRoutes(r, adminUIHandler, usenetFallbackHandler)
+
 	r.HandleFunc("/admin/api/hardware-acceleration/status", adminUIHandler.RequireMasterAuth(adminUIHandler.GetHardwareAccelerationStatus)).Methods(http.MethodGet)
 	updatesHandler := handlers.NewUpdatesHandler()
 	r.HandleFunc("/admin/api/updates/status", adminUIHandler.RequireAuth(updatesHandler.Status)).Methods(http.MethodGet)
@@ -2901,4 +2908,11 @@ func (w *recordingWebPINReply) Write(body []byte) (int, error) {
 		w.status = 200
 	}
 	return w.body.Write(body)
+}
+
+// registerUsenetFallbackRoutes keeps the two existing-cookie administration
+// entry points on one registration seam; fresh authority lives in the handler.
+func registerUsenetFallbackRoutes(r *mux.Router, admin *handlers.AdminUIHandler, fallback *handlers.UsenetFallbackHandler) {
+	r.HandleFunc("/admin/api/usenet/fallback/{queueID}", admin.RequireAuth(fallback.Get)).Methods(http.MethodGet)
+	r.HandleFunc("/admin/api/usenet/fallback/{queueID}/refresh", admin.RequireAuth(recordingWebOrigin(fallback.Refresh))).Methods(http.MethodPost)
 }

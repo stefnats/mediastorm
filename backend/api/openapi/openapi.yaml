@@ -113,6 +113,73 @@ tags:
   - name: clients
 
 paths:
+  /admin/api/usenet/fallback/{queueID}:
+    get:
+      operationId: getUsenetFallbackStatus
+      summary: Read the persisted legacy SAB download handoff observation
+      description: |
+        Master administration only. Requires a current full cookie session and
+        the actual current SQL account role, not a cached IsMaster claim.
+        Rechecks the original session/account and unchanged earliest expiry
+        before returning. Scoped/delegated sessions and missing fresh readers
+        fail closed. No provider request, submit, retry, import or file access.
+
+        This observes only the existing opt-in terminal-import-error SAB fallback.
+        It does not enable a new automatic Play/download/Arr/Library workflow.
+        A queued download is not a playable stream; download_completed is only
+        an external download observation, never imported/stream-ready/file/age
+        permission. checkedAt is this server's explicit status-response completion
+        time, not a provider measurement or proof that a local file exists.
+        submittedAt is the local durable handoff-attempt time, not confirmation
+        of provider acceptance.
+        Missing acknowledgement is submission_unknown, never an automatic retry.
+        Only allowlisted status/timestamps are returned, without job IDs, source
+        endpoints, credentials, provider errors, release names or output paths.
+      parameters:
+        - {$ref: '#/components/parameters/SABFallbackQueueID'}
+      responses:
+        '200':
+          description: Persisted observation only; no new network activity.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/SABFallbackStatus'}
+        '400': {description: Noncanonical ID or unexpected query/body.}
+        '403': {description: Current full master session required.}
+        '404': {description: Queue item not found.}
+        '503': {description: Persisted handoff state or fresh authority reader unavailable.}
+  /admin/api/usenet/fallback/{queueID}/refresh:
+    post:
+      operationId: refreshUsenetFallbackStatus
+      summary: Explicitly refresh one existing SAB job observation
+      description: |
+        Empty body, no query. Same-origin cookie route using the existing origin
+        protection. The same actual full-session/master checks run before and
+        after work with deadline min(original request, original claim, current
+        session, account expiry, five seconds). No deadline/session renewal.
+        At most two fallback operations run in one importer instance; durable
+        per-job CAS prevents concurrent refresh publication. Requests do not queue.
+
+        Calls only the existing job's SAB status operation, at most queue then
+        history through the existing SAB-compatible client. Never submits, starts
+        a poller, guesses another job, imports or opens a completed path. Current
+        opt-in/backend/credential fingerprint must match before and after network
+        access. Changed configuration cannot route an old job to a new backend.
+        Completed/failed/unknown-acknowledgement receipts need no provider request.
+        Network/unknown status is an explicit uncertainty, never a completed import.
+      parameters:
+        - {$ref: '#/components/parameters/SABFallbackQueueID'}
+      responses:
+        '200':
+          description: Safe observed download status; not a file/playback grant.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/SABFallbackStatus'}
+        '400': {description: Noncanonical ID or unexpected query/body.}
+        '403': {description: Current full master/origin authority missing or changed.}
+        '404': {description: Queue item not found.}
+        '409': {description: Backend or credentials no longer match the original handoff.}
+        '429': {description: Fallback operation or job refresh busy.}
+        '503': {description: Safe observation unavailable or request budget expired.}
   /api/library/libraries/{libraryID}/groups:
     get:
       operationId: listLibraryGroups
@@ -2874,6 +2941,11 @@ components:
       description: Session token as a query parameter; only accepted on media URLs such as `/api/video/stream`.
 
   parameters:
+    SABFallbackQueueID:
+      name: queueID
+      in: path
+      required: true
+      schema: {type: string, pattern: '^[1-9][0-9]*$'}
     ProfileUnlock:
       name: X-Profile-Unlock
       in: header
@@ -3059,6 +3131,20 @@ components:
             $ref: '#/components/schemas/Error'
 
   schemas:
+    SABFallbackStatus:
+      type: object
+      additionalProperties: false
+      required: [queueId, state]
+      properties:
+        queueId: {type: integer, format: int64, minimum: 1}
+        state:
+          type: string
+          enum: [not_submitted, submission_unknown, submitted, queued, downloading, download_completed, failed, unknown]
+        reason:
+          type: string
+          enum: [acknowledgement_unavailable, provider_unavailable, provider_state_unknown]
+        submittedAt: {type: string, format: date-time}
+        checkedAt: {type: string, format: date-time}
     LocalLibraryGroups:
       type: object
       required: [groups, total, limit, offset]
