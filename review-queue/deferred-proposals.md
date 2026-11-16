@@ -751,3 +751,50 @@ Successful HTTP tests use the production query/context helper seam; actual API
 methods prove stale rejection before HTTP. No new server content/age grant,
 production service, real provider, private playlist, device or upstream submission
 was used. HLS control context is the next paired audit.
+
+## Fork-only raw video ownership
+
+The [uninstalled raw video port](https://github.com/stefnats/mediastorm/tree/feature/vod-video-boundary)
+checks current account applicability and original owner before Stream, Probe and
+DirectURL cache access or source work. Unknown state and active children without
+authoritative strict input proof fail before demand. Active adult correlation is
+NotApplicable to a regional child grant, and never supplies catalogue/file proof.
+Original session/request expiry is retained without extending reads or changing
+the existing preparation lifetime.
+
+Configured requests bypass path-only byte/metadata caches, prefix spool, shared
+probe work, persistent stream pools and redirect reuse. Actual provider and HTTP
+opens, composed redirect callbacks, returned bodies and FFprobe start/output are
+checked against that same owner. Returned handles are checked before/after reads;
+late bytes are discarded and only the owned body is closed. Current existing
+library/recording ACL is rechecked with bounded repository-only lookups, followed
+by another owner check. Known library paths with missing ACL dependency deny.
+Cached item-to-library mapping is not fresh reassignment or transport/file proof.
+
+The first late denial restores the original HTTP header baseline, preserving CORS
+while dropping prepared private validators and media headers. Real failing tests
+were retained for the original prepared-header leak, a redirect-policy callback
+that retired the owner before another HTTP open, and the historical double-close
+of a redirect body already closed by net/http. Provider error responses retain
+their separate owned-body disposal contract.
+
+Actual synthetic HTTP tests cover allowed and denied two-origin redirects, late
+headers/bytes, body disposal and blocked-read cancellation reaching the server.
+Provider tests cover noncooperative late reads, trusted private invalidation,
+parent cancellation and expiry. An installed FFprobe parses synthetic PCM WAV;
+unknown piped duration remains unknown. Optional configured Blu-ray companion
+reads are skipped before I/O, with a nil-port positive control.
+
+Validation: 3,978 affected cases passed with 36 existing optional skips, 324 repeated race cases, 36 OpenAPI cases and both builds. Repeated/subset counts overlap. The combined clean commit passes 9,511 cases with 38 explicit optional skips and an exact clean-commit server binary. Independent source/archive/raw-test/binary review and root frozen-source verification are clean.
+[Exact eight-file delta](https://github.com/stefnats/mediastorm/compare/9846f6bd4bf2dc76615ac2b5b0b47b7201c55c1e...d0920c9520fd78f04eb6108e3ca399a2209b1a29).
+
+No Main/API route, public policy, database or HLS lifecycle installation is added.
+Some unbound shared probe callers conservatively fail closed when the test port is
+configured; independent HLS/auxiliary/delegation/WebDAV opens and protected parent
+controls still require their own work. Configured cache bypass and absent companion
+enrichment may increase latency and leave languages unknown; no performance target
+is claimed. An issued adult DirectURL remains nonrevocable. Blocked-input proactive
+cancellation requires the original parent/deadline or trusted private invalidation;
+no new production invalidation hooks or complete continuous revocation are claimed.
+Nil-port legacy behavior remains unchanged. All fixtures are synthetic; no real
+provider, playlist, device, production activation or new upstream submission was used.
