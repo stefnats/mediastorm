@@ -876,3 +876,36 @@ is separate and does not close receiver transport. Parent controls, cold prepare
 auxiliary/delegated/bridge/WebDAV coverage and actual source proof remain activation
 prerequisites. All data/media/servers were synthetic, without real providers,
 private playlists, devices, production changes or new upstream submissions.
+
+## Fork-only native HLS operation lifetime
+
+The [native lifecycle correction](https://github.com/stefnats/mediastorm-androidtv/tree/fix/native-hls-lifecycle)
+binds recording restart, catchup, retune, preference/identity lookup and Cast work
+to the original owner, player lifetime and private operation stamps. Released or
+superseded actors cannot adopt late starts or continue fallback. Known resource
+receipts protect replacement/detached IDs; cleanup uses the original still-current
+context, without borrowing replacement credentials. A start aborted without a
+returned ID may still rely on the existing server expiry.
+
+Strict keepalive is explicitly enabled only by the migrated consumers. Genuine
+own generated HLS asset401/403 and recognized structured own raw policy/PIN failures
+are terminal; uncoded forwarded provider403 and external-CDN403 retain their
+behavior. Known denial retires the captured receiver and player actors, without
+provider/Stremio/live fallback. Cast and local progress gates cancel registered
+child jobs even beneath a NonCancellable parent and prevent late success/migration/
+offline publication. Normal stop retains its permitted last closing report.
+
+Validation: all 1,523 native tests passed, including 40 new cases; both APKs built.
+Independent source/frozen-artifact review and root verification checked all 17
+files (12 production), raw JUnit, APK hashes, registry, private prefills and actual
+consumer provenance.
+[Exact seventeen-file delta](https://github.com/stefnats/mediastorm-androidtv/compare/c5e196312e5a99780b7f1151b16d87ccc3748fea...00981c0b3846ad9fd5540a1b3700b3b4e7429bf6).
+
+Real local HTTP tests exercise Call.await cancellation through the CastOwnership
+child boundary. The actual local ProgressReporter consumes a separately deferred-
+tested gate; this does not claim a complete Android reporter/send, decoder,
+receiver or physical-device execution. Epoch transitions are simulated and completed
+server writes cannot be rolled back. Multiscreen consumers remain a separate
+following ownership packet; their legacy default is preserved here. No new API,
+content/age/delegation grant, provider access, private playlist, production
+activation or upstream submission occurred.
