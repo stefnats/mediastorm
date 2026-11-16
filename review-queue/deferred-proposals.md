@@ -967,3 +967,44 @@ Activity/decoder render, device p95, measured warm/cold performance, tile, audio
 or Cast rendering result is claimed. Device benchmarking remains outstanding.
 No real provider, private playlist, production activation or new upstream
 submission occurred.
+
+## Fork-only single-reader HLS input
+
+The [dormant HLS input port](https://github.com/stefnats/mediastorm/tree/feature/hls-input-boundary)
+captures the original full-session owner before source demand, retains one actual
+GET/body and probes at most a private 1MiB prefix under a 10s setup budget. FFmpeg
+then receives that exact prefix followed by the same remaining reader. A one-shot
+setup-to-runtime handoff preserves the original absolute authority expiry without
+renewal; successful handoff survives normal HTTP request completion. Owned process
+pipes close and join their source copier on child exit, cancellation or retirement.
+Configured child/unbound/unsupported requests fail before input work.
+
+This first subset supports actually observed H264 8-bit420 plus supported AAC audio
+into ordinary TS output. It is not immutable-file, whole-stream, title/episode,
+regional age, delegation or general HLS compatibility proof. Main remains
+uninstalled. Live/YouTube, seeking, recovery/restarts, separate companions/captions
+and further input attempts stay unsupported in this configured path. Same-session
+known receiver assets retain checked original auth/profile and unambiguous required
+PIN, with canonical query keys and no external credential decoration. Generation
+fences preserve currently owned output even when old exact cleanup refuses it.
+
+Validation: 4,157 affected tests passed with 36 optional skips, 597 repeated race
+checks, 36 OpenAPI cases and both backend builds. Independent review and root checks
+verified all nine files (six production), patch, archive members, actual process
+binaries, four runners and raw counts. Real FFmpeg/FFprobe, local HTTP and FIFO
+canaries verify confinement and unsafe positive controls. The query-only receiver
+walk uses actual handlers/middleware with injected synthetic auth, not real login,
+TCP receiver or physical-device execution. Historical executed RED logs are retained;
+exact old WIP source was not separately archived and is not reconstructed.
+[Exact nine-file delta](https://github.com/stefnats/mediastorm/compare/60e2fc321283d59cecf795f8600277ded2fb5805...2ad63a73967bb327e09a836a80df5de15bcbdd80).
+
+The first full integration exposed two old synthetic station fixtures reusing
+cached loopback-port URLs. The separate [one-file test correction](https://github.com/stefnats/mediastorm/tree/test/station-fixture-isolation)
+adds fresh fixture-only URL namespaces and asserts first fetches, preserving all
+station behavior and production code. Its seven existing tests passed 20 normal
+and five race repetitions (140/35 events). No cache contents were read or cleared.
+The complete clean combined commit5f9afdd2d473b638f78a10cd2d97638d317d8687 passes
+9,690 tests with 38 optional skips, isolated PostgreSQL/local browser fixtures and
+a server build carrying that same unmodified revision. The failed earlier full
+run remains separate evidence. No production, real provider, private playlist,
+public family activation or new upstream submission occurred.
