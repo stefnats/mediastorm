@@ -189,6 +189,7 @@ type PrequeueStatusResponse struct {
 
 // PrequeueEntry is the internal state of a prequeue item
 type PrequeueEntry struct {
+	authorizationAttempt          uint64
 	MediaEvidence                 *models.MediaEvidence `json:"mediaEvidence,omitempty"`
 	MediaEvidenceReportRevision   string                `json:"mediaEvidenceReportRevision,omitempty"`
 	MediaEvidenceConfigurationKey string                `json:"-"`
@@ -388,8 +389,9 @@ func copyNZBResult(result models.NZBResult) models.NZBResult {
 
 // PrequeueStore manages prequeue entries with TTL
 type PrequeueStore struct {
-	mu      sync.RWMutex
-	entries map[string]*PrequeueEntry
+	authorizationSequence uint64
+	mu                    sync.RWMutex
+	entries               map[string]*PrequeueEntry
 	// Secondary index: titleId+userId+settingsScopeKey -> prequeueId (to find/replace existing prequeue)
 	byTitleUser map[string]string
 	defaultTTL  time.Duration

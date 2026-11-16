@@ -78,6 +78,7 @@ type prequeuePlaybackService interface {
 
 // PrequeueHandler handles prequeue requests for pre-loading playback streams
 type PrequeueHandler struct {
+	kidsVODBindings       *kidsVODResources
 	sourceAvailability    sourceAvailabilityService
 	store                 *playback.PrequeueStore
 	indexerSvc            *indexer.Service
@@ -1695,6 +1696,13 @@ func resolveFirstReadySourceForWorker(configured bool, mode prequeueWorkerMode) 
 // the complete globally ranked candidate set before resolving.
 func (h *PrequeueHandler) runPrequeueWorker(prequeueID, titleID, titleName, imdbID, mediaType string, year int, userID, clientID string, throughput *models.AdaptiveThroughputContext, targetEpisode *models.EpisodeReference, startOffset float64, skipHLS bool, workerMode prequeueWorkerMode, localScopes ...prequeueLocalScope) {
 	evidenceConfigurationKey := h.preparationConfigurationKey()
+	var kidsProof *kidsVODLibraryProof
+	var kidsCatalogue *models.Title
+	if observer := h.kidsVODBindings; observer != nil {
+		stamp, _ := h.store.BeginAuthorizationAttempt(prequeueID)
+		profileScope, _ := kidsVODProfileScope(h, userID)
+		defer func() { observer.publish(prequeueID, stamp, kidsProof, evidenceConfigurationKey, profileScope) }()
+	}
 	if h.sourceAvailability != nil {
 		observe := h.sourceAvailability.ObservePlaybackStart(userID, clientID, titleID, mediaType)
 		defer func() {
@@ -1760,6 +1768,9 @@ func (h *PrequeueHandler) runPrequeueWorker(prequeueID, titleID, titleName, imdb
 	var alternateTitles []string
 	if mediaType == "series" && h.metadataSvc != nil {
 		seriesMeta := h.createEpisodeResolverAndLookupAbsoluteEp(ctx, titleID, titleName, year, imdbID, targetEpisode)
+		if h.kidsVODBindings != nil && seriesMeta.LibraryEpisodeVerified {
+			kidsCatalogue = seriesMeta.kidsVODCatalogue
+		}
 		if len(localScopes) == 1 && localScopes[0].automaticLibrarySelection && targetEpisode != nil && targetEpisode.EpisodeID != "" && seriesMeta.TargetEpisode != nil && seriesMeta.TargetEpisode.EpisodeID != "" && seriesMeta.TargetEpisode.EpisodeID != targetEpisode.EpisodeID {
 			h.failPrequeue(prequeueID, "Episode identity changed; reload the title before playing")
 			return
@@ -1849,6 +1860,10 @@ func (h *PrequeueHandler) runPrequeueWorker(prequeueID, titleID, titleName, imdb
 			IMDBID:  imdbID,
 		}
 		if movieTitle, err := h.movieMetadataSvc.MovieInfo(ctx, movieQuery); err == nil && movieTitle != nil {
+			if h.kidsVODBindings != nil {
+				copy := *movieTitle
+				kidsCatalogue = &copy
+			}
 			countryCode = strings.TrimSpace(movieTitle.CountryCode)
 			originalLanguage = strings.TrimSpace(movieTitle.Language)
 			alternateTitles = hydratedMovieSearchTitles(movieTitle)
@@ -1979,6 +1994,7 @@ func (h *PrequeueHandler) runPrequeueWorker(prequeueID, titleID, titleName, imdb
 		h.updatePrequeueProgress(prequeueID, "local_fallback", "Checking existing library media", 0, len(localCandidates)+len(remoteCandidates))
 		return h.resolveLocalFallback(playbackCtx, prequeueID, localCandidates, prequeueResolutionOptions{
 			excludedResult: excludedResult, mediaType: mediaType, targetEpisode: targetEpisode, userID: userID, clientID: clientID, hdrDVPolicy: hdrDVPolicy,
+			kidsVODCatalogue: kidsCatalogue, kidsVODLibraryRoutes: h.kidsVODBindings.captureRoutes(playbackCtx, remoteCandidates),
 			unknownTrackPolicy: unknownTrackPolicy, needsDVCheck: needsDVCheck, needsUnknownTrackCheck: needsUnknownTrackCheck,
 			workerStart: workerStart, localScope: &localScopes[0], adaptiveCaps: localAdaptiveCaps, localFilter: localFilter,
 		}, remoteCandidates)
@@ -2128,6 +2144,7 @@ func (h *PrequeueHandler) runPrequeueWorker(prequeueID, titleID, titleName, imdb
 		return
 	}
 
+	kidsProof = choice.kidsVODProof
 	resolution := choice.resolution
 	selectedResult := choice.selectedResult
 	selectedResultIndex := choice.selectedResultIndex
@@ -2463,6 +2480,7 @@ type prequeueCandidateProcessor func(ctx context.Context, index int, candidate m
 
 // candidateResolution is the outcome of resolving one prequeue candidate.
 type candidateResolution struct {
+	kidsVODProof   *kidsVODLibraryProof
 	result         models.NZBResult
 	index          int
 	bucket         int
@@ -2478,6 +2496,7 @@ type candidateResolution struct {
 // prequeueResolutionChoice is what the resolution phase selected; it mirrors the
 // variables the serial loop used to feed the rest of the worker.
 type prequeueResolutionChoice struct {
+	kidsVODProof        *kidsVODLibraryProof
 	resolution          *models.PlaybackResolution
 	selectedResult      *models.NZBResult
 	selectedResultIndex int
@@ -2490,6 +2509,8 @@ type prequeueResolutionChoice struct {
 
 // prequeueResolutionOptions configures the resolution phase.
 type prequeueResolutionOptions struct {
+	kidsVODCatalogue       *models.Title
+	kidsVODLibraryRoutes   map[string]string
 	excludedResult         *models.NZBResult
 	mediaType              string
 	targetEpisode          *models.EpisodeReference
@@ -3337,12 +3358,13 @@ func (h *PrequeueHandler) resolveCandidates(ctx context.Context, prequeueID stri
 			if probeResult != nil || metadataResult != nil {
 				if rejected, reason := unknownTrackPolicyRejects(opts.unknownTrackPolicy, audioStreams, subtitleStreams); rejected {
 					log.Printf("[prequeue] Result [%d] deprioritized by unknown track policy %q: %s; trying next result: %s", i, opts.unknownTrackPolicy, reason, result.Title)
-					return nil, &candidateResolution{result: result, index: i, resolution: resolution, probeResult: probeResult, metadataResult: metadataResult, migrationSnapshot: src.Snapshot()}, nil
+					return nil, &candidateResolution{
+						kidsVODProof: h.kidsVODBindings.candidateProof(result, resolution, probeResult, opts), result: result, index: i, resolution: resolution, probeResult: probeResult, metadataResult: metadataResult, migrationSnapshot: src.Snapshot()}, nil
 				}
 			}
 		}
 
-		return &candidateResolution{result: result, index: i, resolution: resolution, probeResult: probeResult, metadataResult: metadataResult, migrationSnapshot: src.Snapshot()}, nil, nil
+		return &candidateResolution{kidsVODProof: h.kidsVODBindings.candidateProof(result, resolution, probeResult, opts), result: result, index: i, resolution: resolution, probeResult: probeResult, metadataResult: metadataResult, migrationSnapshot: src.Snapshot()}, nil, nil
 	}
 
 	resolutionWidth := prequeueResolutionWidth(opts.concurrent)
@@ -3382,6 +3404,7 @@ func (h *PrequeueHandler) resolveCandidates(ctx context.Context, prequeueID stri
 		log.Printf("[prequeue] TIMING: resolved (took: %v, total elapsed: %v)", time.Since(resolveStart), time.Since(opts.workerStart))
 	}
 	return prequeueResolutionChoice{
+		kidsVODProof:        winner.kidsVODProof,
 		resolution:          winner.resolution,
 		selectedResult:      &winner.result,
 		selectedResultIndex: winner.index,
@@ -4110,6 +4133,7 @@ func padNumber(n int) string {
 
 // SeriesMetadataResult holds series-specific metadata needed for search and file matching
 type SeriesMetadataResult struct {
+	kidsVODCatalogue       *models.Title
 	EpisodeResolver        *filter.SeriesEpisodeResolver
 	TargetEpisode          *models.EpisodeReference
 	IsDaily                bool   // True for daily shows (talk shows, news) that use date-based naming
@@ -4160,6 +4184,11 @@ func (h *PrequeueHandler) createEpisodeResolverAndLookupAbsoluteEp(ctx context.C
 	if details == nil {
 		log.Printf("[prequeue] No series details available")
 		return result
+	}
+
+	if h.kidsVODBindings != nil {
+		copy := details.Title
+		result.kidsVODCatalogue = &copy
 	}
 
 	// Populate year from metadata
