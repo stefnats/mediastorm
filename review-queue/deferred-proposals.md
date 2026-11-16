@@ -909,3 +909,33 @@ server writes cannot be rolled back. Multiscreen consumers remain a separate
 following ownership packet; their legacy default is preserved here. No new API,
 content/age/delegation grant, provider access, private playlist, production
 activation or upstream submission occurred.
+
+## Fork-only Multiscreen ownership
+
+The [Multiscreen correction](https://github.com/stefnats/mediastorm-androidtv/tree/fix/native-multiscreen-ownership)
+retains the original playback owner through a private one-shot launch envelope,
+capacity/EPG calls, each tile, keepalive, resume and known-session cleanup.
+Stale launches cannot create a model or network request. Retune and Remove retire
+old tile callbacks immediately; cancellation of one operation leaves the serial
+worker available for cleanup. Original known-ID receipts protect replacement and
+detached sessions. Own HLS policy/PIN denial is terminal; ordinary provider
+failure retains its behavior and failed-stop cleanup can still be retried.
+
+Saved layouts use credential-free configured-server/account/profile namespaces.
+Legacy profile-only private channel data is preserved without automatic adoption.
+Paired/home-direct/tunnel or unknown configured identity cannot save or resume a
+layout until Core has a trusted stable server identity; fresh manual selection
+remains available.
+
+Validation: all 1,562 native tests passed, including 39 new cases; both APKs built.
+Independent source and frozen-artifact review verified all 16 files (12 production),
+raw JUnit, APK hashes, packaged language registry and five empty private prefills.
+[Exact sixteen-file delta](https://github.com/stefnats/mediastorm-androidtv/compare/00981c0b3846ad9fd5540a1b3700b3b4e7429bf6...b5e3dd73564c9c48c0fb3d252adb401744360687).
+
+Tests execute production session queues, launch/storage/start/tile guards and local
+HTTP shared interceptors. Epoch changes are simulated. SharedPreferences wiring is
+source-reviewed, not instantiated; no Activity, decoder, rendered frame, physical
+device, real login or successful full Android send is claimed. An interrupted
+start without a known usable original-owner cleanup may rely on server expiry.
+No public content/age grant, private playlist, real provider, production activation
+or new upstream submission occurred.
