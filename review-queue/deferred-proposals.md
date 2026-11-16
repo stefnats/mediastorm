@@ -1339,3 +1339,43 @@ This is row-work ownership through the Launcher handoff, not an all-Launcher,
 all-ListsTab, all-writers or age/parent authorization migration.
 [Exact sixteen-file delta](https://github.com/stefnats/mediastorm-androidtv/compare/07bf51502e7c46a3ed4f58bd51346d5a4928efed...fb27be664f33e89283fd48553f34de6bc14fdd94).
 No production activation, private playlist or new upstream submission occurred.
+
+## Fork-only hidden management and original hide context
+
+The [backend Hidden management source](https://github.com/stefnats/mediastorm/tree/feature/hidden-catalogue-language)
+selects original languages from the complete owned saved index before totals and
+pagination. It retains raw HiddenItem fields and reads only existing validated
+catalogue evidence. Unknown can be selected alone or together with registered
+ISO 639-3 codes. Unsupported metadata-dependent filters reject before demand.
+There is no discovery-window cap, provider enrichment or suppression-set rewrite.
+The global Hidden store must remain the complete suppression set; a later native
+management consumer must keep filtered pages separate. Ten actual handler replies
+and exact-base legacy replay are retained. Legacy evidence covers the observed
+unsupported-source family, not arbitrary old servers.
+
+All 4,542 focused normal cases, 423 race pass events and 40 API cases passed;
+41 normal cases explicitly skipped optional fixtures. Independent review checked
+seven changed sources, three production, archive, patch, binary and raw reports.
+The combined clean backend at 86d144bf186ff4f95b32011ba25d5050034c9a44 passed
+10,036 cases across 106 packages with 38 optional skips, then built at that same
+revision. Existing cache housekeeping may create directories or remove expired
+entries; literal filesystem-read-only behavior is not claimed.
+
+The separate [native hide ownership correction](https://github.com/stefnats/mediastorm-androidtv/tree/fix/native-hide-context)
+keeps hide, unhide, continue-watching removal and alias deletes attached to their
+original owner, target and producer. Store revisions protect accepted mutations
+from old refreshes. Original route predicates prevent a late operation dismissing
+replacement Details or showing a stale success. A server-accepted write may remain
+after cancellation; there is no replacement rollback. Watchlist, Watched and
+Launcher writers remain separate followups.
+
+All 1,836 native cases passed, including 21 new cases, and both APKs built.
+Independent review and root checks cover sixteen sources, thirteen production,
+232 JUnit reports, APK/DEX checks, registry and five private empty prefills.
+Actual Store, origin, mutation and cancellation helpers execute under tests;
+successful complete Android ApiClient.send, Compose route transitions, touch and
+physical devices remain outside this evidence. No executed pre-fix RED is claimed.
+
+[Backend delta](https://github.com/stefnats/mediastorm/compare/79005bb6e18f3f4a69a7f1063dd3c791fa7c4526...86d144bf186ff4f95b32011ba25d5050034c9a44).
+[Native delta](https://github.com/stefnats/mediastorm-androidtv/compare/fb27be664f33e89283fd48553f34de6bc14fdd94...a9b360c3670453a656ee0b764bee44c966b1bccd).
+No production activation, private playlist or new upstream submission occurred.
