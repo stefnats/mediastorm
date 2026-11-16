@@ -12,6 +12,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 
 	"novastream/config"
 	"novastream/models"
@@ -164,6 +165,10 @@ func (h *DisplayListHandler) get(w http.ResponseWriter, r *http.Request) {
 	// never hide its own rows, warm metadata, or inherit discovery-window caps.
 	if source == "hidden" {
 		h.getHiddenManagement(w, r, userID, languageQuery)
+		return
+	}
+	if source == "loved-stored" {
+		h.getLovedStored(w, r, userID, languageQuery)
 		return
 	}
 	metadataSource := source != "watchlist" &&
@@ -443,6 +448,92 @@ func (h *DisplayListHandler) getHiddenManagement(w http.ResponseWriter, r *http.
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("Cache-Control", "private, no-store")
 	_ = json.NewEncoder(w).Encode(DisplayListResponse{Source: "hidden", Items: items, Total: total, AlphabetBuckets: alphabet, OriginalLanguageFilterSupported: true})
+}
+
+// lovedStoredItem exposes the saved preference time without adding private
+// rating keys or aliases to the catalogue title contract.
+type lovedStoredItem struct {
+	Rank      int          `json:"rank"`
+	Title     models.Title `json:"title"`
+	UpdatedAt time.Time    `json:"updatedAt"`
+}
+
+func (h *DisplayListHandler) getLovedStored(w http.ResponseWriter, r *http.Request, userID string, language displayListOriginalLanguageQuery) {
+	w.Header().Set("Cache-Control", "private, no-store")
+	if h.MetadataHandler == nil || h.MetadataHandler.UsersService == nil {
+		http.Error(w, "personal favorites unavailable", http.StatusServiceUnavailable)
+		return
+	}
+	profile, client, ok := h.MetadataHandler.requireLovedProfile(w, r)
+	if !ok {
+		return
+	}
+	if profile != userID {
+		http.NotFound(w, r)
+		return
+	}
+	query := parseDisplayListQuery(r)
+	if err := validateLovedStoredQuery(r, query); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	if h.HiddenItemsService == nil {
+		http.Error(w, "hidden items source unavailable", http.StatusServiceUnavailable)
+		return
+	}
+	ratings, err := h.MetadataHandler.TitleRatings.List(r.Context(), profile)
+	if err != nil {
+		http.Error(w, "could not load personal favorites", http.StatusServiceUnavailable)
+		return
+	}
+	items := make([]lovedStoredItem, 0, len(ratings))
+	for _, rating := range ratings {
+		stored := rating.Title
+		if rating.Value != "love" || stored.ID == "" || len(stored.ID) > 128 || stored.MediaType != "movie" && stored.MediaType != "series" || !h.MetadataHandler.ratingTitleAllowed(profile, stored) {
+			continue
+		}
+		// Explicitly copy saved presentation/identity fields. In particular, no
+		// scalar language, imported evidence or playback/source context survives.
+		title := models.Title{ID: stored.ID, Name: stored.Name, MediaType: stored.MediaType, Year: stored.Year, TMDBID: stored.TMDBID, IMDBID: stored.IMDBID, TVDBID: stored.TVDBID, Adult: stored.Adult, Certification: stored.Certification, PersonalRating: "love"}
+		if h.HiddenItemsService.ShouldHideTitleMap(profile, map[string]interface{}{"id": title.ID, "name": title.Name, "mediaType": title.MediaType, "tmdbId": strconv.FormatInt(title.TMDBID, 10), "tvdbId": strconv.FormatInt(title.TVDBID, 10), "imdbId": title.IMDBID}) {
+			continue
+		}
+		items = append(items, lovedStoredItem{Title: title, UpdatedAt: rating.UpdatedAt})
+	}
+	if language.active() {
+		matches := h.originalLanguageMatcher(profile, language)
+		filtered := make([]lovedStoredItem, 0, len(items))
+		for _, item := range items {
+			if matches(item.Title.ID, item.Title.MediaType) {
+				filtered = append(filtered, item)
+			}
+		}
+		items = filtered
+	}
+	items, alphabet := queryLovedStoredItems(items, query)
+	total := len(items)
+	for i := range items {
+		items[i].Rank = i + 1
+	}
+	limit, offset := parseLimitOffset(r)
+	if offset >= len(items) {
+		items = []lovedStoredItem{}
+	} else {
+		items = items[offset:]
+		if limit > 0 && limit < len(items) {
+			items = items[:limit]
+		}
+	}
+	// Preserve normal rating editing only for this delivered page, using the
+	// existing bounded, expiring receipt store. A full Random pool does not
+	// extend its 2000-receipt capacity or TTL and never grants playback access.
+	titles := make([]models.Title, len(items))
+	for i := range items {
+		titles[i] = items[i].Title
+	}
+	h.MetadataHandler.TitleRatings.Observe(profile, client, titles)
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(DisplayListResponse{Source: "loved-stored", Items: items, Total: total, AlphabetBuckets: alphabet, OriginalLanguageFilterSupported: true})
 }
 
 func permanentPrequeueWatchlistItems(entries []*playback.PrequeueEntry, userID string) []models.WatchlistItem {

@@ -16,38 +16,8 @@ import (
 // not create a second favorites list or start metadata/provider searches.
 func (h *MetadataHandler) LovedTitles(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Cache-Control", "no-store")
-	profile := strings.TrimSpace(mux.Vars(r)["userID"])
-	client := requestClientID(r)
-	if auth.IsShareLinkRequest(r) {
-		http.Error(w, "a profile session is required", http.StatusForbidden)
-		return
-	}
-	if session, ok := auth.GetSession(r); ok && session.Scope == models.SessionScopeStream {
-		http.Error(w, "a profile session is required", http.StatusForbidden)
-		return
-	}
-	if profile == "" || client == "" || len(client) > 128 {
-		http.Error(w, "profile and client identity are required", http.StatusBadRequest)
-		return
-	}
-	if !profileaccess.CheckResource(w, r, profile, "") {
-		return
-	}
-	if h.UsersService == nil {
-		http.NotFound(w, r)
-		return
-	}
-	user, exists := h.UsersService.Get(profile)
-	if !exists || !auth.IsMaster(r) && (auth.GetAccountID(r) == "" || user.AccountID != auth.GetAccountID(r)) {
-		http.NotFound(w, r)
-		return
-	}
-	if h.TitleRatings == nil {
-		http.Error(w, "personal favorites unavailable", http.StatusServiceUnavailable)
-		return
-	}
-	if user.IsKidsProfile && !h.tasteAvailable(profile) {
-		http.Error(w, "personal favorites unavailable for this profile", http.StatusForbidden)
+	profile, _, ok := h.requireLovedProfile(w, r)
+	if !ok {
 		return
 	}
 	ratings, err := h.TitleRatings.List(r.Context(), profile)
@@ -120,4 +90,44 @@ func (h *MetadataHandler) LovedTitles(w http.ResponseWriter, r *http.Request) {
 	_ = h.encodeMetadata(w, responseRequest, map[string]interface{}{
 		"source": "loved", "items": items, "total": total, "genres": genres, "alphabetBuckets": alphabet,
 	})
+}
+
+// requireLovedProfile is shared by the legacy shelf and the complete stored
+// browse view. It performs only the existing identity/PIN/profile checks.
+func (h *MetadataHandler) requireLovedProfile(w http.ResponseWriter, r *http.Request) (string, string, bool) {
+	profile := strings.TrimSpace(mux.Vars(r)["userID"])
+	client := requestClientID(r)
+	if auth.IsShareLinkRequest(r) {
+		http.Error(w, "a profile session is required", http.StatusForbidden)
+		return "", "", false
+	}
+	if session, ok := auth.GetSession(r); ok && session.Scope == models.SessionScopeStream {
+		http.Error(w, "a profile session is required", http.StatusForbidden)
+		return "", "", false
+	}
+	if profile == "" || client == "" || len(client) > 128 {
+		http.Error(w, "profile and client identity are required", http.StatusBadRequest)
+		return "", "", false
+	}
+	if !profileaccess.CheckResource(w, r, profile, "") {
+		return "", "", false
+	}
+	if h.UsersService == nil {
+		http.NotFound(w, r)
+		return "", "", false
+	}
+	user, exists := h.UsersService.Get(profile)
+	if !exists || !auth.IsMaster(r) && (auth.GetAccountID(r) == "" || user.AccountID != auth.GetAccountID(r)) {
+		http.NotFound(w, r)
+		return "", "", false
+	}
+	if h.TitleRatings == nil {
+		http.Error(w, "personal favorites unavailable", http.StatusServiceUnavailable)
+		return "", "", false
+	}
+	if user.IsKidsProfile && !h.tasteAvailable(profile) {
+		http.Error(w, "personal favorites unavailable for this profile", http.StatusForbidden)
+		return "", "", false
+	}
+	return profile, client, true
 }

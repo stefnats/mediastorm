@@ -511,9 +511,72 @@ func queryHiddenManagementItems(items []models.HiddenItem, q displayListQueryOpt
 	return result, alphabet
 }
 
+func validateLovedStoredQuery(r *http.Request, q displayListQueryOptions) error {
+	if q.WatchStatus != "" && q.WatchStatus != "all" || len(q.Genres) > 0 || q.IncludeUnwatchedCounts || q.IncludeFacets || q.RatingSource != "" {
+		return fmt.Errorf("stored favorites do not support watched, genre, rating, general facets or episode-count requirements")
+	}
+	// Check every occurrence of unsupported requirements rather than silently
+	// ignoring a later active value after a neutral first occurrence.
+	for _, value := range r.URL.Query()["watchStatus"] {
+		if status := normalizeDisplayListWatchStatus(value); status != "" && status != "all" {
+			return fmt.Errorf("stored favorites do not support watched requirements")
+		}
+	}
+	for _, key := range []string{"genres", "ratingSource"} {
+		for _, value := range r.URL.Query()[key] {
+			if strings.TrimSpace(value) != "" {
+				return fmt.Errorf("stored favorites do not support %s", key)
+			}
+		}
+	}
+	for _, key := range []string{"hideWatched", "hideUnreleased", "includeUnwatchedCounts", "includeFacets"} {
+		for _, value := range r.URL.Query()[key] {
+			if value != "" && !strings.EqualFold(strings.TrimSpace(value), "false") {
+				return fmt.Errorf("stored favorites do not support %s", key)
+			}
+		}
+	}
+	switch q.SortBy {
+	case "", "default", "added", "name", "year":
+	default:
+		return fmt.Errorf("stored favorites support only default, added, name and year sorting")
+	}
+	if q.SortDirection != "" && q.SortDirection != "asc" && q.SortDirection != "desc" {
+		return fmt.Errorf("unsupported stored favorites sort direction")
+	}
+	if q.MediaType != "" && q.MediaType != "all" && q.MediaType != "movie" && q.MediaType != "series" {
+		return fmt.Errorf("unsupported stored favorites media type")
+	}
+	return nil
+}
+
+func queryLovedStoredItems(items []lovedStoredItem, q displayListQueryOptions) ([]lovedStoredItem, []string) {
+	// Seed a deterministic default order; stable field sorts retain this tie
+	// order. Copy the slice because adapters may share their stored records.
+	items = append([]lovedStoredItem(nil), items...)
+	sort.SliceStable(items, func(i, j int) bool {
+		if !items[i].UpdatedAt.Equal(items[j].UpdatedAt) {
+			return items[i].UpdatedAt.After(items[j].UpdatedAt)
+		}
+		a, b := items[i].Title, items[j].Title
+		return a.MediaType+":"+a.ID < b.MediaType+":"+b.ID
+	})
+	index := make([]models.WatchlistItem, len(items))
+	for i, item := range items {
+		index[i] = models.WatchlistItem{ID: strconv.Itoa(i), Name: item.Title.Name, MediaType: item.Title.MediaType, Year: item.Title.Year, AddedAt: item.UpdatedAt}
+	}
+	ordered, _, alphabet := queryWatchlistItems(index, q)
+	result := make([]lovedStoredItem, 0, len(ordered))
+	for _, row := range ordered {
+		i, _ := strconv.Atoi(row.ID)
+		result = append(result, items[i])
+	}
+	return result, alphabet
+}
+
 func displayListOriginalLanguageSupportedSource(source string) bool {
 	switch source {
-	case "watchlist", "custom-list", "custom_user_list", "custom-user-list", "permanent-prequeue", "hidden":
+	case "watchlist", "custom-list", "custom_user_list", "custom-user-list", "permanent-prequeue", "hidden", "loved-stored":
 		return true
 	default:
 		return false

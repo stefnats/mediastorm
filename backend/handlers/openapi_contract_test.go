@@ -1132,6 +1132,8 @@ func TestOpenAPIContract(t *testing.T) {
 
 	t.Run("usenet_fallback_status", func(t *testing.T) { sabFallbackOpenAPIContract(t, v) })
 
+	t.Run("loved_stored_language", func(t *testing.T) { lovedStoredLanguageOpenAPIContract(t, v) })
+
 	t.Run("coverage", func(t *testing.T) {
 		covered := v.Covered()
 		var missing []string

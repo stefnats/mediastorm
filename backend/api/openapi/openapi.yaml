@@ -1790,7 +1790,8 @@ paths:
         client. Use `total` for paging and `genres` for filter facets.
         `items` is `WatchlistItem[]` for `watchlist` / `custom-list`,
         `TrendingItem[]` for `permanent-prequeue` and custom-list shelves,
-        `HiddenItem[]` for the complete stored `hidden` management index, and
+        `HiddenItem[]` for the complete stored `hidden` management index,
+        `LovedStoredItem[]` for the complete `loved-stored` browse view, and
         the delegated metadata payload (usually `TrendingItem[]`) for
         discovery sources.
       parameters:
@@ -1799,7 +1800,7 @@ paths:
           description: |
             Up to 32 distinct registered canonical ISO639-3 codes, separated by
             commas. Supported only for stored watchlist, custom-list (including
-            aliases and custom-list shelves), permanent-prequeue, and hidden. Matches
+            aliases and custom-list shelves), permanent-prequeue, hidden, and loved-stored. Matches
             current cached provider original-language facts before paging;
             missing, expired or unbound facts are unknown. No provider lookup
             is started. Invalid or unsupported active queries return 400.
@@ -1821,7 +1822,7 @@ paths:
             `popular-on-server`, `recently-watched`, `trending`, `genre`,
             `decade`, `mdblist`, `stremio`, `tmdb-list`, `trakt-list`,
             `publicmetadb-list`, `simkl-list`, `letterboxd-list`,
-            `personalized`, `loved`, `custom-ai`, `similar`, `collection`.
+            `personalized`, `loved`, `loved-stored`, `custom-ai`, `similar`, `collection`.
             `hidden` reads every saved suppression marker for the owned profile,
             without applying suppression to itself or starting metadata/history,
             artwork, source, prequeue or provider work. Its IDs and hiddenAt stay
@@ -1830,6 +1831,29 @@ paths:
             and pagination. Watched/genre/runtime/rating/count requirements, ratingSource and
             includeFacets=true return
             400. limit=0 yields the complete matching Random pool, not discovery.
+            `loved-stored` is a separate complete saved Love-rating browse view.
+            It requires the existing owned profile, PIN, client and kids checks.
+            Hidden suppression and cached original-language selection run before
+            total, alphabet facets and paging, with no discovery 500-item cap.
+            Stored IDs, names, kinds, years and rating updatedAt are preserved.
+            Items have rank, title (personalRating=love), and updatedAt; rank is
+            the one-based position in the effective sorted collection. Default
+            order is updatedAt descending, then kind and ID. sortBy=added means
+            the saved rating updatedAt, not when the catalogue title was added.
+            Only titleFilter, filterMediaType, alphabet and default/added/name/year
+            sorting are supported. Active watched/hideWatched, hideUnreleased,
+            genre/runtime/rating/count requirements, ratingSource, and general
+            includeFacets=true return 400 before reading preferences or language
+            facts. No history, artwork, provider, source, reminder or prequeue
+            work is started. Missing required readers return 503; missing or
+            expired exact cached language facts are unknown. total is the full
+            effective count; limit=0 returns the full matching Random pool.
+            Only returned titles enter the existing profile/client rating-edit
+            receipt store (2000 entries, 30-minute TTL and existing eviction).
+            A large Random pool therefore does not promise every row remains
+            editable without reloading. No playback, file or age grant follows.
+            originalLanguageFilterSupported=true is returned on this source even
+            without an active language filter. Responses are private, no-store.
             `loved` reads the active profile's existing Love ratings, with current
             profile/PIN/child restrictions, bounded paging and cache-only artwork;
             it does not create another list or start provider searches.
@@ -4823,6 +4847,19 @@ components:
           $ref: '#/components/schemas/ExternalIDs'
         hiddenAt: {type: string, format: date-time}
 
+    LovedStoredItem:
+      type: object
+      required: [rank, title, updatedAt]
+      additionalProperties: false
+      properties:
+        rank: {type: integer, minimum: 1}
+        title:
+          $ref: '#/components/schemas/Title'
+        updatedAt:
+          type: string
+          format: date-time
+          description: Original saved preference update time; never the browse observation time.
+
     DisplayListResponse:
       type: object
       required: [source, items, total]
@@ -4830,7 +4867,7 @@ components:
         originalLanguageFilterSupported:
           type: boolean
           readOnly: true
-          description: True only for normalized stored watchlist, custom-list, permanent-prequeue and hidden sources. On these sources total is the effective filtered count before pagination; sourceTotal or unfilteredTotal must not drive paging.
+          description: True only for normalized stored watchlist, custom-list, permanent-prequeue, hidden and loved-stored sources. On these sources total is the effective filtered count before pagination; sourceTotal or unfilteredTotal must not drive paging.
         source:
           type: string
           description: Canonical source name actually served.
@@ -4844,6 +4881,7 @@ components:
               - $ref: '#/components/schemas/TrendingItem'
               - $ref: '#/components/schemas/SeriesWatchState'
               - $ref: '#/components/schemas/HiddenItem'
+              - $ref: '#/components/schemas/LovedStoredItem'
         total:
           type: integer
           description: Total matching items before paging.
