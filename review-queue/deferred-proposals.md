@@ -633,3 +633,38 @@ packaged registry and five empty private debug prefills were independently check
 No actual Coil/device instrumentation, production activation, real provider access
 or new upstream submission occurred. Original preparation-operation context is
 the next native work package.
+
+## Fork-only recording owner access
+
+The [recording privacy correction](https://github.com/stefnats/mediastorm/tree/fix/recording-owner-access)
+authorizes the repository-stored recording owner before shared Video aliases or
+the recording stream handler can read media, cached metadata or direct file URLs.
+The current full session, actual account role and expiry, stored owner profile
+and current profile PIN policy must agree. Missing guard dependencies, unknown
+owners and conflicting profile selectors fail closed. This fix is wired in Main
+independently of the still-dormant regional VOD port.
+
+Three actual pre-fix regression cases returned another account's synthetic file
+bytes, private cached metadata and direct path. All are denied after the fix;
+owned/current-master GET, HEAD, Range, cache and direct URL controls still pass.
+Repository/session authorization snapshots avoid file projection, provider
+validation and session renewal before the decision.
+
+Scoped recording sharing/party/Jellyfin aliases are deliberately unavailable
+until their issuers prove the recording owner and PIN. Non-recording sharing
+retains existing behavior. The old internal-stream exception survives only through
+a dedicated actual-loopback-peer callback and private context marker; public URLs
+and forwarded headers cannot mint it. This preserves local-process trust, without
+claiming an owner/input-bound capability. Full regional enforcement, long-lived
+revocation, HLS/auxiliary/delegation/WebDAV coverage and protected parent controls
+remain separate prerequisites.
+
+Validation: 3,841 affected cases passed with 36 existing optional skips, 291 repeated
+race cases, 36 OpenAPI cases and both builds passed. Another 60 overlapping root
+race events cover real aliases and the thumbnail fallback URL builder. Existing
+DVR part Range/HEAD/EOF and local FFmpeg/growing-HLS tests remain green. Counts of
+subset and repeated runs overlap. Independent source, frozen manifest, archive,
+raw test and binary checks are clean.
+[Exact fifteen-file delta](https://github.com/stefnats/mediastorm/compare/f4d5bdf035e18c36b6fa11800208193a11f1443a...9846f6bd4bf2dc76615ac2b5b0b47b7201c55c1e).
+
+The combined clean commit passes 9,423 cases with 38 explicit optional skips and has an exact matching clean-commit server binary. All fixtures are synthetic. No production service, real provider, private playlist, physical device or new upstream submission was used.
