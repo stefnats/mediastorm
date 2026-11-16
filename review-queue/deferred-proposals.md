@@ -827,3 +827,52 @@ Profile URI fields confer no session/input/content/age grant. Cast receiver chil
 rewriting and owned server leases remain server responsibilities; native HLS
 keepalive/restart lifetime is a separate following packet. No provider, private
 playlist, production activation or new upstream submission occurred.
+
+## Fork-only stored HLS session boundaries
+
+The [dormant stored-session HTTP port](https://github.com/stefnats/mediastorm/tree/feature/hls-session-boundary)
+checks a pure private runtime snapshot before GetSession/activity updates, cached
+playlist/segment/subtitle reads, status or keepalive. Current session/account,
+explicit profile matching the stored owner, PIN and existing source ACL must
+remain valid through waits and response emission. Active child, unknown, unowned
+and imported contexts cannot acquire readable authority from session metadata.
+A valid request may touch activity before a later denial; late output is withheld,
+without claiming earlier legitimate touches or emitted bytes can be undone.
+
+A separate CleanupOnly operation allows exact owned stop during policy outage or
+a revoked/stopped runtime without granting playback. Snapshot instance and
+generation must still match. Cleanup captures the original physical path before
+callbacks, so an old stop cannot delete a replacement. An actual revokeLiveSession
+regression exposed owned stop403; readable and cleanup validity are now separated.
+The original failing case and superseded pre-fix runs remain preserved.
+
+All three normal creators use private one-shot per-instance directory claims and
+discard only unpublished failed/cancelled claims. Startup failure after normal
+publication detaches that exact instance. Public IDs/URLs are unchanged; private
+directory names and permissions change. Normal IDs were already random: equal-ID
+replacement tests are defensive private runtime scenarios, not observed collisions.
+These claims establish runtime/cleanup identity, never actual input or age proof.
+
+Validation: 4,082 affected cases passed with 36 existing optional skips, 372 repeated
+race events (312 new HLS, 60 existing preparation), 36 OpenAPI cases and both builds.
+The combined clean commit passes 9,615 cases with 38 explicit optional skips,
+isolated PostgreSQL and local browser fixtures, and has an exact matching server
+binary. Independent frozen source/patch/archive/runner/raw-test/binary review and
+root verification are clean. Counts of subsets and repetitions overlap.
+[Exact six-file delta](https://github.com/stefnats/mediastorm/compare/d0920c9520fd78f04eb6108e3ca399a2209b1a29...60e2fc321283d59cecf795f8600277ded2fb5805).
+
+No Main/API route, policy setting, database or public activation is installed.
+Actual HLS source/probe/provider/FFmpeg creation and background seek/restart/
+recovery/companion work still need P3B. Configured unported stable-copy fMP4,
+seek, caption/on-demand extraction and optional Cast/pruning observers remain
+unsupported or skipped; nil-port HTTP behavior stays legacy. Periodic manager
+cleanup and Shutdown remain internal ID calls, without a complete worker/input
+ownership claim. No performance/storage/progress compatibility target is claimed
+for the configured test port.
+
+Headerless receiver child URLs still need server profile/delegation rewriting;
+hlsChildAuthQuery currently contains token/PIN only. The native per-hop selector
+is separate and does not close receiver transport. Parent controls, cold prepare,
+auxiliary/delegated/bridge/WebDAV coverage and actual source proof remain activation
+prerequisites. All data/media/servers were synthetic, without real providers,
+private playlists, devices, production changes or new upstream submissions.
