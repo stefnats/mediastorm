@@ -1686,3 +1686,41 @@ both frozen native builder contracts and local browser fixtures. The same clean
 revision built successfully; source, runner and both query files stayed unchanged.
 No deployment, real provider request, private playlist or new upstream submission
 occurred.
+
+## Fork-only saved SAB handoff web controls
+
+The [Maintenance panel](https://github.com/stefnats/mediastorm/tree/feature/sab-fallback-web)
+shows bounded, paginated saved SAB download observations without a known queue ID.
+Opening, paging and reloading the panel perform no provider request. Refresh status
+explicitly checks one existing handoff; no submit, resubmit, import or play action
+is introduced. Download completion remains distinct from successful import.
+
+Actual current master account and original full-session snapshots are checked
+before and after reads under the existing bounded deadline. The SQLite keyset
+query selects only queue ID and the reserved receipt, with at most 101 rows and
+8KiB returned receipt bytes. It does not impose a total database-work quota.
+The cursor excludes newer queue entries; changes and handoffs attached to older
+entries remain live. Only safe fixed DTO fields reach textContent-based rendering.
+Page generations, cancellation, current row checks and terminal retirement prevent
+late old results from replacing the current view.
+
+All 4,916 affected normal events passed with 43 optional skips; 555 race events
+passed with 3 browser opt-in skips. All 45 API and 7 wire events, separate actual
+browser 1+3 repeated events, and both builds passed. Actual queue SQLite persistence,
+reopen and cancellation are distinct from the 8/24 own-PostgreSQL account/session
+cases. Root's 44/132 authorization cases are overlapping final subsets. Actual
+cookie/Origin routing and 1280/390 browser views verify paging, one explicit HTTP
+status request, zero automatic requests, malformed replies and role loss.
+
+The executed SQLite byte-bound failure has an exact 14-source archive and raw
+report: TEXT length accepted oversized NUL/Unicode scalar projections. BLOB byte
+length fixes this; the service DTO already rejected these values, so no data leak
+is claimed. An earlier broad run with 4,911 passes and a new fixture expectation
+failure is retained separately; the existing metadata protector behaved correctly.
+Independent and root checks verify the 14 sources, 7 production, all pins, archive,
+patch, binary, tools, wire replies, raw reports and safe screenshots.
+
+The clean combined commit c6cc8ab8e4c9c554a823b15c4ad158c59233756c passed 10,447 cases in 106 packages
+with 38 optional skips and built at that same revision. Runner, source and both
+native builder exports remained unchanged. No deployment, real provider/indexer
+request, private playlist or new upstream submission occurred.
