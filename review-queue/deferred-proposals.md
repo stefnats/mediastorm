@@ -1095,3 +1095,47 @@ by tests, not an asserted pre-fix executed RED or device run.
 
 Both packets remain only in the fork. No production activation, real provider,
 private playlist or new upstream submission occurred.
+
+## Fork-only optional automatic provider limits
+
+The [optional provider cap](https://github.com/stefnats/mediastorm/tree/feature/auto-provider-limits)
+defaults off. An explicit authenticated check of a saved global source can supply
+a fresh additional cap for 60 seconds. It never raises a positive manual limit;
+expiry, opt-out, source changes and unknown reports fall back to manual policy.
+Admission does not poll providers. Existing live/DVR streams and upstream reuse
+remain intact. A denial caused by this additional cap cannot authorize takeover.
+The existing host/username reservation bucket is coarse: private source aliases
+may inherit an additional denial, not a new transport-specific capacity grant.
+Provider totals are not used to calculate foreign application occupancy.
+
+All 4,181 component cases passed, with 21 optional skips; 324 race cases and 36
+API contract cases passed. The integrated backend passed 9,833 cases with 38
+optional skips across 106 packages and built from the clean recorded commit.
+Actual embedded settings/browser checks cover save, explicit checks, expiry and
+opt-out with synthetic sessions and zero automatic provider calls. A real UI
+check found the missing visible-field whitelist entry, which is corrected.
+Historical browser socket-length and isolated reload-transport failures remain
+documented; they are not reported as successful original runs.
+[Exact sixteen-file delta](https://github.com/stefnats/mediastorm/compare/a32e978f3439d17f5476bf840c46dddb7c275332...1c245bda189dba35729f8624f10491468bb3aa52).
+
+## Fork-only completed DVR parts queue and local resume
+
+The [native DVR queue](https://github.com/stefnats/mediastorm-androidtv/tree/feature/native-dvr-part-queue)
+plays the selected snapshot of completed, nonempty parts in their original index
+order. Each next controller starts after the previous controller releases, under
+the original playback owner. Cancellation, failure or owner loss retires the
+remaining queue. Local resume records the original part and position separately
+from VOD history. An unchanged part keeps its resume position when another part
+finishes later; the running queue never silently appends that new sibling.
+
+All 1,701 native cases passed, including 37 new cases, and both APKs built.
+Root and independent review verified all 17 files, raw XML, APK hashes, registry
+and five empty prefills. Tests consume the actual Go capture response fixtures
+and execute native parser, queue and cursor helpers. Android Activity/Media3
+handoff, clock, persistent identity and device codec transitions remain source/
+compile-reviewed. There is no device playback, gapless transition, global measured
+timeline, export/remux or cross-device resume claim.
+[Exact seventeen-file delta](https://github.com/stefnats/mediastorm-androidtv/compare/46fbc147e5faa8788eda20bbcc0b71ca07410361...66f2255302ed9b86e63f25d6d41b067b02f41915).
+
+Both packets remain only in the forks. No production activation, real provider
+request, private playlist publication or new upstream submission occurred.
