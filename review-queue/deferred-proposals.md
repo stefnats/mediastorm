@@ -668,3 +668,31 @@ raw test and binary checks are clean.
 [Exact fifteen-file delta](https://github.com/stefnats/mediastorm/compare/f4d5bdf035e18c36b6fa11800208193a11f1443a...9846f6bd4bf2dc76615ac2b5b0b47b7201c55c1e).
 
 The combined clean commit passes 9,423 cases with 38 explicit optional skips and has an exact matching clean-commit server binary. All fixtures are synthetic. No production service, real provider, private playlist, physical device or new upstream submission was used.
+
+## Fork-only original preparation context
+
+The [native preparation correction](https://github.com/stefnats/mediastorm-androidtv/tree/fix/native-preparation-context)
+retains one original playback context through report options, report/retry,
+replacement status, cancellation and undo. Every operation checks the original
+epoch before and after suspension and supplies the explicit profile selector from
+that same epoch. Stale cleanup sends no request with replacement credentials.
+The player also retains its original context when saving audio preferences.
+
+Warm preparation now reads settings with each operation's captured epoch, rather
+than a later default-current context. A retired operation cannot start demand;
+a new operation on the same resolver uses the fresh epoch. Source-health requests
+also carry the captured profile selector through the existing protocol.
+
+Validation: all 1,424 native tests passed, including 14 new cases; both APKs built.
+Independent review and root verification checked all 10 source files, raw XML,
+APK hashes, packaged registry and five empty private debug prefills.
+[Exact ten-file delta](https://github.com/stefnats/mediastorm-androidtv/compare/05dc364b873c4f0d03917b39c8070ff7f0b4757f...949ff0a801cdb14466224d113f9ea699bb169eda).
+
+Epoch-retirement tests simulate transitions with two actual invalidations while
+profileId remains unchanged; they do not activate the Android profile picker.
+Successful local HTTP tests use the production query/context transport helpers.
+Actual ApiClient methods prove stale rejection before Android credential access
+and zero HTTP requests, without claiming a successful full Android ApiClient.send.
+Real gateway/report flows use deferred request fixtures; no physical controller,
+decoder, device, production service, provider or new upstream submission was used.
+No new content or age grant is introduced.
