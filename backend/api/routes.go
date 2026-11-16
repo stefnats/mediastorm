@@ -426,6 +426,8 @@ func Register(
 	protected.HandleFunc("/metadata/progress", handleOptions).Methods(http.MethodOptions)
 
 	protected.HandleFunc("/indexers/search", indexerHandler.Search).Methods(http.MethodGet)
+	protected.HandleFunc("/users/{userID}/source-searches/{snapshotID}/page", indexerHandler.SourceSearchPage).Methods(http.MethodPost)
+	protected.HandleFunc("/users/{userID}/source-searches/{snapshotID}/page", handleOptions).Methods(http.MethodOptions)
 	protected.HandleFunc("/indexers/search", indexerHandler.Options).Methods(http.MethodOptions)
 	protected.HandleFunc("/indexers/source-health", indexerHandler.SourceHealth).Methods(http.MethodGet)
 	protected.HandleFunc("/indexers/source-health", indexerHandler.Options).Methods(http.MethodOptions)

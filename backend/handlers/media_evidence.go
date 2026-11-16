@@ -1,6 +1,8 @@
 package handlers
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"net/http"
 	"time"
@@ -41,7 +43,30 @@ func preparationEvidenceMarker(entry *playback.PrequeueEntry) string {
 	return string(data)
 }
 
-func (h *PrequeueHandler) recordPreparationEvidence(id, clientID string, probe *VideoFullResult) {
+func (h *PrequeueHandler) preparationConfigurationKey() string {
+	if h.configManager == nil {
+		return ""
+	}
+	value, err := h.configManager.Load()
+	if err != nil {
+		return ""
+	}
+	data, err := json.Marshal(value)
+	if err != nil {
+		return ""
+	}
+	sum := sha256.Sum256(data)
+	return hex.EncodeToString(sum[:])
+}
+
+func (h *PrequeueHandler) recordPreparationEvidence(id, clientID string, probe *VideoFullResult, expectedConfiguration ...string) {
+	configurationKey := ""
+	if len(expectedConfiguration) == 1 {
+		configurationKey = expectedConfiguration[0]
+		if configurationKey == "" || configurationKey != h.preparationConfigurationKey() {
+			return
+		}
+	}
 	if probe == nil || probe.MetadataEvidence == nil {
 		return
 	}
@@ -82,6 +107,7 @@ func (h *PrequeueHandler) recordPreparationEvidence(id, clientID string, probe *
 		current.MediaEvidence = value
 		current.MediaEvidenceReportRevision = revision
 		current.MediaEvidenceClientID = clientID
+		current.MediaEvidenceConfigurationKey = configurationKey
 	})
 }
 

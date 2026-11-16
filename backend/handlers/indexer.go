@@ -17,6 +17,7 @@ import (
 	"novastream/services/debrid"
 	"novastream/services/indexer"
 	"novastream/services/mediaevidence"
+	"novastream/services/sourcefilters"
 	"novastream/services/sourcehealth"
 	"novastream/services/trackselect"
 	"novastream/utils/filter"
@@ -31,13 +32,16 @@ type indexerService interface {
 var _ indexerService = (*indexer.Service)(nil)
 
 type IndexerHandler struct {
-	Service          indexerService
-	MetadataSvc      SeriesDetailsProvider
-	MovieMetadataSvc MovieDetailsProvider
-	DemoMode         bool
-	BadStreams       *badstreams.Service
-	TrackPreferences *trackselect.Resolver
-	SourceHealthSvc  *sourcehealth.Service
+	SourceFilters        *sourcefilters.Store
+	SourceFilterProfile  func(string) (models.User, bool)
+	SourceFilterPrepared *PrequeueHandler
+	Service              indexerService
+	MetadataSvc          SeriesDetailsProvider
+	MovieMetadataSvc     MovieDetailsProvider
+	DemoMode             bool
+	BadStreams           *badstreams.Service
+	TrackPreferences     *trackselect.Resolver
+	SourceHealthSvc      *sourcehealth.Service
 }
 
 func NewIndexerHandler(s indexerService, demoMode bool) *IndexerHandler {
@@ -65,6 +69,10 @@ func (h *IndexerHandler) SetSourceHealthService(svc *sourcehealth.Service) {
 }
 
 func (h *IndexerHandler) Search(w http.ResponseWriter, r *http.Request) {
+	sourceFilterRequest, proceed := h.beginSourceFilters(w, r)
+	if !proceed {
+		return
+	}
 	query := strings.TrimSpace(r.URL.Query().Get("q"))
 	categories := r.URL.Query()["cat"]
 	imdbID := strings.TrimSpace(r.URL.Query().Get("imdbId"))
@@ -196,6 +204,11 @@ func (h *IndexerHandler) Search(w http.ResponseWriter, r *http.Request) {
 
 	// Check if caller wants filtered results included
 	includeFiltered := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("includeFiltered"))) == "true"
+
+	if sourceFilterRequest != nil {
+		h.searchSourceFilters(w, r, opts, sourceFilterRequest, includeFiltered)
+		return
+	}
 
 	if includeFiltered {
 		opts.IncludeFiltered = true

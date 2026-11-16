@@ -1297,6 +1297,7 @@ type SearchOptions struct {
 	EpisodeAirYear           int                               // Year the target episode aired (for year filter tolerance)
 	SeasonPremiereYear       int                               // Premiere year of the requested season only.
 	EpisodeReleased          bool                              // True only when metadata confirms the target episode has aired
+	RetainForSourceFilters   bool                              // Internal: retain ranked rows before presentation caps; no additional searches
 	IncludeFiltered          bool                              // When true, return filtered results alongside passed results
 	IncludeScoreBreakdown    bool                              // When true, attach per-criterion scoring details (admin search tester)
 	SkipFilter               bool                              // When true, skip filtering entirely (used by SearchTest)
@@ -1850,6 +1851,9 @@ func (s *Service) Search(ctx context.Context, opts SearchOptions) ([]models.NZBR
 // SearchWithScoring runs Search and wraps results as ScoredNZBResult with filter status.
 // When opts.IncludeFiltered is true, filtered results are appended after passed results.
 func (s *Service) SearchWithScoring(ctx context.Context, opts SearchOptions) ([]models.ScoredNZBResult, error) {
+	if opts.RetainForSourceFilters {
+		opts.MaxResults = 0
+	}
 	finishPriority := s.beginForegroundSearch(opts)
 	defer finishPriority()
 	if s.demo != nil {
@@ -2008,7 +2012,7 @@ func (s *Service) SearchWithScoring(ctx context.Context, opts SearchOptions) ([]
 
 		// Apply per-resolution limit to passed results (same as Search path)
 		maxPerRes := models.IntVal(filterOverrides.MaxResultsPerResolution, 0)
-		if maxPerRes > 0 {
+		if maxPerRes > 0 && !opts.RetainForSourceFilters {
 			resolutionCounts := map[int]int{}
 			var limited []models.ScoredNZBResult
 			for _, r := range passed {

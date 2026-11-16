@@ -13,6 +13,7 @@ import (
 
 	"novastream/models"
 	"novastream/services/debrid"
+	"novastream/services/sourcefilters"
 	"novastream/services/streaming"
 )
 
@@ -29,6 +30,7 @@ type debridHealthService interface {
 
 // DebridHandler proxies content from configured debrid providers to the frontend.
 type DebridHandler struct {
+	SourceFilters *IndexerHandler
 	service       debridProxyService
 	healthService debridHealthService
 }
@@ -140,6 +142,8 @@ func (h *DebridHandler) CheckCached(w http.ResponseWriter, r *http.Request) {
 	var request struct {
 		Result         models.NZBResult `json:"result"`
 		ProfileID      string           `json:"profileId,omitempty"`
+		SnapshotID     string           `json:"snapshotId,omitempty"`
+		SourceIndex    *int             `json:"sourceIndex,omitempty"`
 		QuickOnly      bool             `json:"quickOnly"`
 		VerifyUncached bool             `json:"verifyUncached"`
 	}
@@ -150,6 +154,22 @@ func (h *DebridHandler) CheckCached(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	var receipt *sourceFilterProbeReceipt
+	if request.SnapshotID != "" || request.SourceIndex != nil {
+		if h.SourceFilters == nil {
+			sourceFilterError(w, sourcefilters.ErrUnavailable)
+			return
+		}
+		var ok bool
+		request.Result, receipt, ok = h.SourceFilters.resolveSourceFilterProbe(w, r, request.SnapshotID, request.SourceIndex, request.ProfileID)
+		if !ok {
+			return
+		}
+		if request.Result.ServiceType != models.ServiceTypeDebrid {
+			sourceFilterError(w, sourcefilters.ErrUnavailable)
+			return
+		}
+	}
 	var (
 		res *debrid.DebridHealthCheck
 		err error
@@ -172,6 +192,16 @@ func (h *DebridHandler) CheckCached(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if receipt != nil {
+		var value *models.MediaEvidence
+		if res != nil {
+			value = res.MediaEvidence
+		}
+		if err := h.SourceFilters.attachSourceFilterProbe(receipt, value); err != nil {
+			sourceFilterError(w, err)
+			return
+		}
+	}
 	w.Header().Set("Content-Type", "application/json")
 	if res != nil {
 		copy := *res

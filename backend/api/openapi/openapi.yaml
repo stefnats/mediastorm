@@ -1745,7 +1745,23 @@ paths:
         `IndexerSearchEnvelope`. With `includeSourceHealth=true` each result
         carries `sourceHealth`; poll `/api/indexers/source-health` with the
         token of `pending` results.
+        With sourceFiltersVersion=1 an owned full-session profile receives a
+        bounded retained snapshot before presentation caps. Provider fetch budgets
+        remain unchanged. Only the normal initial visible health budget is used.
+        A target is request correlation, never verified catalogue eligibility.
       parameters:
+        - name: sourceFiltersVersion
+          in: query
+          schema: {type: integer, enum: [1]}
+        - name: episodeId
+          in: query
+          schema: {type: string, maxLength: 1024}
+        - name: seasonNumber
+          in: query
+          schema: {type: integer, minimum: 0, maximum: 10000}
+        - name: episodeNumber
+          in: query
+          schema: {type: integer, minimum: 1, maximum: 100000}
         - name: q
           in: query
           description: Search text (title, plus `SxxEyy` for episodes).
@@ -1833,12 +1849,65 @@ paths:
                     items:
                       $ref: '#/components/schemas/IndexerResult'
                   - $ref: '#/components/schemas/IndexerSearchEnvelope'
+                  - $ref: '#/components/schemas/SourceFilterPage'
+        '400': {$ref: '#/components/responses/Error'}
+        '404': {$ref: '#/components/responses/Error'}
+        '409': {$ref: '#/components/responses/Error'}
+        '503': {$ref: '#/components/responses/Error'}
         '403':
           $ref: '#/components/responses/Forbidden'
         '502':
           $ref: '#/components/responses/SearchError'
         '504':
           $ref: '#/components/responses/SearchError'
+
+  /api/users/{userId}/source-searches/{snapshotId}/page:
+    post:
+      tags: [sources]
+      operationId: sourceSearchPage
+      summary: Filter or page an existing owned source snapshot without I/O
+      description: |
+        Cache-only. No provider, metadata, preparation, probe or health call is
+        initiated. Rows preserve original result data and immutable sourceIndex.
+        total counts displayed matches plus included unknowns across the retained
+        pool; matchedTotal and unknownTotal count both categories independently.
+        No predicates yields unfiltered rows with both evidence counts zero.
+        Views freeze order, counts and proof and expire at the earliest proof
+        deadline, including proof that excluded a row. A fresh explicit probe
+        invalidates old views. Apply without cursor creates another cache-only
+        view. Snapshot/context expiry requires an explicit ordinary reload.
+      parameters:
+        - name: userId
+          in: path
+          required: true
+          schema: {type: string}
+        - name: snapshotId
+          in: path
+          required: true
+          schema: {type: string, minLength: 1, maxLength: 1024}
+        - $ref: '#/components/parameters/ClientID'
+        - $ref: '#/components/parameters/ProfileUnlock'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/SourceFilterPageRequest'}
+      responses:
+        '200':
+          description: One immutable view page, never a playback or catalogue grant
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/SourceFilterPage'}
+        '400': {$ref: '#/components/responses/Error'}
+        '403': {$ref: '#/components/responses/Error'}
+        '404': {$ref: '#/components/responses/Error'}
+        '409':
+          description: source_view_expired/source_view_changed permit cache-only Apply; source_snapshot_context_changed requires explicit reload
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Error'}
+        '410': {$ref: '#/components/responses/Error'}
+        '503': {$ref: '#/components/responses/Error'}
 
   /api/usenet/health:
     post:
@@ -1858,6 +1927,11 @@ paths:
             application/json:
               schema: {$ref: '#/components/schemas/ExplicitHealthResponse'}
         '400': {$ref: '#/components/responses/Error'}
+        '403': {$ref: '#/components/responses/Error'}
+        '404': {$ref: '#/components/responses/Error'}
+        '409': {$ref: '#/components/responses/Error'}
+        '410': {$ref: '#/components/responses/Error'}
+        '503': {$ref: '#/components/responses/Error'}
         '502': {$ref: '#/components/responses/Error'}
 
   /api/debrid/cached:
@@ -1878,6 +1952,11 @@ paths:
             application/json:
               schema: {$ref: '#/components/schemas/ExplicitHealthResponse'}
         '400': {$ref: '#/components/responses/Error'}
+        '403': {$ref: '#/components/responses/Error'}
+        '404': {$ref: '#/components/responses/Error'}
+        '409': {$ref: '#/components/responses/Error'}
+        '410': {$ref: '#/components/responses/Error'}
+        '503': {$ref: '#/components/responses/Error'}
         '502': {$ref: '#/components/responses/Error'}
 
   /api/indexers/source-health:
@@ -5063,6 +5142,7 @@ components:
 
     ExplicitHealthRequest:
       type: object
+      description: Scoped snapshotId/sourceIndex replaces result with the immutable server row and rechecks current context before and after existing explicit work. Client evidence is never attached to a row. Legacy unscoped requests are unchanged.
       required: [result]
       properties:
         result:
@@ -5070,6 +5150,8 @@ components:
           additionalProperties: true
           description: Existing NZBResult input. Any caller-supplied evidence fields are ignored and never trusted.
         profileId: {type: string}
+        snapshotId: {type: string, minLength: 1, maxLength: 1024}
+        sourceIndex: {type: integer, minimum: 0, maximum: 511}
         probeForTracks: {type: boolean}
         quickOnly: {type: boolean}
         verifyUncached: {type: boolean}
@@ -5355,3 +5437,105 @@ components:
       properties:
         client:
           $ref: '#/components/schemas/Client'
+
+    SourceFilterCriteria:
+      type: object
+      additionalProperties: false
+      required: [basis, unknown]
+      properties:
+        basis: {type: string, enum: [candidate, probed]}
+        unknown: {type: string, enum: [include, exclude]}
+        audioLanguage: {type: string, pattern: '^[a-z]{3}$'}
+        subtitleLanguage: {type: string, pattern: '^[a-z]{3}$'}
+        claimedResolutionAtLeast: {type: string, pattern: '^[1-8][0-9]{2,3}p$'}
+        heightAtLeast: {type: integer, minimum: 144, maximum: 8640}
+        videoCodec: {type: string, pattern: '^[a-z0-9_]{1,32}$'}
+        dynamicRange: {$ref: '#/components/schemas/MediaHDRFact'}
+        audioCodec: {type: string, pattern: '^[a-z0-9_]{1,32}$'}
+        audioDescription: {type: boolean, enum: [true]}
+      oneOf:
+        - properties:
+            basis: {enum: [candidate]}
+          not:
+            anyOf:
+              - required: [heightAtLeast]
+              - required: [audioCodec]
+              - required: [audioDescription]
+        - properties:
+            basis: {enum: [probed]}
+          not:
+            required: [claimedResolutionAtLeast]
+      description: |
+        Languages are canonical registered ISO 639-3 primary tags, never accent
+        or original-language claims. Candidate language lists are incomplete;
+        missing languages stay unknown. File audio predicates match one stream.
+        Negative inventory conclusions require complete known inventories.
+
+    SourceFilterTargetEpisode:
+      type: object
+      additionalProperties: false
+      required: [episodeId, seasonNumber, episodeNumber]
+      properties:
+        episodeId: {type: string, minLength: 1, maxLength: 1024}
+        seasonNumber: {type: integer, minimum: 0, maximum: 10000}
+        episodeNumber: {type: integer, minimum: 1, maximum: 100000}
+        numbering: {$ref: '#/components/schemas/EpisodeNumbering'}
+
+    SourceFilterTarget:
+      type: object
+      additionalProperties: false
+      required: [titleId, mediaType]
+      properties:
+        titleId: {type: string, minLength: 1, maxLength: 1024}
+        mediaType: {type: string, enum: [movie, series]}
+        episode: {$ref: '#/components/schemas/SourceFilterTargetEpisode'}
+      description: Request correlation only. Unbound series file metadata is unknown for episode filtering.
+
+    SourceFilterPageRequest:
+      type: object
+      additionalProperties: false
+      required: [version, filters, limit]
+      properties:
+        version: {type: integer, enum: [1]}
+        filters: {$ref: '#/components/schemas/SourceFilterCriteria'}
+        cursor: {type: string, minLength: 1, maxLength: 1024}
+        limit: {type: integer, minimum: 1, maximum: 100}
+
+    SourceFilterRow:
+      type: object
+      additionalProperties: false
+      required: [sourceIndex, candidateVersion, result, verdict]
+      properties:
+        sourceIndex: {type: integer, minimum: 0, maximum: 511}
+        candidateVersion: {type: string, pattern: '^candidate_v1_[0-9a-f]{64}$'}
+        result: {$ref: '#/components/schemas/IndexerResult'}
+        verdict: {type: string, enum: [unfiltered, match, unknown]}
+        mediaEvidence: {$ref: '#/components/schemas/MediaEvidence'}
+
+    SourceFilterPage:
+      type: object
+      additionalProperties: false
+      required: [sourceFiltersVersion, snapshotId, viewId, expiresAt, target, filters, rows, total, matchedTotal, unknownTotal, coverage]
+      properties:
+        sourceFiltersVersion: {type: integer, enum: [1]}
+        snapshotId: {type: string, minLength: 1, maxLength: 1024}
+        viewId: {type: string, minLength: 1, maxLength: 1024}
+        expiresAt: {type: string, format: date-time}
+        target: {$ref: '#/components/schemas/SourceFilterTarget'}
+        filters: {$ref: '#/components/schemas/SourceFilterCriteria'}
+        rows:
+          type: array
+          maxItems: 100
+          items: {$ref: '#/components/schemas/SourceFilterRow'}
+        total: {type: integer, minimum: 0, maximum: 512}
+        matchedTotal: {type: integer, minimum: 0, maximum: 512}
+        unknownTotal: {type: integer, minimum: 0, maximum: 512}
+        nextCursor: {type: string, minLength: 1, maxLength: 1024}
+        sourceHealthToken: {type: string, maxLength: 1024}
+        coverage:
+          type: object
+          additionalProperties: false
+          required: [retainedCandidates, truncated]
+          properties:
+            retainedCandidates: {type: integer, minimum: 0, maximum: 512}
+            truncated: {type: boolean}

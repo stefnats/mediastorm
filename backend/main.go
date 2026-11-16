@@ -1017,6 +1017,9 @@ func main() {
 		playbackHandler.SetVideoProber(videoHandler)
 		playbackHandler.SetTrackPreferenceResolver(prequeueHandler.TrackPreferenceResolver())
 		indexerHandler.TrackPreferences = prequeueHandler.TrackPreferenceResolver()
+		indexerHandler.ConfigureSourceFilters(userService.Get, prequeueHandler)
+		usenetHandler.SourceFilters = indexerHandler
+		debridHandler.SourceFilters = indexerHandler
 
 		// Wire up subtitle pre-extraction for direct streaming (SDR content)
 		if subtitleMgr := videoHandler.GetSubtitleExtractManager(); subtitleMgr != nil {

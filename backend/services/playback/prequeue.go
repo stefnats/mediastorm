@@ -189,14 +189,15 @@ type PrequeueStatusResponse struct {
 
 // PrequeueEntry is the internal state of a prequeue item
 type PrequeueEntry struct {
-	MediaEvidence               *models.MediaEvidence `json:"mediaEvidence,omitempty"`
-	MediaEvidenceReportRevision string                `json:"mediaEvidenceReportRevision,omitempty"`
-	MediaEvidenceClientID       string                `json:"mediaEvidenceClientId,omitempty"`
-	AutomaticLibrarySelection   bool                  `json:"automaticLibrarySelection,omitempty"`
-	LibraryItemID               string                `json:"libraryItemId,omitempty"`
-	LibrarySourceType           string                `json:"librarySourceType,omitempty"`
-	LibraryIdentity             string                `json:"libraryIdentity,omitempty"`
-	LibraryEpisodeVerified      bool                  `json:"libraryEpisodeVerified,omitempty"`
+	MediaEvidence                 *models.MediaEvidence `json:"mediaEvidence,omitempty"`
+	MediaEvidenceReportRevision   string                `json:"mediaEvidenceReportRevision,omitempty"`
+	MediaEvidenceConfigurationKey string                `json:"-"`
+	MediaEvidenceClientID         string                `json:"mediaEvidenceClientId,omitempty"`
+	AutomaticLibrarySelection     bool                  `json:"automaticLibrarySelection,omitempty"`
+	LibraryItemID                 string                `json:"libraryItemId,omitempty"`
+	LibrarySourceType             string                `json:"librarySourceType,omitempty"`
+	LibraryIdentity               string                `json:"libraryIdentity,omitempty"`
+	LibraryEpisodeVerified        bool                  `json:"libraryEpisodeVerified,omitempty"`
 
 	ID               string                   `json:"id"`
 	TitleID          string                   `json:"titleId"`

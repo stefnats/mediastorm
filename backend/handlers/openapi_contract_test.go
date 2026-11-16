@@ -1122,6 +1122,7 @@ func TestOpenAPIContract(t *testing.T) {
 	t.Run("title_reminders", func(t *testing.T) { reminderOpenAPIContract(t, v) })
 
 	t.Run("media_evidence_health", func(t *testing.T) { mediaEvidenceHealthContract(t, v) })
+	t.Run("source_filters", func(t *testing.T) { sourceFilterWireContract(t, v) })
 
 	t.Run("station_favorites", func(t *testing.T) { stationFavoritesOpenAPIContract(t, v) })
 

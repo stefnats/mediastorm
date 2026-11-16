@@ -20,6 +20,7 @@ import (
 	"novastream/internal/mediaresolve"
 	"novastream/models"
 	"novastream/services/mediaevidence"
+	"novastream/services/sourcefilters"
 	usenetsvc "novastream/services/usenet"
 )
 
@@ -461,10 +462,11 @@ func nzbFileNameFromResponse(resp *http.Response, downloadURL string) string {
 
 // UsenetHandler exposes endpoints for NNTP-backed NZB health checks.
 type UsenetHandler struct {
-	Service      usenetHealthService
-	trackProber  *usenetTrackProber
-	healthMemory usenetHealthRecorder
-	userAgentFor func(indexer string) string
+	SourceFilters *IndexerHandler
+	Service       usenetHealthService
+	trackProber   *usenetTrackProber
+	healthMemory  usenetHealthRecorder
+	userAgentFor  func(indexer string) string
 }
 
 // usenetHealthRecorder remembers explicit health check outcomes so search
@@ -533,12 +535,30 @@ func (h *UsenetHandler) CheckHealth(w http.ResponseWriter, r *http.Request) {
 		Result         models.NZBResult `json:"result"`
 		ProbeForTracks bool             `json:"probeForTracks,omitempty"`
 		ProfileID      string           `json:"profileId,omitempty"`
+		SnapshotID     string           `json:"snapshotId,omitempty"`
+		SourceIndex    *int             `json:"sourceIndex,omitempty"`
 	}
 
 	dec := json.NewDecoder(r.Body)
 	if err := dec.Decode(&request); err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
+	}
+	var receipt *sourceFilterProbeReceipt
+	if request.SnapshotID != "" || request.SourceIndex != nil {
+		if h.SourceFilters == nil {
+			sourceFilterError(w, sourcefilters.ErrUnavailable)
+			return
+		}
+		var ok bool
+		request.Result, receipt, ok = h.SourceFilters.resolveSourceFilterProbe(w, r, request.SnapshotID, request.SourceIndex, request.ProfileID)
+		if !ok {
+			return
+		}
+		if request.Result.ServiceType != models.ServiceTypeUsenet {
+			sourceFilterError(w, sourcefilters.ErrUnavailable)
+			return
+		}
 	}
 	if request.ProfileID != "" {
 		if request.Result.Attributes == nil {
@@ -579,6 +599,16 @@ func (h *UsenetHandler) CheckHealth(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	if receipt != nil {
+		var value *models.MediaEvidence
+		if res != nil {
+			value = res.MediaEvidence
+		}
+		if err := h.SourceFilters.attachSourceFilterProbe(receipt, value); err != nil {
+			sourceFilterError(w, err)
+			return
+		}
+	}
 	w.Header().Set("Content-Type", "application/json")
 	if res != nil {
 		res.MediaEvidence = models.CurrentMediaEvidence(res.MediaEvidence, time.Now())

@@ -1409,6 +1409,7 @@ func (h *PrequeueHandler) AdoptMigration(w http.ResponseWriter, r *http.Request)
 		e.MediaEvidence = nil
 		e.MediaEvidenceReportRevision = ""
 		e.MediaEvidenceClientID = ""
+		e.MediaEvidenceConfigurationKey = ""
 
 		if req.Result.Title != "" || req.Result.GUID != "" {
 			resultCopy := req.Result
@@ -1693,6 +1694,7 @@ func resolveFirstReadySourceForWorker(configured bool, mode prequeueWorkerMode) 
 // honor Resolve First Ready Source; scheduled pre-warm workers always wait for
 // the complete globally ranked candidate set before resolving.
 func (h *PrequeueHandler) runPrequeueWorker(prequeueID, titleID, titleName, imdbID, mediaType string, year int, userID, clientID string, throughput *models.AdaptiveThroughputContext, targetEpisode *models.EpisodeReference, startOffset float64, skipHLS bool, workerMode prequeueWorkerMode, localScopes ...prequeueLocalScope) {
+	evidenceConfigurationKey := h.preparationConfigurationKey()
 	if h.sourceAvailability != nil {
 		observe := h.sourceAvailability.ObservePlaybackStart(userID, clientID, titleID, mediaType)
 		defer func() {
@@ -2188,7 +2190,7 @@ func (h *PrequeueHandler) runPrequeueWorker(prequeueID, titleID, titleName, imdb
 	selectedAudioTrack := -1
 	selectedSubtitleTrack := -1
 	probeStart := time.Now()
-	h.recordPreparationEvidence(prequeueID, clientID, cachedProbeResult)
+	h.recordPreparationEvidence(prequeueID, clientID, cachedProbeResult, evidenceConfigurationKey)
 
 	if (h.metadataProber != nil && h.userSettingsSvc != nil) || (len(localScopes) == 1 && localScopes[0].automaticLibrarySelection && cachedProbeResult != nil) {
 		h.updatePrequeueProgress(prequeueID, "selecting_tracks", "", 0, 0)
@@ -2236,7 +2238,7 @@ func (h *PrequeueHandler) runPrequeueWorker(prequeueID, titleID, titleName, imdb
 			if err != nil {
 				log.Printf("[prequeue] Unified probe failed (non-fatal): %v", err)
 			} else if fullResult != nil {
-				h.recordPreparationEvidence(prequeueID, clientID, fullResult)
+				h.recordPreparationEvidence(prequeueID, clientID, fullResult, evidenceConfigurationKey)
 				audioStreams = fullResult.AudioStreams
 				subtitleStreams = fullResult.SubtitleStreams
 				hasDV = fullResult.HasDolbyVision
