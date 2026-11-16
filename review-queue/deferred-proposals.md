@@ -475,3 +475,55 @@ safety acceptance. Physical device rendering/focus/touch remains open.
 This inherits fork prerequisites and needs extraction before upstream review.
 No provider/private playlist, installation, policy activation or upstream PR/comment.
 Offline server/account/profile ownership is the next separate native packet.
+
+## Fork-only VOD adapters and offline ownership
+
+The [private backend adapter packet](https://github.com/stefnats/mediastorm/tree/feature/kids-vod-adapters)
+adds pure snapshots, current account/session/profile readers, a mandatory PIN
+bridge and bounded already-open reader/loopback seams. The optional observer
+defaults to nil and observes only an existing verified adult Plex/Jellyfin winner,
+its original server catalogue anchor and matched probe. No additional provider
+or metadata lookup occurs; current child remote-library denial remains intact.
+
+Private receipts bind process, attempt, profile/PIN, client, settings, reports,
+original expiry and current library routing/item/part/episode. PIN callbacks
+recheck authority before and after core resolution. Readers check before and
+after reads and close blocked input on revocation. Loopback tokens bind actual
+TCP peer, exact private input, method, lease and expiry. No trusted opener,
+Main registration, public route, persistence or enable switch is installed.
+This remains internal groundwork, not complete VOD enforcement or family safety
+acceptance. Caller paths, hashes, imported flags and adult receipts cannot
+establish a child's source binding.
+
+Validation: 3,703 affected cases with 36 optional skips, 441 repeated race cases,
+40 API cases and both builds passed. Repeated/subset cases overlap the ordinary
+suite. The combined clean commit passes 9,230 cases with 38 explicit opt-in skips,
+synthetic PostgreSQL/local browser fixtures and a matching clean-commit binary.
+[Exact backend delta](https://github.com/stefnats/mediastorm/compare/918510883de83ff1de2827887c941a34654ee24d...753897d601c5e22d6e579495a2325d377ec70264).
+
+The separate [native offline ownership packet](https://github.com/stefnats/mediastorm-androidtv/tree/feature/native-offline-ownership)
+binds new files and progress to the original logical server, account and profile.
+Queue, HTTP, files, notifications, player entry and deferred actions check this
+context. Old writers are joined before replacement or deletion. Ambiguous and
+unknown/future records are preserved without adoption; legacy and foreign files
+and progress remain unavailable and are not deleted. Only an authenticated raw
+profile response with explicit boolean false supplies transient adult-profile
+provenance. Verified home/away routing preserves logical identity; account/session
+replacement invalidates the proof.
+
+Material limitation: after a cold launch without current raw adult-profile
+verification, even owned adult downloads are unavailable until the original
+server/account/profile context is verified again. Children without a current
+verified grant cannot play offline. No persistent offline grant or continuous
+remote authorization is implemented. All 1,337 native cases passed, including
+39 new cases and real deferred reader/file/loopback tests. Both APKs built with
+five private debug prefills empty. The existing Go profile handler's 623 response
+bytes are consumed unchanged in native raw-parser tests; synthetic service and
+server-injected context do not represent a network authentication trace.
+Independent review and source/APK/fixture hashes are clean. Physical-device
+rendering, focus, touch and playback acceptance remain open.
+[Exact native delta](https://github.com/stefnats/mediastorm-androidtv/compare/472ca44fead2f65d065abaf24ec9cdf3a2ce436d...22e1cbe574f3636793ed3bab9c15607992ebbb97).
+
+Both branches inherit fork prerequisites and need isolated extraction and scope
+agreement before upstream submission. No new upstream PR, service activation,
+deployment, private playlist use or real provider/indexer request occurred.
