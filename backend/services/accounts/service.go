@@ -270,6 +270,15 @@ func (s *Service) ListExpired() []models.Account {
 
 // Authenticate verifies the username and password, returning the account if valid.
 func (s *Service) Authenticate(username, password string) (models.Account, error) {
+	return s.AuthenticateContext(context.Background(), username, password)
+}
+
+// AuthenticateContext verifies credentials under the caller's request lifetime.
+// Bcrypt itself cannot be interrupted; a cancelled comparison cannot succeed.
+func (s *Service) AuthenticateContext(ctx context.Context, username, password string) (models.Account, error) {
+	if err := ctx.Err(); err != nil {
+		return models.Account{}, err
+	}
 	username = strings.TrimSpace(username)
 	password = strings.TrimSpace(password)
 
@@ -277,7 +286,7 @@ func (s *Service) Authenticate(username, password string) (models.Account, error
 		return models.Account{}, ErrInvalidCredentials
 	}
 
-	account, found, err := s.accountForAuthentication(username)
+	account, found, err := s.accountForAuthentication(ctx, username)
 	if err != nil {
 		return models.Account{}, fmt.Errorf("load account for authentication: %w", err)
 	}
@@ -285,11 +294,18 @@ func (s *Service) Authenticate(username, password string) (models.Account, error
 	if !found {
 		// Use bcrypt comparison anyway to prevent timing attacks
 		_ = bcrypt.CompareHashAndPassword([]byte("$2a$10$dummy"), []byte(password))
+		if err := ctx.Err(); err != nil {
+			return models.Account{}, err
+		}
 		return models.Account{}, ErrInvalidCredentials
 	}
 
 	// Verify password
-	if err := bcrypt.CompareHashAndPassword([]byte(account.PasswordHash), []byte(password)); err != nil {
+	comparison := bcrypt.CompareHashAndPassword([]byte(account.PasswordHash), []byte(password))
+	if err := ctx.Err(); err != nil {
+		return models.Account{}, err
+	}
+	if comparison != nil {
 		return models.Account{}, ErrInvalidCredentials
 	}
 
@@ -304,15 +320,21 @@ func (s *Service) Authenticate(username, password string) (models.Account, error
 // accountForAuthentication treats PostgreSQL as authoritative when configured.
 // Account recovery runs in a separate process, so the long-running server's
 // startup cache may otherwise retain the previous password hash indefinitely.
-func (s *Service) accountForAuthentication(username string) (models.Account, bool, error) {
+func (s *Service) accountForAuthentication(ctx context.Context, username string) (models.Account, bool, error) {
 	if s.accountReader != nil {
-		account, err := s.accountReader.GetByUsername(context.Background(), username)
+		account, err := s.accountReader.GetByUsername(ctx, username)
+		if ctx.Err() != nil {
+			return models.Account{}, false, ctx.Err()
+		}
 		if err != nil {
 			return models.Account{}, false, err
 		}
 
 		s.mu.Lock()
 		defer s.mu.Unlock()
+		if err := ctx.Err(); err != nil {
+			return models.Account{}, false, err
+		}
 		if account == nil {
 			// Remove a stale cached account if it was renamed or deleted externally.
 			for id, cached := range s.accounts {
@@ -328,6 +350,9 @@ func (s *Service) accountForAuthentication(username string) (models.Account, boo
 
 	s.mu.RLock()
 	defer s.mu.RUnlock()
+	if err := ctx.Err(); err != nil {
+		return models.Account{}, false, err
+	}
 	for _, account := range s.accounts {
 		if strings.EqualFold(account.Username, username) {
 			return account, true, nil
