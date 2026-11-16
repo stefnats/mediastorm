@@ -1593,3 +1593,39 @@ The clean combined commit d5f45990fc4e96a1405c35f72932c7c71196f450 passed 10,307
 and the frozen native request contract, then built at the same revision.
 The separate native consumer remains pending. No production activation, private
 playlist, real provider request or new upstream submission occurred.
+
+## Fork-only original Watched compound mutations
+
+The [Watched mutation correction](https://github.com/stefnats/mediastorm-androidtv/tree/fix/native-watched-context)
+freezes original title, episode/card instance, list snapshot, desired state and
+model generation before deferred work or confirmation. Existing original-owner
+receipts are reused. One-shot bulk tickets cannot be rebound to replacement
+models. Actual phone and TV producers carry the original owner through menus,
+details, episode actions and bulk sheets.
+
+A single consumed per-owner compound adapter serializes history updates and the
+required movie progress-clear followup. Retirement between stages starts no new
+request and never adopts replacement credentials. Partial already accepted
+history may remain. Model publication revisions protect watched overrides,
+resume state, errors, busy flags and metadata overlap. A start callback that
+retires the original action cannot start the first bulk request. Ordinary 404
+missing/read or progress-clear behavior remains narrow: typed terminal denial
+is rethrown before status fallback. Initial watched reads reject malformed or
+non-boolean responses. Actual UI adapters show a bounded static denial and stop
+followup work while cancellation propagates, rather than leaving an unhandled
+MainScope exception or pretending an empty successful result.
+
+All 1,935 native cases passed, including 31 new cases, and both APKs built.
+Independent and root review verify nineteen sources, fifteen production, all
+244 JUnit reports, pre-run source/runner pins, APK/DEX symbols, registry and five
+empty private prefills. Actual API compound adapters, DetailsModel, confirmation
+and phone-origin helpers and loopback cancellation execute under tests. Backend
+route references are source evidence. Complete successful authenticated Android
+ApiClient.send, Compose transitions, touch, physical playback and provider
+execution remain unverified. Watchlist, ratings, playback and complete Launcher
+transport are separate. Review source findings were corrected before final tests;
+no executed production RED is claimed, and preliminary compilation/test fixture
+logs remain separately named.
+
+[Exact nineteen-file delta](https://github.com/stefnats/mediastorm-androidtv/compare/dfcf4ed12cd782b444adcf5ca0702453ba829561...7cef133eb3215d02f09fdd4dc668b50b82389f8f).
+No production activation, private playlist or new upstream submission occurred.
