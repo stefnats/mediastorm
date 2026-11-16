@@ -30,6 +30,7 @@ type thumbnailPrewarmer interface {
 
 // PlaybackHandler resolves NZB candidates into playable streams via the local registry.
 type PlaybackHandler struct {
+	vodBoundary        *vodBoundary
 	Service            playbackService
 	SubtitleExtractor  SubtitlePreExtractor // For pre-extracting subtitles
 	VideoProber        VideoFullProber      // For probing subtitle streams
@@ -172,10 +173,34 @@ func (h *PlaybackHandler) Resolve(w http.ResponseWriter, r *http.Request) {
 		ClientID              string `json:"clientId,omitempty"` // per-device overrides; falls back to X-Client-ID
 	}
 
+	r, bodyOK := h.vodBoundary.boundBody(w, r)
+	if !bodyOK {
+		return
+	}
 	dec := json.NewDecoder(r.Body)
 	if err := dec.Decode(&request); err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
+	}
+
+	owner, permitted := h.vodBoundary.requestOwner(w, r, vodDemand, "", request.ProfileID)
+	if !permitted {
+		return
+	}
+	defer owner.release()
+	if !h.vodBoundary.selectClient(w, owner, request.ClientID) {
+		return
+	}
+	if !h.vodBoundary.resultSelectors(w, owner, request.Result.Attributes) {
+		return
+	}
+	if !h.vodBoundary.recheckHTTP(w, r, owner, vodDemand) {
+		return
+	}
+
+	if owner.activeAccount() {
+		request.ProfileID = owner.profile.ID
+		request.ClientID = owner.client
 	}
 
 	handlerStart := time.Now()
@@ -188,6 +213,10 @@ func (h *PlaybackHandler) Resolve(w http.ResponseWriter, r *http.Request) {
 			request.Result.Attributes = map[string]string{}
 		}
 		request.Result.Attributes["profileId"] = request.ProfileID
+	}
+	if owner.activeAccount() {
+		request.Result.Attributes["clientId"] = owner.client
+		r = h.vodBoundary.checkedRequest(r, owner)
 	}
 	if h.BadStreams != nil {
 		if match := h.BadStreams.MatchFor(request.Result, reportContextForResult(h.TrackPreferences, request.Result, request.ProfileID, firstNonEmpty(request.ClientID, normalizeClientID(r.Header.Get("X-Client-ID"))), request.TitleID)); match != nil {
@@ -207,6 +236,9 @@ func (h *PlaybackHandler) Resolve(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusBadGateway)
 		return
 	}
+	if !h.vodBoundary.recheckHTTP(w, r, owner, vodDemand) {
+		return
+	}
 	if rejectM2TSPlaybackResolution(w, resolution) {
 		return
 	}
@@ -214,10 +246,16 @@ func (h *PlaybackHandler) Resolve(w http.ResponseWriter, r *http.Request) {
 	h.prewarmThumbnails(resolution)
 	log.Printf("[playback-handler] TIMING: resolve complete (took: %v)", time.Since(handlerStart))
 
+	if !h.vodBoundary.recheckHTTP(w, r, owner, vodDemand) {
+		return
+	}
 	if request.IncludeTrackSelection {
 		resolution = h.withTrackSelection(r, resolution, request.ProfileID, request.ClientID, firstNonEmpty(request.TitleID, request.Result.Attributes["titleId"]))
 	}
 
+	if !h.vodBoundary.recheckHTTP(w, r, owner, vodDemand) {
+		return
+	}
 	if !request.AllowMarkedBad {
 		ctx := reportContextForResult(h.TrackPreferences, request.Result, request.ProfileID, firstNonEmpty(request.ClientID, normalizeClientID(r.Header.Get("X-Client-ID"))), request.TitleID)
 		resolution, err = h.filterResolvedReportedAudio(r, request.Result, resolution, ctx)
@@ -234,6 +272,9 @@ func (h *PlaybackHandler) Resolve(w http.ResponseWriter, r *http.Request) {
 
 	log.Printf("[playback-handler] TIMING: handler complete (TOTAL: %v)", time.Since(handlerStart))
 	w.Header().Set("Content-Type", "application/json")
+	if !h.vodBoundary.recheckHTTP(w, r, owner, vodDemand) {
+		return
+	}
 	json.NewEncoder(w).Encode(resolution)
 }
 
@@ -244,12 +285,27 @@ func (h *PlaybackHandler) ResolveBatch(w http.ResponseWriter, r *http.Request) {
 		Episodes []models.BatchEpisodeTarget `json:"episodes"`
 	}
 
+	r, bodyOK := h.vodBoundary.boundBody(w, r)
+	if !bodyOK {
+		return
+	}
 	dec := json.NewDecoder(r.Body)
 	if err := dec.Decode(&request); err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
 
+	owner, permitted := h.vodBoundary.requestOwner(w, r, vodDemand, "")
+	if !permitted {
+		return
+	}
+	defer owner.release()
+	if !h.vodBoundary.resultSelectors(w, owner, request.Result.Attributes) {
+		return
+	}
+	if !h.vodBoundary.recheckHTTP(w, r, owner, vodDemand) {
+		return
+	}
 	if len(request.Episodes) == 0 {
 		http.Error(w, "episodes list is empty", http.StatusBadRequest)
 		return
@@ -262,6 +318,14 @@ func (h *PlaybackHandler) ResolveBatch(w http.ResponseWriter, r *http.Request) {
 	handlerStart := time.Now()
 	log.Printf("[playback-handler] batch resolve: %d episodes, title=%q", len(request.Episodes), request.Result.Title)
 
+	if owner.activeAccount() {
+		if request.Result.Attributes == nil {
+			request.Result.Attributes = map[string]string{}
+		}
+		request.Result.Attributes["profileId"] = owner.profile.ID
+		request.Result.Attributes["clientId"] = owner.client
+	}
+
 	resp, err := h.Service.ResolveBatch(r.Context(), request.Result, request.Episodes)
 	if err != nil {
 		log.Printf("[playback-handler] batch resolve failed after %v: %v", time.Since(handlerStart), err)
@@ -271,6 +335,9 @@ func (h *PlaybackHandler) ResolveBatch(w http.ResponseWriter, r *http.Request) {
 
 	log.Printf("[playback-handler] batch resolve complete (took: %v)", time.Since(handlerStart))
 	w.Header().Set("Content-Type", "application/json")
+	if !h.vodBoundary.recheckHTTP(w, r, owner, vodDemand) {
+		return
+	}
 	json.NewEncoder(w).Encode(resp)
 }
 
@@ -284,6 +351,14 @@ func (h *PlaybackHandler) QueueStatus(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	owner, permitted := h.vodBoundary.requestOwner(w, r, vodQueue, "")
+	if !permitted {
+		return
+	}
+	defer owner.release()
+	if !h.vodBoundary.recheckHTTP(w, r, owner, vodQueue) {
+		return
+	}
 	status, err := h.Service.QueueStatus(r.Context(), queueID)
 	if err != nil {
 		switch {
@@ -299,8 +374,14 @@ func (h *PlaybackHandler) QueueStatus(w http.ResponseWriter, r *http.Request) {
 	if rejectM2TSPlaybackResolution(w, status) {
 		return
 	}
+	if !h.vodBoundary.recheckHTTP(w, r, owner, vodQueue) {
+		return
+	}
 	h.prewarmThumbnails(status)
 
+	if !h.vodBoundary.recheckHTTP(w, r, owner, vodQueue) {
+		return
+	}
 	// Queued resolves report readiness here, so honor the same opt-in.
 	query := r.URL.Query()
 	if include, _ := strconv.ParseBool(query.Get("includeTrackSelection")); include {
@@ -308,5 +389,8 @@ func (h *PlaybackHandler) QueueStatus(w http.ResponseWriter, r *http.Request) {
 	}
 
 	w.Header().Set("Content-Type", "application/json")
+	if !h.vodBoundary.recheckHTTP(w, r, owner, vodQueue) {
+		return
+	}
 	json.NewEncoder(w).Encode(status)
 }

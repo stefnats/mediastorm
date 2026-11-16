@@ -32,6 +32,7 @@ import (
 	"novastream/services/debrid"
 	"novastream/services/history"
 	"novastream/services/indexer"
+	"novastream/services/kidsvod"
 	"novastream/services/localmedia"
 	"novastream/services/playback"
 	"novastream/services/trackselect"
@@ -78,6 +79,8 @@ type prequeuePlaybackService interface {
 
 // PrequeueHandler handles prequeue requests for pre-loading playback streams
 type PrequeueHandler struct {
+	vodBoundary           *vodBoundary
+	vodCurrentWorker      *vodOwnerContext
 	kidsVODBindings       *kidsVODResources
 	sourceAvailability    sourceAvailabilityService
 	store                 *playback.PrequeueStore
@@ -754,6 +757,9 @@ func validatePrequeueVideoProbe(result *VideoFullResult) error {
 }
 
 func probeResolvedCandidate(ctx context.Context, prober VideoFullProber, resolution *models.PlaybackResolution) (*VideoFullResult, error) {
+	if err := vodWorkerCheck(ctx); err != nil {
+		return nil, err
+	}
 	if resolution != nil && resolution.Probe != nil {
 		return resolution.Probe, nil
 	}
@@ -920,6 +926,12 @@ func (h *PrequeueHandler) RunWorkerSync(ctx context.Context, titleID, titleName,
 
 // RunWorkerSyncScoped runs the prequeue worker synchronously for an explicit settings scope.
 func (h *PrequeueHandler) RunWorkerSyncScoped(ctx context.Context, titleID, titleName, imdbID, mediaType string, year int, userID, clientID, settingsScopeKey string, targetEpisode *models.EpisodeReference) (string, error) {
+	owner, vodErr := h.vodBoundary.backgroundOwner(ctx, userID, normalizeClientID(clientID))
+	if vodErr != nil {
+		return "", vodErr
+	}
+	defer owner.release()
+
 	// Create prequeue entry with a long TTL (inherits store TTL, prewarm service will extend)
 	// Never replace an entry that is still resolving: that is usually the
 	// details-page prequeue a client is polling, and replacing it cancels its
@@ -929,9 +941,15 @@ func (h *PrequeueHandler) RunWorkerSyncScoped(ctx context.Context, titleID, titl
 		return entry.ID, fmt.Errorf("%w: %s (status=%s)", err, entry.ID, entry.Status)
 	}
 
+	if !h.vodBoundary.bindWorker(entry.ID, owner) {
+		return entry.ID, errVODOwner
+	}
 	// Run worker synchronously (blocking)
 	h.runPrequeueWorker(entry.ID, titleID, titleName, imdbID, mediaType, year, userID, clientID, nil, targetEpisode, 0, true, prequeueWorkerScheduledPrewarm)
 
+	if h.vodBoundary != nil && owner.recheck(ctx, vodDemand) != nil {
+		return entry.ID, errVODOwner
+	}
 	// Check result
 	result, exists := h.store.Get(entry.ID)
 	if !exists {
@@ -968,6 +986,10 @@ func (h *PrequeueHandler) Prequeue(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	r, bodyOK := h.vodBoundary.boundBody(w, r)
+	if !bodyOK {
+		return
+	}
 	var req playback.PrequeueRequest
 	dec := json.NewDecoder(r.Body)
 	dec.DisallowUnknownFields()
@@ -976,6 +998,18 @@ func (h *PrequeueHandler) Prequeue(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	owner, permitted := h.vodBoundary.requestOwner(w, r, vodDemand, "", req.UserID)
+	if !permitted {
+		return
+	}
+	defer owner.release()
+	if !h.vodBoundary.selectClient(w, owner, req.ClientID) {
+		return
+	}
+	r = h.vodBoundary.checkedRequest(r, owner)
+	if owner != nil {
+		req.ClientID = owner.client
+	}
 	if strings.TrimSpace(req.TitleID) == "" {
 		http.Error(w, "titleId is required", http.StatusBadRequest)
 		return
@@ -1090,8 +1124,14 @@ func (h *PrequeueHandler) Prequeue(w http.ResponseWriter, r *http.Request) {
 	// Warm references may share settings across profiles, but preparation IDs
 	// carry their owner's PIN and source rights. Select the current profile's
 	// indexed entry before validating a warmed stream.
+	if !h.vodBoundary.recheckHTTP(w, r, owner, vodDemand) {
+		return
+	}
 	if h.prewarmSvc != nil {
 		if warm := h.prewarmSvc.GetWarmScoped(req.TitleID, req.UserID, settingsScopeKey); warm != nil && warm.PrequeueID != "" {
+			if !h.vodBoundary.recheckHTTP(w, r, owner, vodDemand) {
+				return
+			}
 			if warmEntry, ok := h.store.GetByTitleUserScopeForPlayback(req.TitleID, req.UserID, settingsScopeKey); ok && warmEntry.ID == warm.PrequeueID && warmEntry.Status == playback.PrequeueStatusReady && hasReusablePreparation(warmEntry) {
 				if !readyEntryFitsAdaptiveCaps(warmEntry, adaptiveCaps) {
 					log.Printf("[prequeue] Ignoring pre-warmed entry %s: file size %d exceeds current adaptive throughput cap, resolving fresh",
@@ -1120,6 +1160,9 @@ func (h *PrequeueHandler) Prequeue(w http.ResponseWriter, r *http.Request) {
 							Status:        playback.PrequeueStatusReady,
 						}
 						w.Header().Set("Content-Type", "application/json")
+						if !h.vodBoundary.recheckHTTP(w, r, owner, vodDemand) {
+							return
+						}
 						json.NewEncoder(w).Encode(resp)
 						return
 					}
@@ -1133,6 +1176,9 @@ func (h *PrequeueHandler) Prequeue(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Check for existing entry in the store (covers both prewarm and regular prequeues).
+	if !h.vodBoundary.recheckHTTP(w, r, owner, vodDemand) {
+		return
+	}
 	if existing, ok := h.store.GetByTitleUserScopeForPlayback(req.TitleID, req.UserID, settingsScopeKey); ok {
 		episodeMatch := prequeueEpisodeMatchesForMode(targetEpisode, existing.TargetEpisode, req.AutomaticLibrarySelection)
 		if existing.AutomaticLibrarySelection != req.AutomaticLibrarySelection {
@@ -1170,6 +1216,9 @@ func (h *PrequeueHandler) Prequeue(w http.ResponseWriter, r *http.Request) {
 						Status:        playback.PrequeueStatusReady,
 					}
 					w.Header().Set("Content-Type", "application/json")
+					if !h.vodBoundary.recheckHTTP(w, r, owner, vodDemand) {
+						return
+					}
 					json.NewEncoder(w).Encode(resp)
 					return
 				}
@@ -1190,6 +1239,9 @@ func (h *PrequeueHandler) Prequeue(w http.ResponseWriter, r *http.Request) {
 				Status:        existing.Status,
 			}
 			w.Header().Set("Content-Type", "application/json")
+			if !h.vodBoundary.recheckHTTP(w, r, owner, vodDemand) {
+				return
+			}
 			json.NewEncoder(w).Encode(resp)
 			return
 		} else {
@@ -1200,6 +1252,9 @@ func (h *PrequeueHandler) Prequeue(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	if !h.vodBoundary.recheckHTTP(w, r, owner, vodDemand) {
+		return
+	}
 	// Create prequeue entry
 	entry, _ := h.store.CreateScoped(req.TitleID, titleName, req.UserID, mediaType, req.Year, targetEpisode, req.Reason, settingsScopeKey, req.AutomaticLibrarySelection)
 	h.latencyTracker.NotePrequeueRequested(entry.ID, req.TitleID, req.UserID, titleName, mediaType)
@@ -1210,6 +1265,10 @@ func (h *PrequeueHandler) Prequeue(w http.ResponseWriter, r *http.Request) {
 		h.prewarmSvc.AdoptEntry(entry.ID)
 	}
 
+	if !h.vodBoundary.bindWorker(entry.ID, owner) {
+		vodDeny(w, kidsvod.CodeContextChanged)
+		return
+	}
 	// Start background worker with all the info needed for search
 	go h.runPrequeueWorker(entry.ID, req.TitleID, titleName, req.ImdbID, mediaType, req.Year, req.UserID, clientID, throughput, targetEpisode, req.StartOffset, req.SkipHLS, prequeueWorkerInteractive, prequeueLocalScope{accountID: auth.GetAccountID(r), master: auth.IsMaster(r), tmdbID: req.TmdbID, tvdbID: req.TvdbID, automaticLibrarySelection: req.AutomaticLibrarySelection})
 
@@ -1221,6 +1280,9 @@ func (h *PrequeueHandler) Prequeue(w http.ResponseWriter, r *http.Request) {
 	}
 
 	w.Header().Set("Content-Type", "application/json")
+	if !h.vodBoundary.recheckHTTP(w, r, owner, vodDemand) {
+		return
+	}
 	json.NewEncoder(w).Encode(resp)
 }
 
@@ -1247,6 +1309,15 @@ func (h *PrequeueHandler) GetStatus(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	_, owner, permitted := h.vodEntry(w, r, prequeueID, vodReady)
+	if !permitted {
+		return
+	}
+	defer owner.release()
+	r = h.vodBoundary.checkedRequest(r, owner)
+	if !h.vodBoundary.recheckHTTP(w, r, owner, vodReady) {
+		return
+	}
 	entry, exists := h.store.Get(prequeueID)
 	if !exists {
 		http.Error(w, "prequeue not found or expired", http.StatusNotFound)
@@ -1265,6 +1336,9 @@ func (h *PrequeueHandler) GetStatus(w http.ResponseWriter, r *http.Request) {
 	}
 
 	w.Header().Set("Content-Type", "application/json")
+	if !h.vodBoundary.recheckHTTP(w, r, owner, vodReady) {
+		return
+	}
 	json.NewEncoder(w).Encode(resp)
 }
 
@@ -1297,6 +1371,12 @@ func (h *PrequeueHandler) manualPrequeueEntry(r *http.Request) (*playback.Preque
 
 // ManualPrequeueStatus reports whether a title is pinned for the requested profile.
 func (h *PrequeueHandler) ManualPrequeueStatus(w http.ResponseWriter, r *http.Request) {
+	owner, permitted := h.vodBoundary.requestOwner(w, r, vodReady, "")
+	if !permitted {
+		return
+	}
+	defer owner.release()
+
 	entry, userID, valid := h.manualPrequeueEntry(r)
 	if !valid {
 		if userID == "" || strings.TrimSpace(r.URL.Query().Get("titleId")) == "" {
@@ -1311,6 +1391,9 @@ func (h *PrequeueHandler) ManualPrequeueStatus(w http.ResponseWriter, r *http.Re
 		response.PrequeueID = entry.ID
 	}
 	w.Header().Set("Content-Type", "application/json")
+	if !h.vodBoundary.recheckHTTP(w, r, owner, vodReady) {
+		return
+	}
 	_ = json.NewEncoder(w).Encode(response)
 }
 
@@ -1327,6 +1410,14 @@ func (h *PrequeueHandler) RemoveManualPrequeue(w http.ResponseWriter, r *http.Re
 	}
 	if entry == nil {
 		http.Error(w, "manual prequeue not found", http.StatusNotFound)
+		return
+	}
+	owner, permitted := h.vodBoundary.requestOwner(w, r, vodCleanup, entry.UserID)
+	if !permitted {
+		return
+	}
+	defer owner.release()
+	if !h.vodBoundary.recheckHTTP(w, r, owner, vodCleanup) {
 		return
 	}
 	h.store.Delete(entry.ID)
@@ -1349,10 +1440,23 @@ type adoptMigrationRequest struct {
 // migrates to another candidate. This keeps details-page reuse aligned with the
 // stream the player actually handed over to.
 func (h *PrequeueHandler) AdoptMigration(w http.ResponseWriter, r *http.Request) {
+	r, bodyOK := h.vodBoundary.boundBody(w, r)
+	if !bodyOK {
+		return
+	}
 	vars := mux.Vars(r)
 	prequeueID := strings.TrimSpace(vars["prequeueID"])
 	if prequeueID == "" {
 		http.Error(w, "prequeueID is required", http.StatusBadRequest)
+		return
+	}
+	_, owner, permitted := h.vodEntry(w, r, prequeueID, vodAdopt)
+	if !permitted {
+		return
+	}
+	defer owner.release()
+	r = h.vodBoundary.checkedRequest(r, owner)
+	if !h.vodBoundary.recheckHTTP(w, r, owner, vodAdopt) {
 		return
 	}
 	current, exists := h.store.Get(prequeueID)
@@ -1374,6 +1478,9 @@ func (h *PrequeueHandler) AdoptMigration(w http.ResponseWriter, r *http.Request)
 		http.Error(w, "unsupported .m2ts migration source", http.StatusUnprocessableEntity)
 		return
 	}
+	if !h.vodBoundary.recheckHTTP(w, r, owner, vodAdopt) {
+		return
+	}
 	if isExternalStreamPath(req.StreamPath) {
 		checkCtx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
 		err := h.ValidateExternalURL(checkCtx, req.StreamPath)
@@ -1385,6 +1492,9 @@ func (h *PrequeueHandler) AdoptMigration(w http.ResponseWriter, r *http.Request)
 	}
 	if h.badStreamsSvc.MatchFor(req.Result, h.reportContextForPrequeue(prequeueID, current.UserID, normalizeClientID(r.Header.Get("X-Client-ID")), current.TargetEpisode)) != nil {
 		http.Error(w, "release excluded for this playback request", http.StatusConflict)
+		return
+	}
+	if !h.vodBoundary.recheckHTTP(w, r, owner, vodAdopt) {
 		return
 	}
 	h.store.CancelWork(prequeueID)
@@ -1457,18 +1567,24 @@ func (h *PrequeueHandler) AdoptMigration(w http.ResponseWriter, r *http.Request)
 		http.Error(w, "prequeue not found or expired", http.StatusNotFound)
 		return
 	}
-	h.refreshAdoptedMigrationMetadata(prequeueID, req.StreamPath, normalizeClientID(r.Header.Get("X-Client-ID")))
+	h.refreshAdoptedMigrationMetadata(prequeueID, req.StreamPath, normalizeClientID(r.Header.Get("X-Client-ID")), owner)
 	h.latencyTracker.NotePrequeueReady(prequeueID)
 	if h.prewarmSvc != nil {
 		h.prewarmSvc.UpdateFromPrequeue(prequeueID)
 	}
 
+	if !h.vodBoundary.recheckHTTP(w, r, owner, vodAdopt) {
+		return
+	}
 	entry, exists := h.store.Get(prequeueID)
 	if !exists {
 		http.Error(w, "prequeue not found or expired", http.StatusNotFound)
 		return
 	}
 	w.Header().Set("Content-Type", "application/json")
+	if !h.vodBoundary.recheckHTTP(w, r, owner, vodAdopt) {
+		return
+	}
 	json.NewEncoder(w).Encode(entry.ToResponse())
 }
 
@@ -1484,7 +1600,14 @@ type adoptedMigrationMetadata struct {
 	avgFrameRate             string
 }
 
-func (h *PrequeueHandler) refreshAdoptedMigrationMetadata(prequeueID, streamPath, clientID string) {
+func (h *PrequeueHandler) refreshAdoptedMigrationMetadata(prequeueID, streamPath, clientID string, owners ...*vodOwnerContext) {
+	var owner *vodOwnerContext
+	if len(owners) > 0 {
+		owner = owners[0]
+	}
+	if h.vodBoundary != nil && (owner == nil || owner.recheck(context.Background(), vodAdopt) != nil) {
+		return
+	}
 	if h == nil || h.store == nil {
 		return
 	}
@@ -1496,6 +1619,13 @@ func (h *PrequeueHandler) refreshAdoptedMigrationMetadata(prequeueID, streamPath
 		return
 	}
 
+	if h.vodBoundary != nil {
+		snapshot, _, ok := h.store.SnapshotForAuthorization(prequeueID)
+		if !ok || owner == nil || owner.issuer != h.vodBoundary || snapshot.UserID != owner.profile.ID || snapshot.StreamPath != streamPath {
+			return
+		}
+	}
+
 	entry, ok := h.store.Get(prequeueID)
 	if !ok || strings.TrimSpace(entry.StreamPath) != streamPath {
 		return
@@ -1504,12 +1634,20 @@ func (h *PrequeueHandler) refreshAdoptedMigrationMetadata(prequeueID, streamPath
 	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
 	defer cancel()
 
+	if owner != nil {
+		var stopVOD context.CancelFunc
+		ctx, stopVOD = vodWorkerContext(ctx, owner)
+		defer stopVOD()
+	}
 	metadata, err := h.probeAdoptedMigrationMetadata(ctx, streamPath)
 	if err != nil {
 		log.Printf("[prequeue] adopted migration metadata probe failed for %s: %v", prequeueID, err)
 		return
 	}
 
+	if owner != nil && owner.recheck(ctx, vodAdopt) != nil {
+		return
+	}
 	trackPrefs := h.trackPreferenceResolver().Resolve(entry.UserID, clientID, entry.TitleID)
 	trackSelection := trackselect.Select(metadata.audioStreams, metadata.subtitleStreams, trackPrefs)
 	selectedAudioTrack := trackSelection.AudioStreamIndex()
@@ -1695,17 +1833,42 @@ func resolveFirstReadySourceForWorker(configured bool, mode prequeueWorkerMode) 
 // honor Resolve First Ready Source; scheduled pre-warm workers always wait for
 // the complete globally ranked candidate set before resolving.
 func (h *PrequeueHandler) runPrequeueWorker(prequeueID, titleID, titleName, imdbID, mediaType string, year int, userID, clientID string, throughput *models.AdaptiveThroughputContext, targetEpisode *models.EpisodeReference, startOffset float64, skipHLS bool, workerMode prequeueWorkerMode, localScopes ...prequeueLocalScope) {
+	workerOwner, ownerErr := h.vodWorker(prequeueID, userID, clientID)
+	if ownerErr != nil {
+		h.rejectVODWorker(prequeueID, userID)
+		return
+	}
+	defer h.finishVODWorker(prequeueID, workerOwner)
+	if workerOwner != nil {
+		copy := *h
+		copy.vodCurrentWorker = workerOwner
+		h = &copy
+	}
+
 	evidenceConfigurationKey := h.preparationConfigurationKey()
 	var kidsProof *kidsVODLibraryProof
 	var kidsCatalogue *models.Title
+	var workerStamp playback.AuthorizationStamp
+	if workerOwner != nil || h.kidsVODBindings != nil {
+		var ok bool
+		workerStamp, ok = h.beginVODAttempt(prequeueID, workerOwner)
+		if !ok {
+			return
+		}
+	}
+
 	if observer := h.kidsVODBindings; observer != nil {
-		stamp, _ := h.store.BeginAuthorizationAttempt(prequeueID)
+		stamp := workerStamp
 		profileScope, _ := kidsVODProfileScope(h, userID)
 		defer func() { observer.publish(prequeueID, stamp, kidsProof, evidenceConfigurationKey, profileScope) }()
 	}
 	if h.sourceAvailability != nil {
 		observe := h.sourceAvailability.ObservePlaybackStart(userID, clientID, titleID, mediaType)
 		defer func() {
+			if workerOwner != nil && workerOwner.recheck(context.Background(), vodDemand) != nil {
+				observe(false)
+				return
+			}
 			entry, ok := h.store.Get(prequeueID)
 			library := false
 			if ok {
@@ -1715,11 +1878,15 @@ func (h *PrequeueHandler) runPrequeueWorker(prequeueID, titleID, titleName, imdb
 		}()
 	}
 	// Create cancellable context
-	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Minute)
+	vodCtx, stopVOD := vodWorkerContext(context.Background(), workerOwner)
+	defer stopVOD()
+	ctx, cancel := context.WithTimeout(vodCtx, 15*time.Minute)
 	defer cancel()
 
 	// Store cancel func for potential cancellation
-	h.store.SetCancelFunc(prequeueID, cancel)
+	if !h.setVODCancel(prequeueID, workerOwner, cancel) {
+		return
+	}
 
 	var excludedResult *models.NZBResult
 	if len(localScopes) == 1 {
@@ -1729,7 +1896,7 @@ func (h *PrequeueHandler) runPrequeueWorker(prequeueID, titleID, titleName, imdb
 	log.Printf("[prequeue] TIMING: worker started for %s (title=%q)", prequeueID, titleName)
 
 	// Update status to searching
-	if !h.store.UpdateWorker(prequeueID, func(e *playback.PrequeueEntry) {
+	if !h.updateVODWorker(prequeueID, func(e *playback.PrequeueEntry) {
 		e.Status = playback.PrequeueStatusSearching
 		e.ProgressStage = "metadata"
 		e.ProgressDetail = ""
@@ -1766,6 +1933,10 @@ func (h *PrequeueHandler) runPrequeueWorker(prequeueID, titleID, titleName, imdb
 	var originalLanguage string
 	var tvdbID int64
 	var alternateTitles []string
+	if vodWorkerCheck(ctx) != nil {
+		h.rejectVODWorker(prequeueID, userID, workerOwner)
+		return
+	}
 	if mediaType == "series" && h.metadataSvc != nil {
 		seriesMeta := h.createEpisodeResolverAndLookupAbsoluteEp(ctx, titleID, titleName, year, imdbID, targetEpisode)
 		if h.kidsVODBindings != nil && seriesMeta.LibraryEpisodeVerified {
@@ -1797,7 +1968,7 @@ func (h *PrequeueHandler) runPrequeueWorker(prequeueID, titleID, titleName, imdb
 			year = seriesMeta.Year
 			log.Printf("[prequeue] Populated year %d from series metadata", year)
 		}
-		h.store.UpdateWorker(prequeueID, func(e *playback.PrequeueEntry) {
+		h.updateVODWorker(prequeueID, func(e *playback.PrequeueEntry) {
 			e.TargetEpisode = targetEpisode
 			e.Year = year
 			e.LibraryEpisodeVerified = seriesMeta.LibraryEpisodeVerified
@@ -1852,6 +2023,10 @@ func (h *PrequeueHandler) runPrequeueWorker(prequeueID, titleID, titleName, imdb
 	h.updatePrequeueProgress(prequeueID, "searching", query, 0, 0)
 
 	// For movies, check if the movie is anime by looking at genres
+	if vodWorkerCheck(ctx) != nil {
+		h.rejectVODWorker(prequeueID, userID, workerOwner)
+		return
+	}
 	if mediaType == "movie" && h.movieMetadataSvc != nil {
 		movieQuery := models.MovieDetailsQuery{
 			TitleID: titleID,
@@ -2013,6 +2188,10 @@ func (h *PrequeueHandler) runPrequeueWorker(prequeueID, titleID, titleName, imdb
 		// An unavailable local preference must not consume the normal search budget.
 		ctx = playbackCtx
 	}
+	if vodWorkerCheck(playbackCtx) != nil {
+		h.rejectVODWorker(prequeueID, userID, workerOwner)
+		return
+	}
 	if choice.resolution == nil && playbackCtx.Err() == nil {
 		choice, resolveErr = func() (prequeueResolutionChoice, error) {
 			if h.indexerSvc == nil {
@@ -2072,7 +2251,7 @@ func (h *PrequeueHandler) runPrequeueWorker(prequeueID, titleID, titleName, imdb
 
 			// Update status to resolving. Numeric progress from here on is owned by the
 			// race (in-flight candidate window); the feeder only advances the stage.
-			h.store.UpdateWorker(prequeueID, func(e *playback.PrequeueEntry) {
+			h.updateVODWorker(prequeueID, func(e *playback.PrequeueEntry) {
 				e.Status = playback.PrequeueStatusResolving
 				e.ProgressStage = "preparing_candidates"
 				e.ProgressDetail = ""
@@ -2153,7 +2332,7 @@ func (h *PrequeueHandler) runPrequeueWorker(prequeueID, titleID, titleName, imdb
 	log.Printf("[prequeue] TIMING: resolution complete (resolve took: %v, total elapsed: %v)", time.Since(resolveStart), time.Since(workerStart))
 
 	// Update with resolution
-	h.store.UpdateWorker(prequeueID, func(e *playback.PrequeueEntry) {
+	h.updateVODWorker(prequeueID, func(e *playback.PrequeueEntry) {
 		e.Status = playback.PrequeueStatusProbing
 		e.ProgressStage = "analyzing_media"
 		e.ProgressDetail = ""
@@ -2207,7 +2386,7 @@ func (h *PrequeueHandler) runPrequeueWorker(prequeueID, titleID, titleName, imdb
 	selectedAudioTrack := -1
 	selectedSubtitleTrack := -1
 	probeStart := time.Now()
-	h.recordPreparationEvidence(prequeueID, clientID, cachedProbeResult, evidenceConfigurationKey)
+	h.recordVODPreparationEvidence(prequeueID, clientID, cachedProbeResult, evidenceConfigurationKey)
 
 	if (h.metadataProber != nil && h.userSettingsSvc != nil) || (len(localScopes) == 1 && localScopes[0].automaticLibrarySelection && cachedProbeResult != nil) {
 		h.updatePrequeueProgress(prequeueID, "selecting_tracks", "", 0, 0)
@@ -2251,11 +2430,15 @@ func (h *PrequeueHandler) runPrequeueWorker(prequeueID, titleID, titleName, imdb
 			log.Printf("[prequeue] Using cached metadata probe result: audioStreams=%d subStreams=%d", len(audioStreams), len(subtitleStreams))
 		} else if h.fullProber != nil {
 			// Single ffprobe call for both HDR detection and track metadata
+			if vodWorkerCheck(ctx) != nil {
+				h.rejectVODWorker(prequeueID, userID, workerOwner)
+				return
+			}
 			fullResult, err := h.fullProber.ProbeVideoFull(ctx, resolution.WebDAVPath)
 			if err != nil {
 				log.Printf("[prequeue] Unified probe failed (non-fatal): %v", err)
 			} else if fullResult != nil {
-				h.recordPreparationEvidence(prequeueID, clientID, fullResult, evidenceConfigurationKey)
+				h.recordVODPreparationEvidence(prequeueID, clientID, fullResult, evidenceConfigurationKey)
 				audioStreams = fullResult.AudioStreams
 				subtitleStreams = fullResult.SubtitleStreams
 				hasDV = fullResult.HasDolbyVision
@@ -2305,7 +2488,7 @@ func (h *PrequeueHandler) runPrequeueWorker(prequeueID, titleID, titleName, imdb
 				var unusable bool
 				audioStreams, unusable = filterReportedAudio(h.badStreamsSvc, *selectedResult, ctx, audioStreams)
 				if unusable {
-					h.store.UpdateWorker(prequeueID, func(e *playback.PrequeueEntry) {
+					h.updateVODWorker(prequeueID, func(e *playback.PrequeueEntry) {
 						e.Status = playback.PrequeueStatusFailed
 						e.Error = "No healthy audio track in the requested language"
 					})
@@ -2334,7 +2517,7 @@ func (h *PrequeueHandler) runPrequeueWorker(prequeueID, titleID, titleName, imdb
 		}
 
 		// Store selected tracks and duration
-		h.store.UpdateWorker(prequeueID, func(e *playback.PrequeueEntry) {
+		h.updateVODWorker(prequeueID, func(e *playback.PrequeueEntry) {
 			e.SelectedAudioTrack = selectedAudioTrack
 			e.SelectedSubtitleTrack = selectedSubtitleTrack
 			e.TrackSelection = trackSelection
@@ -2349,7 +2532,7 @@ func (h *PrequeueHandler) runPrequeueWorker(prequeueID, titleID, titleName, imdb
 			audioTracks := playbackAudioTracksFromStreams(audioStreams)
 			subtitleTracks := playbackSubtitleTracksFromStreams(subtitleStreams)
 
-			h.store.UpdateWorker(prequeueID, func(e *playback.PrequeueEntry) {
+			h.updateVODWorker(prequeueID, func(e *playback.PrequeueEntry) {
 				e.AudioTracks = audioTracks
 				e.SubtitleTracks = subtitleTracks
 			})
@@ -2364,7 +2547,7 @@ func (h *PrequeueHandler) runPrequeueWorker(prequeueID, titleID, titleName, imdb
 
 		// Always store HDR detection results so the frontend can display correct badges,
 		// regardless of whether HLS is needed (native clients skip HLS but still need HDR info)
-		h.store.UpdateWorker(prequeueID, func(e *playback.PrequeueEntry) {
+		h.updateVODWorker(prequeueID, func(e *playback.PrequeueEntry) {
 			e.HasDolbyVision = hasDV
 			e.HasHDR10 = hasHDR10
 			e.DolbyVisionProfile = dvProfile
@@ -2403,6 +2586,10 @@ func (h *PrequeueHandler) runPrequeueWorker(prequeueID, titleID, titleName, imdb
 					prequeueType = entry.Reason
 				}
 
+				if vodWorkerCheck(ctx) != nil {
+					h.rejectVODWorker(prequeueID, userID, workerOwner)
+					return
+				}
 				hlsResult, err := h.hlsCreator.CreateHLSSession(
 					ctx,
 					resolution.WebDAVPath,
@@ -2418,7 +2605,7 @@ func (h *PrequeueHandler) runPrequeueWorker(prequeueID, titleID, titleName, imdb
 				if err != nil {
 					log.Printf("[prequeue] HLS session creation failed (non-fatal): %v", err)
 				} else if hlsResult != nil {
-					h.store.UpdateWorker(prequeueID, func(e *playback.PrequeueEntry) {
+					h.updateVODWorker(prequeueID, func(e *playback.PrequeueEntry) {
 						e.HLSSessionID = hlsResult.SessionID
 						e.HLSPlaylistURL = hlsResult.PlaylistURL
 					})
@@ -2432,14 +2619,21 @@ func (h *PrequeueHandler) runPrequeueWorker(prequeueID, titleID, titleName, imdb
 		// Note: Subtitle tracks for lazy extraction are already stored above for UI display
 	}
 
+	if vodWorkerCheck(ctx) != nil {
+		h.rejectVODWorker(prequeueID, userID, workerOwner)
+		return
+	}
 	// Mark as ready
-	h.store.UpdateWorker(prequeueID, func(e *playback.PrequeueEntry) {
+	if !h.publishVODReady(prequeueID, workerOwner, func(e *playback.PrequeueEntry) {
 		e.Status = playback.PrequeueStatusReady
 		e.ProgressStage = "ready"
 		e.ProgressDetail = ""
 		e.ProgressCurrent = 0
 		e.ProgressTotal = 0
-	})
+	}) {
+		h.rejectVODWorker(prequeueID, userID, workerOwner)
+		return
+	}
 	h.latencyTracker.NotePrequeueReady(prequeueID)
 	if h.prewarmSvc != nil {
 		h.prewarmSvc.UpdateFromPrequeue(prequeueID)
@@ -3148,6 +3342,9 @@ func (h *PrequeueHandler) resolveCandidates(ctx context.Context, prequeueID stri
 	resolveStart := time.Now()
 
 	process := func(raceCtx context.Context, i int, result models.NZBResult) (accepted *candidateResolution, deprioritized *candidateResolution, err error) {
+		if err := vodWorkerCheck(raceCtx); err != nil {
+			return nil, nil, err
+		}
 		// Record the per-candidate attempt outcome + duration for the latency
 		// tracker on every terminal path: probe
 		// rejections and article-unavailable failures are the measurable signal.
@@ -3200,6 +3397,9 @@ func (h *PrequeueHandler) resolveCandidates(ctx context.Context, prequeueID stri
 		if h.badStreamsSvc.MatchFor(result, reportCtx) != nil {
 			return nil, nil, errors.New("release excluded for this playback request")
 		}
+		if err := vodWorkerCheck(raceCtx); err != nil {
+			return nil, nil, err
+		}
 		var resolution *models.PlaybackResolution
 		var resolveErr error
 		if item, ok := opts.localItems[result.Link]; ok {
@@ -3250,6 +3450,9 @@ func (h *PrequeueHandler) resolveCandidates(ctx context.Context, prequeueID stri
 			return nil, nil, resolveErr
 		}
 
+		if err := vodWorkerCheck(raceCtx); err != nil {
+			return nil, nil, err
+		}
 		log.Printf("[prequeue] Resolved result [%d] (%s): %s -> %s", i, result.ServiceType, result.Title, requestsecurity.URLForLog(resolution.WebDAVPath))
 		rememberStreamRelease(resolution.WebDAVPath, result)
 		if isM2TSStreamPath(resolution.WebDAVPath) {
@@ -3258,6 +3461,9 @@ func (h *PrequeueHandler) resolveCandidates(ctx context.Context, prequeueID stri
 			return nil, nil, m2tsErr
 		}
 
+		if err := vodWorkerCheck(raceCtx); err != nil {
+			return nil, nil, err
+		}
 		var probeResult *VideoFullResult
 		var metadataResult *VideoMetadataResult
 		h.updatePrequeueStageDetail(prequeueID, "validating_candidate", result.Title)
@@ -3456,7 +3662,7 @@ func (h *PrequeueHandler) markBadPrequeueResult(result models.NZBResult, resolut
 }
 
 func (h *PrequeueHandler) updatePrequeueProgress(prequeueID, stage, detail string, current, total int) {
-	h.store.UpdateWorker(prequeueID, func(e *playback.PrequeueEntry) {
+	h.updateVODWorker(prequeueID, func(e *playback.PrequeueEntry) {
 		e.ProgressStage = stage
 		e.ProgressDetail = detail
 		e.ProgressCurrent = current
@@ -3468,7 +3674,7 @@ func (h *PrequeueHandler) updatePrequeueProgress(prequeueID, stage, detail strin
 // (the release being worked on) without numeric progress, which the racing
 // resolution phase owns.
 func (h *PrequeueHandler) updatePrequeueStageDetail(prequeueID, stage, detail string) {
-	h.store.UpdateWorker(prequeueID, func(e *playback.PrequeueEntry) {
+	h.updateVODWorker(prequeueID, func(e *playback.PrequeueEntry) {
 		e.ProgressStage = stage
 		e.ProgressDetail = detail
 	})
@@ -3479,7 +3685,7 @@ func (h *PrequeueHandler) updatePrequeueStageDetail(prequeueID, stage, detail st
 // truthful: with 4 workers this reads e.g. min=1 max=4 while candidates 1–4 are
 // being tried concurrently.
 func (h *PrequeueHandler) updatePrequeueRaceProgress(prequeueID string, minCurrent, maxCurrent, total int) {
-	h.store.UpdateWorker(prequeueID, func(e *playback.PrequeueEntry) {
+	h.updateVODWorker(prequeueID, func(e *playback.PrequeueEntry) {
 		e.ProgressCurrentMin = minCurrent
 		e.ProgressCurrentMax = maxCurrent
 		e.ProgressCurrent = maxCurrent
@@ -3961,12 +4167,15 @@ func (h *PrequeueHandler) waitForPlaybackQueue(ctx context.Context, prequeueID s
 	defer ticker.Stop()
 
 	for {
+		if err := vodWorkerCheck(ctx); err != nil {
+			return nil, err
+		}
 		status, err := h.playbackSvc.QueueStatus(ctx, queueID)
 		if err != nil {
 			return nil, err
 		}
 		if status != nil {
-			h.store.UpdateWorker(prequeueID, func(e *playback.PrequeueEntry) {
+			h.updateVODWorker(prequeueID, func(e *playback.PrequeueEntry) {
 				e.HealthStatus = status.HealthStatus
 				if status.FileSize > 0 {
 					e.FileSize = status.FileSize
@@ -3990,6 +4199,10 @@ func (h *PrequeueHandler) waitForPlaybackQueue(ctx context.Context, prequeueID s
 
 // failPrequeue marks a prequeue as failed
 func (h *PrequeueHandler) failPrequeue(prequeueID, errMsg string) {
+	if h.vodCurrentWorker != nil && h.vodCurrentWorker.recheck(context.Background(), vodDemand) != nil {
+		h.rejectVODWorker(prequeueID, h.vodCurrentWorker.profile.ID, h.vodCurrentWorker)
+		return
+	}
 	log.Printf("[prequeue] Prequeue %s failed: %s", prequeueID, errMsg)
 	// Emit a failure sample (complete=false, t0→failure, candidates attached) so
 	// the all-candidates-dead path is measurable instead
@@ -3997,7 +4210,7 @@ func (h *PrequeueHandler) failPrequeue(prequeueID, errMsg string) {
 	if h.latencyTracker != nil {
 		h.latencyTracker.NotePrequeueFailedSample(prequeueID, errMsg)
 	}
-	h.store.UpdateWorker(prequeueID, func(e *playback.PrequeueEntry) {
+	h.updateVODWorker(prequeueID, func(e *playback.PrequeueEntry) {
 		e.Status = playback.PrequeueStatusFailed
 		e.ProgressStage = "failed"
 		e.ProgressDetail = ""
@@ -4069,6 +4282,10 @@ type StartSubtitlesResponse struct {
 // StartSubtitles starts subtitle extraction for a prequeue with the given offset
 // This is called when the user clicks play, after they've chosen resume/start position
 func (h *PrequeueHandler) StartSubtitles(w http.ResponseWriter, r *http.Request) {
+	r, bodyOK := h.vodBoundary.boundBody(w, r)
+	if !bodyOK {
+		return
+	}
 	if r.Method == http.MethodOptions {
 		w.WriteHeader(http.StatusOK)
 		return
@@ -4079,6 +4296,15 @@ func (h *PrequeueHandler) StartSubtitles(w http.ResponseWriter, r *http.Request)
 	prequeueID := strings.TrimSpace(vars["prequeueID"])
 	if prequeueID == "" {
 		http.Error(w, "missing prequeue ID", http.StatusBadRequest)
+		return
+	}
+	_, owner, permitted := h.vodEntry(w, r, prequeueID, vodReady)
+	if !permitted {
+		return
+	}
+	defer owner.release()
+	r = h.vodBoundary.checkedRequest(r, owner)
+	if !h.vodBoundary.recheckHTTP(w, r, owner, vodReady) {
 		return
 	}
 	entry, exists := h.store.Get(prequeueID)

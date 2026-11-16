@@ -14,6 +14,7 @@ import (
 	"novastream/internal/profileaccess"
 	"novastream/models"
 	"novastream/services/badstreams"
+	"novastream/services/kidsvod"
 	"novastream/services/playback"
 	"novastream/utils/language"
 )
@@ -44,6 +45,15 @@ func (h *PrequeueHandler) reportableEntry(w http.ResponseWriter, r *http.Request
 		http.Error(w, "release reports require a profile session", http.StatusForbidden)
 		return nil
 	}
+	_, owner, permitted := h.vodEntry(w, r, strings.TrimSpace(mux.Vars(r)["prequeueID"]), vodReady)
+	if !permitted {
+		return nil
+	}
+	defer owner.release()
+	r = h.vodBoundary.checkedRequest(r, owner)
+	if !h.vodBoundary.recheckHTTP(w, r, owner, vodReady) {
+		return nil
+	}
 	entry, ok := h.store.Get(strings.TrimSpace(mux.Vars(r)["prequeueID"]))
 	if !ok {
 		http.NotFound(w, r)
@@ -71,6 +81,9 @@ func (h *PrequeueHandler) reportableEntry(w http.ResponseWriter, r *http.Request
 		http.Error(w, "a prepared selected release is required", http.StatusConflict)
 		return nil
 	}
+	if !h.vodBoundary.recheckHTTP(w, r, owner, vodReady) {
+		return nil
+	}
 	return entry
 }
 
@@ -95,8 +108,18 @@ func (h *PrequeueHandler) ReleaseReportOptions(w http.ResponseWriter, r *http.Re
 	if entry == nil {
 		return
 	}
+	actionOwner, permitted := h.vodBoundary.requestOwner(w, r, vodReady, entry.UserID)
+	if !permitted {
+		return
+	}
+	defer actionOwner.release()
+	r = h.vodBoundary.checkedRequest(r, actionOwner)
+
 	client := normalizeClientID(r.Header.Get("X-Client-ID"))
-	ctx := h.reportContextForPrequeue(entry.ID, entry.UserID, client, entry.TargetEpisode)
+	ctx := h.vodReportContext(entry, client)
+	if !h.vodBoundary.recheckHTTP(w, r, actionOwner, vodReady) {
+		return
+	}
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(map[string]any{"sourceVersion": sourceReportVersion(entry), "releaseName": entry.SelectedResult.Title, "audioLanguage": ctx.AudioLanguage, "audioTracks": entry.AudioTracks, "selectedAudioTrack": entry.SelectedAudioTrack, "canShare": h.canShareReleaseReport(r, entry.UserID), "hasEpisode": entry.TargetEpisode != nil})
 }
@@ -108,6 +131,10 @@ func (h *PrequeueHandler) RetryRelease(w http.ResponseWriter, r *http.Request) {
 	h.releaseAction(w, r, false)
 }
 func (h *PrequeueHandler) releaseAction(w http.ResponseWriter, r *http.Request, reporting bool) {
+	r, bodyOK := h.vodBoundary.boundBody(w, r)
+	if !bodyOK {
+		return
+	}
 	entry := h.reportableEntry(w, r)
 	if entry == nil {
 		return
@@ -127,7 +154,24 @@ func (h *PrequeueHandler) releaseAction(w http.ResponseWriter, r *http.Request, 
 	if client == "" {
 		client = normalizeClientID(r.Header.Get("X-Client-ID"))
 	}
-	ctx := h.reportContextForPrequeue(entry.ID, entry.UserID, client, entry.TargetEpisode)
+	operation := vodReady
+	if !reporting || req.Retry {
+		operation = vodDemand
+	}
+	actionOwner, permitted := h.vodBoundary.requestOwner(w, r, operation, entry.UserID)
+	if !permitted {
+		return
+	}
+	defer actionOwner.release()
+	if !h.vodBoundary.selectClient(w, actionOwner, client) || !h.vodBoundary.recheckHTTP(w, r, actionOwner, operation) {
+		return
+	}
+	if actionOwner != nil {
+		client = actionOwner.client
+		r = h.vodBoundary.checkedRequest(r, actionOwner)
+	}
+
+	ctx := h.vodReportContext(entry, client)
 	if reporting && req.Reason == "missing_language" && (req.AudioLanguage == "" || language.NormalizeToCode(req.AudioLanguage) != language.NormalizeToCode(ctx.AudioLanguage)) {
 		http.Error(w, "audio preference changed; reopen the report dialog", http.StatusConflict)
 		return
@@ -173,6 +217,10 @@ func (h *PrequeueHandler) releaseAction(w http.ResponseWriter, r *http.Request, 
 	}
 
 	if req.Retry {
+		owner := actionOwner
+		if !h.vodBoundary.selectClient(w, owner, client) || !h.vodBoundary.recheckHTTP(w, r, owner, vodDemand) {
+			return
+		}
 		offset := req.StartOffset
 		if offset < 0 || req.Reason == "wrong_title" || req.Reason == "wrong_episode" {
 			offset = 0
@@ -190,6 +238,10 @@ func (h *PrequeueHandler) releaseAction(w http.ResponseWriter, r *http.Request, 
 		}
 		h.latencyTracker.NotePrequeueRequested(next.ID, entry.TitleID, entry.UserID, entry.TitleName, entry.MediaType)
 		if created {
+			if !h.vodBoundary.bindWorker(next.ID, owner) {
+				vodDeny(w, kidsvod.CodeContextChanged)
+				return
+			}
 			go h.runPrequeueWorker(next.ID, entry.TitleID, entry.TitleName, "", entry.MediaType, entry.Year, entry.UserID, client, adaptiveThroughputFromRequest(r), entry.TargetEpisode, offset, req.SkipHLS, prequeueWorkerInteractive, prequeueLocalScope{accountID: auth.GetAccountID(r), master: auth.IsMaster(r), automaticLibrarySelection: entry.AutomaticLibrarySelection, excludedResult: func() *models.NZBResult {
 				if reporting {
 					return nil
@@ -201,6 +253,9 @@ func (h *PrequeueHandler) releaseAction(w http.ResponseWriter, r *http.Request, 
 		response["replacement"] = playback.PrequeueResponse{PrequeueID: next.ID, TargetEpisode: entry.TargetEpisode, Status: playback.PrequeueStatusQueued}
 		response["resumePosition"] = offset
 	}
+	if !h.vodBoundary.recheckHTTP(w, r, actionOwner, operation) {
+		return
+	}
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(response)
 }
@@ -211,6 +266,16 @@ func (h *PrequeueHandler) CancelReleaseRetry(w http.ResponseWriter, r *http.Requ
 		return
 	}
 	id := strings.TrimSpace(mux.Vars(r)["prequeueID"])
+	if h.vodBoundary != nil {
+		entry, ok := h.vodCleanupEntry(w, r, id)
+		if !ok {
+			return
+		}
+		h.store.CancelWork(entry.ID)
+		h.store.Delete(entry.ID)
+		w.WriteHeader(http.StatusNoContent)
+		return
+	}
 	entry, ok := h.store.Get(id)
 	if !ok {
 		w.WriteHeader(http.StatusNoContent)
@@ -229,4 +294,11 @@ func reportLibraryID(entry *playback.PrequeueEntry) string {
 		return ""
 	}
 	return entry.SelectedResult.Attributes["localLibraryId"]
+}
+
+func (h *PrequeueHandler) vodReportContext(entry *playback.PrequeueEntry, client string) badstreams.PlaybackContext {
+	if h.vodBoundary == nil {
+		return h.reportContextForPrequeue(entry.ID, entry.UserID, client, entry.TargetEpisode)
+	}
+	return reportContext(h.trackPreferenceResolver(), entry.UserID, client, entry.TitleID, entry.TargetEpisode)
 }
