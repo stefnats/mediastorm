@@ -931,16 +931,20 @@ func TestFetchM3UCategoriesIgnoresPlaylistBodyLimit(t *testing.T) {
 	}))
 	defer playlistServer.Close()
 
+	// Disk cache keys include the URL. A unique path prevents a recycled
+	// loopback port from reusing a body left by another test or run.
+	playlistURL := playlistServer.URL + "/" + filepath.Base(filepath.Dir(t.TempDir()))
+
 	mgr := config.NewManager(filepath.Join(t.TempDir(), "settings.json"))
 	settings := config.DefaultSettings()
-	settings.Live.PlaylistURL = playlistServer.URL
+	settings.Live.PlaylistURL = playlistURL
 	if err := mgr.Save(settings); err != nil {
 		t.Fatalf("save settings: %v", err)
 	}
 	h := NewLiveHandler(playlistServer.Client(), false, "", 24, 0, 0, false, mgr, nil)
 	h.maxSize = 64
 
-	categories, err := h.fetchM3UCategories(t.Context(), playlistServer.URL, "")
+	categories, err := h.fetchM3UCategories(t.Context(), playlistURL, "")
 	if err != nil {
 		t.Fatalf("fetchM3UCategories() error = %v", err)
 	}
@@ -953,7 +957,7 @@ func TestFetchM3UCategoriesIgnoresPlaylistBodyLimit(t *testing.T) {
 		t.Fatalf("categories = %+v, want News=1 and Sports=1", categories)
 	}
 
-	if _, err := h.fetchPlaylistContents(t.Context(), playlistServer.URL, ""); err == nil {
+	if _, err := h.fetchPlaylistContents(t.Context(), playlistURL, ""); err == nil {
 		t.Fatalf("fetchPlaylistContents() error = nil, want playlist size limit error")
 	}
 }
