@@ -1627,7 +1627,8 @@ paths:
         The server sorts and filters before paging; never re-sort pages on the
         client. Use `total` for paging and `genres` for filter facets.
         `items` is `WatchlistItem[]` for `watchlist` / `custom-list`,
-        `TrendingItem[]` for `permanent-prequeue` and custom-list shelves, and
+        `TrendingItem[]` for `permanent-prequeue` and custom-list shelves,
+        `HiddenItem[]` for the complete stored `hidden` management index, and
         the delegated metadata payload (usually `TrendingItem[]`) for
         discovery sources.
       parameters:
@@ -1636,7 +1637,7 @@ paths:
           description: |
             Up to 32 distinct registered canonical ISO639-3 codes, separated by
             commas. Supported only for stored watchlist, custom-list (including
-            aliases and custom-list shelves), and permanent-prequeue. Matches
+            aliases and custom-list shelves), permanent-prequeue, and hidden. Matches
             current cached provider original-language facts before paging;
             missing, expired or unbound facts are unknown. No provider lookup
             is started. Invalid or unsupported active queries return 400.
@@ -1654,11 +1655,19 @@ paths:
           in: query
           description: |
             List source. Defaults to `watchlist`. Also: `custom-list` (needs
-            `listId`), `continue-watching`, `permanent-prequeue`, `top-ten`,
+            `listId`), `hidden`, `continue-watching`, `permanent-prequeue`, `top-ten`,
             `popular-on-server`, `recently-watched`, `trending`, `genre`,
             `decade`, `mdblist`, `stremio`, `tmdb-list`, `trakt-list`,
             `publicmetadb-list`, `simkl-list`, `letterboxd-list`,
             `personalized`, `loved`, `custom-ai`, `similar`, `collection`.
+            `hidden` reads every saved suppression marker for the owned profile,
+            without applying suppression to itself or starting metadata/history,
+            artwork, source, prequeue or provider work. Its IDs and hiddenAt stay
+            unchanged. Supports original language, titleFilter, filterMediaType,
+            alphabet and default/added(hiddenAt)/name/year sorting before total
+            and pagination. Watched/genre/runtime/rating/count requirements, ratingSource and
+            includeFacets=true return
+            400. limit=0 yields the complete matching Random pool, not discovery.
             `loved` reads the active profile's existing Love ratings, with current
             profile/PIN/child restrictions, bounded paging and cache-only artwork;
             it does not create another list or start provider searches.
@@ -4564,6 +4573,20 @@ components:
           type: string
           format: date-time
 
+    HiddenItem:
+      type: object
+      required: [id, mediaType, hiddenAt]
+      properties:
+        id: {type: string}
+        mediaType: {type: string}
+        name: {type: string}
+        year: {type: integer}
+        posterUrl: {type: string}
+        backdropUrl: {type: string}
+        externalIds:
+          $ref: '#/components/schemas/ExternalIDs'
+        hiddenAt: {type: string, format: date-time}
+
     DisplayListResponse:
       type: object
       required: [source, items, total]
@@ -4571,7 +4594,7 @@ components:
         originalLanguageFilterSupported:
           type: boolean
           readOnly: true
-          description: True only for normalized stored watchlist, custom-list and permanent-prequeue sources. On these sources total is the effective filtered count before pagination; sourceTotal or unfilteredTotal must not drive paging.
+          description: True only for normalized stored watchlist, custom-list, permanent-prequeue and hidden sources. On these sources total is the effective filtered count before pagination; sourceTotal or unfilteredTotal must not drive paging.
         source:
           type: string
           description: Canonical source name actually served.
@@ -4584,6 +4607,7 @@ components:
               - $ref: '#/components/schemas/WatchlistItem'
               - $ref: '#/components/schemas/TrendingItem'
               - $ref: '#/components/schemas/SeriesWatchState'
+              - $ref: '#/components/schemas/HiddenItem'
         total:
           type: integer
           description: Total matching items before paging.

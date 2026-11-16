@@ -160,6 +160,12 @@ func (h *DisplayListHandler) get(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "original-language filtering is unsupported for this source", http.StatusBadRequest)
 		return
 	}
+	// Hidden management reads the complete saved suppression index. It must
+	// never hide its own rows, warm metadata, or inherit discovery-window caps.
+	if source == "hidden" {
+		h.getHiddenManagement(w, r, userID, languageQuery)
+		return
+	}
 	metadataSource := source != "watchlist" &&
 		source != "custom-list" &&
 		source != "custom_user_list" &&
@@ -393,6 +399,50 @@ func (h *DisplayListHandler) get(w http.ResponseWriter, r *http.Request) {
 		MetadataPending:                 metadataPending,
 		OriginalLanguageFilterSupported: languageSupported,
 	})
+}
+
+func (h *DisplayListHandler) getHiddenManagement(w http.ResponseWriter, r *http.Request, userID string, language displayListOriginalLanguageQuery) {
+	query := parseDisplayListQuery(r)
+	if err := validateHiddenManagementQuery(query); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	if h.HiddenItemsService == nil {
+		http.Error(w, "hidden items source unavailable", http.StatusServiceUnavailable)
+		return
+	}
+	items, err := h.HiddenItemsService.List(userID)
+	if err != nil {
+		http.Error(w, "hidden items source unavailable", http.StatusServiceUnavailable)
+		return
+	}
+	if language.active() {
+		matches := h.originalLanguageMatcher(userID, language)
+		filtered := make([]models.HiddenItem, 0, len(items))
+		for _, item := range items {
+			if matches(item.ID, item.MediaType) {
+				filtered = append(filtered, item)
+			}
+		}
+		items = filtered
+	}
+	items, alphabet := queryHiddenManagementItems(items, query)
+	total := len(items)
+	limit, offset := parseLimitOffset(r)
+	if offset >= len(items) {
+		items = []models.HiddenItem{}
+	} else {
+		items = items[offset:]
+		if limit > 0 && limit < len(items) {
+			items = items[:limit]
+		}
+	}
+	if items == nil {
+		items = []models.HiddenItem{}
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Cache-Control", "private, no-store")
+	_ = json.NewEncoder(w).Encode(DisplayListResponse{Source: "hidden", Items: items, Total: total, AlphabetBuckets: alphabet, OriginalLanguageFilterSupported: true})
 }
 
 func permanentPrequeueWatchlistItems(entries []*playback.PrequeueEntry, userID string) []models.WatchlistItem {

@@ -2,9 +2,11 @@ package handlers
 
 import (
 	"errors"
+	"fmt"
 	"net/http"
 	"net/url"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -443,37 +445,75 @@ type cachedOriginalLanguageReader interface {
 	GetCachedOriginalLanguageEvidence(titleID, mediaType string, at time.Time) *models.OriginalLanguageEvidence
 }
 
-func (h *DisplayListHandler) filterOriginalLanguages(userID string, items []models.WatchlistItem, q displayListOriginalLanguageQuery) []models.WatchlistItem {
-	if !q.active() {
-		return items
-	}
+// originalLanguageMatcher shares one current observation time and one verified
+// cache lookup per exact ID/kind within this response. Saved aliases/scalars
+// never substitute for the existing provider-bound cache validation.
+func (h *DisplayListHandler) originalLanguageMatcher(userID string, q displayListOriginalLanguageQuery) func(string, string) bool {
 	reader, _ := h.metadataForUser(userID).(cachedOriginalLanguageReader)
 	at := time.Now()
-	// Keep facts request-local. Saved ExternalIDs and manual language values are
-	// not identity evidence, and no cache miss schedules provider work.
-	facts := make(map[string]string)
-	result := make([]models.WatchlistItem, 0, len(items))
-	for _, item := range items {
-		key := item.MediaType + "\x00" + item.ID
+	type identity struct{ id, kind string }
+	facts := map[identity]string{}
+	return func(id, kind string) bool {
+		key := identity{id, kind}
 		language, found := facts[key]
 		if !found {
 			if reader != nil {
-				if fact := reader.GetCachedOriginalLanguageEvidence(item.ID, item.MediaType, at); fact != nil {
+				if fact := reader.GetCachedOriginalLanguageEvidence(id, kind, at); fact != nil {
 					language = models.NormalizeEvidenceLanguage(fact.Language)
 				}
 			}
 			facts[key] = language
 		}
-		if (language == "" && q.IncludeUnknown) || (language != "" && q.Languages[language]) {
+		return language == "" && q.IncludeUnknown || language != "" && q.Languages[language]
+	}
+}
+func (h *DisplayListHandler) filterOriginalLanguages(userID string, items []models.WatchlistItem, q displayListOriginalLanguageQuery) []models.WatchlistItem {
+	if !q.active() {
+		return items
+	}
+	matches := h.originalLanguageMatcher(userID, q)
+	result := make([]models.WatchlistItem, 0, len(items))
+	for _, item := range items {
+		if matches(item.ID, item.MediaType) {
 			result = append(result, item)
 		}
 	}
 	return result
 }
 
+func validateHiddenManagementQuery(q displayListQueryOptions) error {
+	if q.WatchStatus != "" && q.WatchStatus != "all" || len(q.Genres) > 0 || q.IncludeUnwatchedCounts || q.IncludeFacets || q.RatingSource != "" {
+		return fmt.Errorf("hidden items do not support watched, genre, rating, general facets or episode-count requirements")
+	}
+	switch q.SortBy {
+	case "", "default", "added", "name", "year":
+	default:
+		return fmt.Errorf("hidden items support only default, added, name and year sorting")
+	}
+	if q.MediaType != "" && q.MediaType != "all" && q.MediaType != "movie" && q.MediaType != "series" {
+		return fmt.Errorf("unsupported hidden media type")
+	}
+	return nil
+}
+func queryHiddenManagementItems(items []models.HiddenItem, q displayListQueryOptions) ([]models.HiddenItem, []string) {
+	// Private ordinals keep original HiddenItem fields/IDs intact through the
+	// existing stored-field query/sort, even if an adapter returns duplicate IDs.
+	index := make([]models.WatchlistItem, len(items))
+	for i, item := range items {
+		index[i] = models.WatchlistItem{ID: strconv.Itoa(i), Name: item.Name, MediaType: item.MediaType, Year: item.Year, AddedAt: item.HiddenAt}
+	}
+	ordered, _, alphabet := queryWatchlistItems(index, q)
+	result := make([]models.HiddenItem, 0, len(ordered))
+	for _, item := range ordered {
+		i, _ := strconv.Atoi(item.ID)
+		result = append(result, items[i])
+	}
+	return result, alphabet
+}
+
 func displayListOriginalLanguageSupportedSource(source string) bool {
 	switch source {
-	case "watchlist", "custom-list", "custom_user_list", "custom-user-list", "permanent-prequeue":
+	case "watchlist", "custom-list", "custom_user_list", "custom-user-list", "permanent-prequeue", "hidden":
 		return true
 	default:
 		return false
