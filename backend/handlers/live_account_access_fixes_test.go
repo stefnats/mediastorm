@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -28,16 +29,16 @@ func withAccount(r *http.Request, accountID string, master bool) *http.Request {
 // A household naming another household's profile (here the master
 // household's) must not get that profile's channels or provider URLs.
 func TestLiveChannelsRejectAnotherHouseholdsProfile(t *testing.T) {
-	var fetched int
+	var fetched atomic.Int32
 	provider := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		fetched++
+		fetched.Add(1)
 		_, _ = w.Write([]byte("#EXTM3U\n#EXTINF:-1 tvg-id=\"news\",News\nhttps://media.example/user/secret/news.ts\n"))
 	}))
 	defer provider.Close()
 	manager := config.NewManager(filepath.Join(t.TempDir(), "settings.json"))
 	master := []string{models.MasterAccountID}
 	if err := manager.Save(config.Settings{Live: config.LiveSettings{Sources: []config.LivePlaylistSource{
-		{ID: "main", Mode: "m3u", PlaylistURL: provider.URL + "/list.m3u", AllowedAccounts: &master},
+		{ID: "main", Mode: "m3u", PlaylistURL: stationPlaylistURL(t, provider.URL+"/list.m3u"), AllowedAccounts: &master},
 	}}}); err != nil {
 		t.Fatal(err)
 	}
@@ -48,8 +49,8 @@ func TestLiveChannelsRejectAnotherHouseholdsProfile(t *testing.T) {
 	})
 
 	foreign := withAccount(httptest.NewRequest(http.MethodGet, "/api/live/channels?profileId=default", nil), "other", false)
-	if channels, _ := h.FetchFilteredChannelsForRequest(foreign); len(channels) != 0 || fetched != 0 {
-		t.Fatalf("another household read the master catalog: %d channels, %d fetches", len(channels), fetched)
+	if channels, _ := h.FetchFilteredChannelsForRequest(foreign); len(channels) != 0 || fetched.Load() != 0 {
+		t.Fatalf("another household read the master catalog: %d channels, %d fetches", len(channels), fetched.Load())
 	}
 	w := httptest.NewRecorder()
 	h.GetChannels(w, foreign)
@@ -60,6 +61,9 @@ func TestLiveChannelsRejectAnotherHouseholdsProfile(t *testing.T) {
 	own := withAccount(httptest.NewRequest(http.MethodGet, "/api/live/channels?profileId=default", nil), models.MasterAccountID, true)
 	if channels, err := h.FetchFilteredChannelsForRequest(own); err != nil || len(channels) != 1 {
 		t.Fatalf("master's own profile: %d channels, %v", len(channels), err)
+	}
+	if fetched.Load() != 1 {
+		t.Fatalf("own initial playlist reads=%d", fetched.Load())
 	}
 }
 

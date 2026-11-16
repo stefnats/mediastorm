@@ -98,13 +98,20 @@ func TestStationGroupsAreContiguousAndPreserveEntryFavorites(t *testing.T) {
 }
 
 func TestStationGroupedCatalogPaginationAndDefaultOff(t *testing.T) {
+	var playlistA, playlistB atomic.Int32
 	var provider *httptest.Server
 	provider = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/a":
+			playlistA.Add(1)
+		case "/b":
+			playlistB.Add(1)
+		}
 		fmt.Fprintf(w, "#EXTM3U\n#EXTINF:-1 tvg-id=\"RTL.de\" tvg-country=\"DE\" group-title=\"Germany\",RTL HD\n%s/%s-rtl.ts\n#EXTINF:-1 tvg-id=\"ZDF.de\" group-title=\"Germany\",ZDF HD\n%s/%s-zdf.ts\n", provider.URL, r.URL.Path, provider.URL, r.URL.Path)
 	}))
 	defer provider.Close()
 	cfg := config.NewManager(filepath.Join(t.TempDir(), "settings.json"))
-	settings := config.Settings{Live: config.LiveSettings{Sources: []config.LivePlaylistSource{{ID: "a", Mode: "m3u", PlaylistURL: provider.URL + "/a"}, {ID: "b", Mode: "m3u", PlaylistURL: provider.URL + "/b"}}}}
+	settings := config.Settings{Live: config.LiveSettings{Sources: []config.LivePlaylistSource{{ID: "a", Mode: "m3u", PlaylistURL: stationPlaylistURL(t, provider.URL+"/a")}, {ID: "b", Mode: "m3u", PlaylistURL: stationPlaylistURL(t, provider.URL+"/b")}}}}
 	if err := cfg.Save(settings); err != nil {
 		t.Fatal(err)
 	}
@@ -124,6 +131,9 @@ func TestStationGroupedCatalogPaginationAndDefaultOff(t *testing.T) {
 		return page
 	}
 	normal := read(nil, 0, 4)
+	if playlistA.Load() != 1 || playlistB.Load() != 1 {
+		t.Fatalf("initial playlist reads a=%d b=%d", playlistA.Load(), playlistB.Load())
+	}
 	if normal.Channels[0].StationID == normal.Channels[1].StationID {
 		t.Fatal("default changed playlist order")
 	}
@@ -141,6 +151,9 @@ func TestStationGroupedCatalogPaginationAndDefaultOff(t *testing.T) {
 	}
 	if first.Channels[0].StationID == second.Channels[0].StationID {
 		t.Fatal("different station groups merged")
+	}
+	if playlistA.Load() != 1 || playlistB.Load() != 1 {
+		t.Fatal("pagination did not reuse its own warm playlists")
 	}
 }
 
@@ -247,12 +260,18 @@ func runStationFailoverFixture(t *testing.T, silent bool) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	var open, maxOpen, failed, working atomic.Int32
+	var open, maxOpen, failed, working, playlistA, playlistB atomic.Int32
 	closed := make(chan struct{}, 4)
 	var provider *httptest.Server
 	provider = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/get.php" {
 			source := r.URL.Query().Get("list")
+			if source == "a" {
+				playlistA.Add(1)
+			}
+			if source == "b" {
+				playlistB.Add(1)
+			}
 			name := "RTL HD"
 			if source == "b" {
 				name = "RTL FHD"
@@ -300,8 +319,8 @@ func runStationFailoverFixture(t *testing.T, silent bool) {
 	defer provider.Close()
 	cfg := config.NewManager(filepath.Join(t.TempDir(), "settings.json"))
 	settings := config.Settings{Live: config.LiveSettings{AutoChannelFailover: true, GroupChannelsByStation: true, Sources: []config.LivePlaylistSource{
-		{ID: "a", Name: "German list A", Mode: "m3u", PlaylistURL: provider.URL + "/get.php?username=fixture&password=fixture&list=a", MaxStreams: 1, StreamFormat: "direct"},
-		{ID: "b", Name: "German list B", Mode: "m3u", PlaylistURL: provider.URL + "/get.php?username=fixture&password=fixture&list=b", MaxStreams: 1, StreamFormat: "direct"},
+		{ID: "a", Name: "German list A", Mode: "m3u", PlaylistURL: stationPlaylistURL(t, provider.URL+"/get.php?username=fixture&password=fixture&list=a"), MaxStreams: 1, StreamFormat: "direct"},
+		{ID: "b", Name: "German list B", Mode: "m3u", PlaylistURL: stationPlaylistURL(t, provider.URL+"/get.php?username=fixture&password=fixture&list=b"), MaxStreams: 1, StreamFormat: "direct"},
 	}}}
 	if err := cfg.Save(settings); err != nil {
 		t.Fatal(err)
@@ -342,6 +361,9 @@ func runStationFailoverFixture(t *testing.T, silent bool) {
 			t.Fatalf("fallback did not produce video: source=%q fatal=%q", source, fatal)
 		}
 		time.Sleep(20 * time.Millisecond)
+	}
+	if playlistA.Load() != 1 || playlistB.Load() != 1 {
+		t.Fatalf("failover playlist reads a=%d b=%d", playlistA.Load(), playlistB.Load())
 	}
 	segment := filepath.Join(session.OutputDir, "segment0.ts")
 	if out, err := exec.Command(ffmpeg, "-v", "error", "-i", segment, "-frames:v", "1", "-f", "null", "-").CombinedOutput(); err != nil {

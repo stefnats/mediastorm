@@ -97,7 +97,7 @@ func TestAccountCatalogRevocationAppliesBeforeWarmPlaylistCache(t *testing.T) {
 	defer provider.Close()
 	manager := config.NewManager(filepath.Join(t.TempDir(), "settings.json"))
 	accounts := []string{"household"}
-	settings := config.Settings{Live: config.LiveSettings{RequireAccountAssignment: true, Sources: []config.LivePlaylistSource{{ID: "family", Mode: "m3u", PlaylistURL: provider.URL + "/list.m3u", AllowedAccounts: &accounts}}}}
+	settings := config.Settings{Live: config.LiveSettings{RequireAccountAssignment: true, Sources: []config.LivePlaylistSource{{ID: "family", Mode: "m3u", PlaylistURL: stationPlaylistURL(t, provider.URL+"/list.m3u"), AllowedAccounts: &accounts}}}}
 	if err := manager.Save(settings); err != nil {
 		t.Fatal(err)
 	}
@@ -111,6 +111,9 @@ func TestAccountCatalogRevocationAppliesBeforeWarmPlaylistCache(t *testing.T) {
 		t.Fatal("account profiles did not inherit the assigned catalog")
 	}
 	before := fetched.Load()
+	if before != 1 {
+		t.Fatalf("initial household playlist reads=%d", before)
+	}
 	if len(get("bernd")) != 0 || fetched.Load() != before {
 		t.Fatal("foreign account fetched the provider")
 	}

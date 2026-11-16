@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 
 	"novastream/api/openapi"
@@ -46,7 +47,9 @@ func TestNativeStationFavoriteTransportMatchesRealHandlersAndSchema(t *testing.T
 		t.Fatal(err)
 	}
 	mgr := config.NewManager(filepath.Join(t.TempDir(), "config.json"))
+	var playlistReads atomic.Int32
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		playlistReads.Add(1)
 		if r.Method != "GET" || r.URL.Path != "/playlist" {
 			t.Errorf("unexpected provider or stream action %s %s", r.Method, r.URL.Path)
 			http.NotFound(w, r)
@@ -55,12 +58,15 @@ func TestNativeStationFavoriteTransportMatchesRealHandlersAndSchema(t *testing.T
 		_, _ = w.Write([]byte(stationM3U(stationM3URow("news.de", "News HD", "News", "de"), stationM3URow("RTL.de", "RTL HD", "General", "de"), stationM3URow("RTLHD.de", "RTL Television FHD", "General", "de"))))
 	}))
 	defer server.Close()
-	if err = mgr.Save(config.Settings{Live: config.LiveSettings{Mode: "m3u", PlaylistURL: server.URL + "/playlist"}}); err != nil {
+	if err = mgr.Save(config.Settings{Live: config.LiveSettings{Mode: "m3u", PlaylistURL: stationPlaylistURL(t, server.URL+"/playlist")}}); err != nil {
 		t.Fatal(err)
 	}
 	live := NewLiveHandler(server.Client(), false, "", 0, 0, 0, false, mgr, prefs)
 	live.SetUsersService(stationProfiles{})
 	initial := stationChannelCall(t, live, "", nil)
+	if playlistReads.Load() != 1 {
+		t.Fatalf("initial playlist reads=%d", playlistReads.Load())
+	}
 	var station, hidden string
 	for _, channel := range initial.Channels {
 		if channel.Name == "RTL HD" {

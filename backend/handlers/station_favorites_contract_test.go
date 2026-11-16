@@ -6,6 +6,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"sync/atomic"
 	"testing"
 
 	"novastream/api/openapi"
@@ -39,15 +40,20 @@ func stationFavoritesOpenAPIContract(t *testing.T, v *openapi.Validator) {
 	call.body = map[string]any{"stationId": station, "favorite": false}
 	call.invalid = false
 	empty := exercise(t, v, call, h.SetStationFavorite, 200)
+	var playlistReads atomic.Int32
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		playlistReads.Add(1)
 		_, _ = w.Write([]byte(stationM3U(stationM3URow("RTL.de", "RTL HD", "General", "de"), stationM3URow("RTLHD.de", "RTL Television FHD", "General", "de"))))
 	}))
 	defer server.Close()
-	if err = mgr.Save(config.Settings{Live: config.LiveSettings{Mode: "m3u", PlaylistURL: server.URL}}); err != nil {
+	if err = mgr.Save(config.Settings{Live: config.LiveSettings{Mode: "m3u", PlaylistURL: stationPlaylistURL(t, server.URL)}}); err != nil {
 		t.Fatal(err)
 	}
 	live := NewLiveHandler(server.Client(), false, "", 0, 0, 0, false, mgr, s)
 	channels := stationChannelCall(t, live, "&favoriteStationId="+station+"&favoritesOnly=true&limit=1", nil)
+	if playlistReads.Load() != 1 {
+		t.Fatalf("initial playlist reads=%d", playlistReads.Load())
+	}
 	doc, err := openapi.Load(t.Context())
 	if err != nil {
 		t.Fatal(err)

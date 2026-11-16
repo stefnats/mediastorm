@@ -6,6 +6,7 @@ import (
 	"net/http/httptest"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 
 	"novastream/config"
@@ -48,19 +49,26 @@ func TestResolveProfileLiveSourceDropsWithheldSourcesFromProfileCopy(t *testing.
 }
 
 func TestGetChannelsSelectsSourceBySettingsIndex(t *testing.T) {
+	var playlistA, playlistB atomic.Int32
 	playlists := map[string]string{
 		"/a.m3u": "#EXTM3U\n#EXTINF:-1,Alpha One\nhttp://stream.example/a1\n",
 		"/b.m3u": "#EXTM3U\n#EXTINF:-1,Bravo One\nhttp://stream.example/b1\n",
 	}
 	provider := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/a.m3u" {
+			playlistA.Add(1)
+		}
+		if r.URL.Path == "/b.m3u" {
+			playlistB.Add(1)
+		}
 		_, _ = w.Write([]byte(playlists[r.URL.Path]))
 	}))
 	defer provider.Close()
 
 	mgr := config.NewManager(filepath.Join(t.TempDir(), "settings.json"))
 	if err := mgr.Save(config.Settings{Live: config.LiveSettings{Sources: []config.LivePlaylistSource{
-		{Name: "A", Mode: "m3u", PlaylistURL: provider.URL + "/a.m3u", AllowedProfiles: []string{"someone"}},
-		{Name: "B", Mode: "m3u", PlaylistURL: provider.URL + "/b.m3u"},
+		{Name: "A", Mode: "m3u", PlaylistURL: stationPlaylistURL(t, provider.URL+"/a.m3u"), AllowedProfiles: []string{"someone"}},
+		{Name: "B", Mode: "m3u", PlaylistURL: stationPlaylistURL(t, provider.URL+"/b.m3u")},
 	}}}); err != nil {
 		t.Fatalf("save settings: %v", err)
 	}
@@ -90,6 +98,9 @@ func TestGetChannelsSelectsSourceBySettingsIndex(t *testing.T) {
 	// The app endpoint still withholds the restricted source.
 	if code, names := channelNames(h.GetChannels, "/api/live/channels?profileId=other"); code != http.StatusOK || len(names) != 1 || names[0] != "Bravo One" {
 		t.Fatalf("profile channels -> %d %v, want only [Bravo One]", code, names)
+	}
+	if playlistA.Load() != 1 || playlistB.Load() != 1 {
+		t.Fatalf("source playlist reads a=%d b=%d", playlistA.Load(), playlistB.Load())
 	}
 }
 

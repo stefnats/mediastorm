@@ -19,22 +19,29 @@ import (
 )
 
 type recordingSourcePlanFixture struct {
-	h        *LiveHandler
-	manager  *config.Manager
-	settings config.Settings
-	job      models.Recording
-	server   *httptest.Server
-	streams  atomic.Int32
+	h         *LiveHandler
+	manager   *config.Manager
+	settings  config.Settings
+	job       models.Recording
+	server    *httptest.Server
+	streams   atomic.Int32
+	playlists map[string]*atomic.Int32
 }
 
 func newRecordingSourcePlanFixture(t *testing.T, mutate func(*config.Settings, string)) *recordingSourcePlanFixture {
 	t.Helper()
-	f := &recordingSourcePlanFixture{}
+	f := &recordingSourcePlanFixture{playlists: map[string]*atomic.Int32{}}
+	for _, id := range []string{"a", "b", "c", "d", "e", "hidden", "disabled", "wrong-category"} {
+		f.playlists[id] = &atomic.Int32{}
+	}
 	f.server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if strings.HasSuffix(r.URL.Path, ".ts") {
 			f.streams.Add(1)
 			http.Error(w, "planner must not open media", 500)
 			return
+		}
+		if reads := f.playlists[strings.TrimPrefix(r.URL.Path, "/")]; reads != nil {
+			reads.Add(1)
 		}
 		_, _ = fmt.Fprintln(w, "#EXTM3U")
 		row := func(id, name, country, language, suffix string) {
@@ -55,7 +62,7 @@ func newRecordingSourcePlanFixture(t *testing.T, mutate func(*config.Settings, s
 	f.settings = config.Settings{Live: config.LiveSettings{AutoChannelFailover: true, RequireAccountAssignment: true}}
 	f.settings.Filtering.MaxResolution = "1080p"
 	for _, id := range []string{"a", "b", "c", "d", "e", "hidden", "disabled", "wrong-category"} {
-		source := config.LivePlaylistSource{ID: id, Mode: "m3u", PlaylistURL: f.server.URL + "/" + id, AllowedAccounts: &accounts, MaxStreams: 1}
+		source := config.LivePlaylistSource{ID: id, Mode: "m3u", PlaylistURL: stationPlaylistURL(t, f.server.URL+"/"+id), AllowedAccounts: &accounts, MaxStreams: 1}
 		if id == "hidden" {
 			source.AllowedProfiles = []string{"another"}
 		}
@@ -89,6 +96,15 @@ func newRecordingSourcePlanFixture(t *testing.T, mutate func(*config.Settings, s
 	}
 	if f.job.ChannelID == "" {
 		t.Fatal("synthetic primary was not catalogued")
+	}
+	for id, reads := range f.playlists {
+		want := int32(1)
+		if id == "hidden" || id == "disabled" {
+			want = 0
+		}
+		if reads.Load() != want {
+			t.Fatalf("initial catalogue playlist %s reads=%d want%d", id, reads.Load(), want)
+		}
 	}
 	return f
 }

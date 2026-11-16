@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"sync/atomic"
 	"testing"
 
 	"novastream/config"
@@ -12,14 +13,16 @@ import (
 )
 
 func TestRecordingRuleForecastInternalCatalogUsesJobOwner(t *testing.T) {
+	var playlistReads atomic.Int32
 	provider := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		playlistReads.Add(1)
 		_, _ = w.Write([]byte("#EXTM3U\n#EXTINF:-1 tvg-id=\"fixture.channel\",Synthetic channel\nhttp://cdn.example/synthetic.ts\n"))
 	}))
 	defer provider.Close()
 	accounts := []string{"household", "other"}
 	manager := config.NewManager(filepath.Join(t.TempDir(), "settings.json"))
 	if err := manager.Save(config.Settings{Live: config.LiveSettings{RequireAccountAssignment: true, Sources: []config.LivePlaylistSource{
-		{ID: "shared", Mode: "m3u", PlaylistURL: provider.URL, AllowedAccounts: &accounts},
+		{ID: "shared", Mode: "m3u", PlaylistURL: stationPlaylistURL(t, provider.URL), AllowedAccounts: &accounts},
 	}}}); err != nil {
 		t.Fatal(err)
 	}
@@ -41,5 +44,8 @@ func TestRecordingRuleForecastInternalCatalogUsesJobOwner(t *testing.T) {
 		if _, err := h.RecordingChannels(ctx, id); err == nil {
 			t.Fatalf("unrecordable profile accepted: %s", id)
 		}
+	}
+	if playlistReads.Load() != 1 {
+		t.Fatalf("owned catalog playlist reads=%d", playlistReads.Load())
 	}
 }
