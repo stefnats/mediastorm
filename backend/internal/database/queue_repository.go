@@ -86,6 +86,51 @@ func (r *QueueRepository) AddStoragePath(itemID int64, storagePath string) error
 // SABFallbackMetadataKey is reserved for the importer's durable handoff receipt.
 const SABFallbackMetadataKey = "_sabFallbackV1"
 
+// SABFallbackReceiptRow deliberately excludes all queue paths and other metadata.
+type SABFallbackReceiptRow struct {
+	ID      int64
+	Receipt sql.NullString
+}
+
+// ListSABFallbackReceipts reads a bounded keyset page of durable receipts only.
+// The caller supplies an insertion ceiling; updates and deletions are not frozen.
+func (r *QueueRepository) ListSABFallbackReceipts(ctx context.Context, ceiling, before int64, limit int) ([]SABFallbackReceiptRow, error) {
+	if ceiling <= 0 || before < 0 || before > ceiling || limit < 1 || limit > 101 {
+		return nil, fmt.Errorf("invalid fallback page")
+	}
+	db, ok := r.db.(interface {
+		QueryContext(context.Context, string, ...any) (*sql.Rows, error)
+	})
+	if !ok {
+		return nil, fmt.Errorf("context-aware queue database required")
+	}
+	rows, err := db.QueryContext(ctx, `SELECT id,
+        CASE WHEN length(CAST(json_extract(metadata, '$._sabFallbackV1') AS BLOB)) <= 8192
+        THEN CAST(json_extract(metadata, '$._sabFallbackV1') AS TEXT) ELSE NULL END
+        FROM import_queue WHERE id <= ? AND (? = 0 OR id < ?)
+        AND (CASE WHEN json_valid(metadata) THEN json_type(metadata, '$._sabFallbackV1') ELSE NULL END) IS NOT NULL
+        ORDER BY id DESC LIMIT ?`, ceiling, before, before, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	result := make([]SABFallbackReceiptRow, 0, limit)
+	for rows.Next() {
+		var row SABFallbackReceiptRow
+		if err := rows.Scan(&row.ID, &row.Receipt); err != nil {
+			return nil, err
+		}
+		result = append(result, row)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	return result, nil
+}
+
 // CompareAndSwapMetadata keeps concurrent writers from erasing a handoff claim.
 func (r *QueueRepository) CompareAndSwapMetadata(ctx context.Context, id int64, old, next *string, failedOnly bool) (bool, error) {
 	if err := ctx.Err(); err != nil {

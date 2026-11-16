@@ -1131,6 +1131,7 @@ func TestOpenAPIContract(t *testing.T) {
 	t.Run("local_library_language", func(t *testing.T) { localLibraryLanguageOpenAPIContract(t, v) })
 
 	t.Run("usenet_fallback_status", func(t *testing.T) { sabFallbackOpenAPIContract(t, v) })
+	t.Run("usenet_fallback_list", func(t *testing.T) { sabFallbackListOpenAPIContract(t, v) })
 
 	t.Run("loved_stored_language", func(t *testing.T) { lovedStoredLanguageOpenAPIContract(t, v) })
 

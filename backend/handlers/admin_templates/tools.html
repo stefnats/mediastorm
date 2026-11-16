@@ -164,6 +164,22 @@
     </section>
     {{end}}
 
+    {{if .IsAdmin}}
+    <section class="maintenance-dashboard-section" id="sabFallbackPanel" aria-labelledby="sabFallbackTitle" data-endpoint="{{.ServerBasePath}}/admin/api/usenet/fallback">
+        <h2 id="sabFallbackTitle">SAB download handoffs</h2>
+        <p>Saved observations of the configured fallback after a failed import. Download completion does not mean imported or ready to play. This view never submits or retries a download.</p>
+        <button class="btn btn-secondary" type="button" id="sabFallbackReload">Reload saved status</button>
+        <p id="sabFallbackMessage" role="status" aria-live="polite"></p>
+        <div id="sabFallbackRows" style="display:grid;gap:1rem;overflow-wrap:anywhere"></div>
+        <div style="display:flex;gap:.5rem;flex-wrap:wrap;margin-top:1rem">
+            <button class="btn btn-secondary" type="button" id="sabFallbackPrevious" disabled>Previous</button>
+            <button class="btn btn-secondary" type="button" id="sabFallbackNext" disabled>Next</button>
+        </div>
+        <p>Browsing reads saved records only. Refresh status explicitly checks one existing handoff. Observation times are server times, not proof of a local file. Pages exclude newer queue entries; statuses, deletions and handoffs attached to older queue entries may change between reads.</p>
+    </section>
+    <script src="{{.ServerBasePath}}/api/static/sab-fallback-v1.js" defer></script>
+    {{end}}
+
     <section class="maintenance-dashboard-section" aria-labelledby="maintenanceSystemTitle">
         <h2 id="maintenanceSystemTitle">Maintain system</h2>
         <div class="maintenance-system-list">

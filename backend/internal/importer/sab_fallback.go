@@ -9,10 +9,12 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"math"
 	"net/http"
 	"net/url"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -27,6 +29,7 @@ var (
 	ErrSABFallbackUnavailable   = errors.New("fallback status unavailable")
 	ErrSABFallbackSourceChanged = errors.New("fallback source changed")
 	ErrSABFallbackBusy          = errors.New("fallback refresh busy")
+	ErrSABFallbackInvalidPage   = errors.New("invalid fallback page")
 )
 
 const fallbackNZBMaxBytes = 32 << 20
@@ -40,6 +43,73 @@ type SABFallbackStatus struct {
 	SubmittedAt *time.Time `json:"submittedAt,omitempty"`
 	CheckedAt   *time.Time `json:"checkedAt,omitempty"`
 }
+
+// SABFallbackPage is a bounded live projection of saved receipts. Its cursor
+// excludes newer queue IDs, but does not freeze status updates, deletions, or
+// receipts subsequently attached to older queue rows.
+type SABFallbackPage struct {
+	Items      []SABFallbackStatus `json:"items"`
+	NextCursor string              `json:"nextCursor,omitempty"`
+}
+
+func sabFallbackPageBounds(cursor string, limit int) (int64, int64, error) {
+	if limit < 1 || limit > 100 {
+		return 0, 0, ErrSABFallbackInvalidPage
+	}
+	if cursor == "" {
+		return math.MaxInt64, 0, nil
+	}
+	parts := strings.Split(cursor, ".")
+	if len(cursor) > 64 || len(parts) != 3 || parts[0] != "v1" {
+		return 0, 0, ErrSABFallbackInvalidPage
+	}
+	ceiling, err1 := strconv.ParseInt(parts[1], 10, 64)
+	before, err2 := strconv.ParseInt(parts[2], 10, 64)
+	if err1 != nil || err2 != nil || ceiling <= 0 || before <= 0 || before > ceiling || strconv.FormatInt(ceiling, 10) != parts[1] || strconv.FormatInt(before, 10) != parts[2] {
+		return 0, 0, ErrSABFallbackInvalidPage
+	}
+	return ceiling, before, nil
+}
+
+// ListSABFallbackStatuses never resolves configuration, opens NZBs, or calls SAB.
+func (s *Service) ListSABFallbackStatuses(ctx context.Context, cursor string, limit int) (SABFallbackPage, error) {
+	ceiling, before, err := sabFallbackPageBounds(cursor, limit)
+	if err != nil {
+		return SABFallbackPage{}, err
+	}
+	if s == nil || s.database == nil {
+		return SABFallbackPage{}, ErrSABFallbackUnavailable
+	}
+	rows, err := s.database.Repository.ListSABFallbackReceipts(ctx, ceiling, before, limit+1)
+	if err != nil {
+		return SABFallbackPage{}, ErrSABFallbackUnavailable
+	}
+	page := SABFallbackPage{Items: make([]SABFallbackStatus, 0, limit)}
+	if before == 0 && len(rows) > 0 {
+		ceiling = rows[0].ID
+	}
+	for i, row := range rows {
+		if !row.Receipt.Valid || len(row.Receipt.String) > 8192 {
+			return SABFallbackPage{}, ErrSABFallbackUnavailable
+		}
+		var receipt sabFallbackReceipt
+		decoder := json.NewDecoder(strings.NewReader(row.Receipt.String))
+		decoder.DisallowUnknownFields()
+		if decoder.Decode(&receipt) != nil || decoder.Decode(new(any)) != io.EOF || !validSABReceipt(&receipt, row.ID) {
+			return SABFallbackPage{}, ErrSABFallbackUnavailable
+		}
+		if i == limit {
+			page.NextCursor = "v1." + strconv.FormatInt(ceiling, 10) + "." + strconv.FormatInt(rows[i-1].ID, 10)
+			break
+		}
+		page.Items = append(page.Items, receipt.Status)
+	}
+	if err := ctx.Err(); err != nil {
+		return SABFallbackPage{}, err
+	}
+	return page, nil
+}
+
 type sabFallbackReceipt struct {
 	Version      int               `json:"version"`
 	Attempt      string            `json:"attempt"`

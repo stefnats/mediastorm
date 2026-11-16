@@ -113,6 +113,37 @@ tags:
   - name: clients
 
 paths:
+  /admin/api/usenet/fallback:
+    get:
+      operationId: listSABFallbackStatuses
+      summary: Browse saved SAB handoff observations
+      description: |
+        Full current master cookie session required, checked against actual account
+        and non-renewing session readers before and after the bounded SQL read.
+        Same original request/claim/session/account deadline, at most five seconds.
+        Reads only durable fallback receipts. Never submits, polls, resolves NZBs,
+        calls SAB, imports, or grants playback. Unknown remains a saved observation.
+        Descending queue ID keyset; the cursor excludes newer queue entries but
+        does not freeze updates, deletions or receipts later attached to older
+        queue entries. No total or immutable snapshot claim.
+        Browse accepts only the two optional single-valued query keys below and
+        no body. Missing/corrupt data and SQL errors are not successful empty pages.
+      parameters:
+        - name: limit
+          in: query
+          schema: {type: integer, minimum: 1, maximum: 100, default: 50}
+        - name: cursor
+          in: query
+          schema: {type: string, minLength: 1, maxLength: 64}
+      responses:
+        '200':
+          description: Bounded saved observations; no provider check was started.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/SABFallbackPage'}
+        '400': {description: 'Invalid or duplicate query, cursor, limit or unexpected body.'}
+        '403': {description: Current full master session required.}
+        '503': {description: 'Saved receipt index, SQL read or current authority unavailable.'}
   /admin/api/usenet/fallback/{queueID}:
     get:
       operationId: getUsenetFallbackStatus
@@ -3218,6 +3249,16 @@ components:
             $ref: '#/components/schemas/Error'
 
   schemas:
+    SABFallbackPage:
+      type: object
+      additionalProperties: false
+      required: [items]
+      properties:
+        items:
+          type: array
+          maxItems: 100
+          items: {$ref: '#/components/schemas/SABFallbackStatus'}
+        nextCursor: {type: string, minLength: 1, maxLength: 64}
     SABFallbackStatus:
       type: object
       additionalProperties: false

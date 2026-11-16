@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
+	"net/url"
 	"reflect"
 	"strconv"
 	"time"
@@ -78,6 +79,75 @@ func fallbackHTTPError(w http.ResponseWriter, status int, code string) {
 }
 func (h *UsenetFallbackHandler) Get(w http.ResponseWriter, r *http.Request)     { h.serve(w, r, false) }
 func (h *UsenetFallbackHandler) Refresh(w http.ResponseWriter, r *http.Request) { h.serve(w, r, true) }
+
+// List reads only durable safe receipt projections; the service is optional so
+// older single-item consumers retain their original contract.
+func (h *UsenetFallbackHandler) List(w http.ResponseWriter, r *http.Request) {
+	deadline := time.Now().Add(5 * time.Second)
+	if claim, ok := auth.GetSession(r); ok && claim.ExpiresAt.Before(deadline) {
+		deadline = claim.ExpiresAt
+	}
+	ctx, cancel := context.WithDeadline(r.Context(), deadline)
+	defer cancel()
+	r = r.WithContext(ctx)
+	before, ok := h.current(r)
+	if !ok {
+		fallbackHTTPError(w, 403, "master_required")
+		return
+	}
+	query, err := url.ParseQuery(r.URL.RawQuery)
+	limit := 50
+	valid := err == nil && len(r.URL.RawQuery) <= 512 && r.ContentLength == 0 && len(r.TransferEncoding) == 0 && (r.Body == nil || r.Body == http.NoBody)
+	for key, values := range query {
+		if len(values) != 1 || values[0] == "" || key != "limit" && key != "cursor" {
+			valid = false
+		}
+	}
+	if raw := query.Get("limit"); raw != "" {
+		limit, err = strconv.Atoi(raw)
+		valid = valid && err == nil && strconv.Itoa(limit) == raw
+	}
+	if limit < 1 || limit > 100 {
+		valid = false
+	}
+	if !valid {
+		fallbackHTTPError(w, 400, "invalid_fallback_request")
+		return
+	}
+	reader, ok := h.service.(interface {
+		ListSABFallbackStatuses(context.Context, string, int) (importer.SABFallbackPage, error)
+	})
+	if !ok {
+		fallbackHTTPError(w, 503, "fallback_unavailable")
+		return
+	}
+	if before.session.ExpiresAt.Before(deadline) {
+		deadline = before.session.ExpiresAt
+	}
+	if before.accountExpiry != nil && before.accountExpiry.Before(deadline) {
+		deadline = *before.accountExpiry
+	}
+	work, stop := context.WithDeadline(ctx, deadline)
+	defer stop()
+	r = r.WithContext(work)
+	page, err := reader.ListSABFallbackStatuses(work, query.Get("cursor"), limit)
+	after, still := h.current(r)
+	if !still || !reflect.DeepEqual(before, after) {
+		fallbackHTTPError(w, 403, "master_required")
+		return
+	}
+	if err != nil {
+		if errors.Is(err, importer.ErrSABFallbackInvalidPage) {
+			fallbackHTTPError(w, 400, "invalid_fallback_request")
+		} else {
+			fallbackHTTPError(w, 503, "fallback_unavailable")
+		}
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Cache-Control", "private, no-store")
+	_ = json.NewEncoder(w).Encode(page)
+}
 func (h *UsenetFallbackHandler) serve(w http.ResponseWriter, r *http.Request, refresh bool) {
 	// Bound the initial authority readers too, before any database/service work.
 	initialDeadline := time.Now().Add(5 * time.Second)

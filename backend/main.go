@@ -2910,9 +2910,10 @@ func (w *recordingWebPINReply) Write(body []byte) (int, error) {
 	return w.body.Write(body)
 }
 
-// registerUsenetFallbackRoutes keeps the two existing-cookie administration
+// registerUsenetFallbackRoutes keeps the existing-cookie administration
 // entry points on one registration seam; fresh authority lives in the handler.
 func registerUsenetFallbackRoutes(r *mux.Router, admin *handlers.AdminUIHandler, fallback *handlers.UsenetFallbackHandler) {
+	r.HandleFunc("/admin/api/usenet/fallback", admin.RequireAuth(fallback.List)).Methods(http.MethodGet)
 	r.HandleFunc("/admin/api/usenet/fallback/{queueID}", admin.RequireAuth(fallback.Get)).Methods(http.MethodGet)
 	r.HandleFunc("/admin/api/usenet/fallback/{queueID}/refresh", admin.RequireAuth(recordingWebOrigin(fallback.Refresh))).Methods(http.MethodPost)
 }
