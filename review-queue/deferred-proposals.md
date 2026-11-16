@@ -1229,3 +1229,37 @@ sibling-entry barrier, with its original reports retained.
 
 Both packets remain in the forks. No production activation, actual provider,
 private playlist publication or new upstream submission occurred.
+
+## Fork-only indirect native page ownership
+
+The [four-file page correction](https://github.com/stefnats/mediastorm-androidtv/tree/fix/native-indirect-pages)
+retains the original epoch through merged service children, Continue Watching
+and its optional Set Aside lookups, library queries and hidden-item page reads.
+Merged totals cannot cross owners or accept late writes. Hidden pages consume
+their own immutable response, without adopting a shared background refresh's
+singleton value. A common read generation protects publication order.
+
+Direct page reads propagate cancellation and terminal denials. The explicitly
+separate existing background refresh retains its original logging/no-publication
+failure policy; it does not produce a successful empty page. This avoids adding
+uncaught terminal exceptions to unrelated legacy UI callers. An initial automatic
+review rejected an unqualified rollback; no rejected patch ran. The approved
+scope clarification and separate actual contracts preserve the strict page path.
+
+All 1,778 native cases passed, including 35 new cases, and both APKs built.
+Independent frozen review and integration verification checked all seven sources
+(four production), full patch, raw XML, APK hashes, registry and five empty private
+prefills. Tests consume actual page adapters, merge cache, Store, late-page model
+and request helpers, plus loopback Call.await. Complete successful Android
+ApiClient.send, real profile activation and device/Compose behavior remain
+source/compile-reviewed. An intermediate Android logger harness failure was
+observed in tool output, but its raw log/XML were overwritten before archival;
+no missing source archive or production RED is invented.
+
+Other direct Home/ListsTab/Launcher/library-opener consumers and legacy
+Watchlist/Hide/Watched mutations remain distinct follow-ups. There is no all-Home,
+all-writers, media authorization, age grant or activation claim.
+[Exact seven-file delta](https://github.com/stefnats/mediastorm-androidtv/compare/0cbb77e09e6f01a2080942a9ed11475a727c9ffe...07bf51502e7c46a3ed4f58bd51346d5a4928efed).
+
+The packet remains in the fork; no production activation, private playlist or
+new upstream submission occurred.
