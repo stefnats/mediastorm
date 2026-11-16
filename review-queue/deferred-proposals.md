@@ -527,3 +527,36 @@ rendering, focus, touch and playback acceptance remain open.
 Both branches inherit fork prerequisites and need isolated extraction and scope
 agreement before upstream submission. No new upstream PR, service activation,
 deployment, private playlist use or real provider/indexer request occurred.
+
+## Fork-only original player and Cast ownership
+
+The [native correction](https://github.com/stefnats/mediastorm-androidtv/tree/fix/native-playback-ownership)
+retains the original profile epoch from preparation through pending player entry,
+transport and deferred Cast work. A delayed activity cannot adopt an old URL
+under the replacement profile. Open players retire when their original context
+changes. Trailer preparation, polling and serve URL construction also retain
+that original context; cancellation propagates before another profile's request.
+
+Cast arming, handoff, load, status/progress, keepalive and cleanup carry the same
+owner plus a local start generation. Old rendered controls and callbacks cannot
+command a replacement. Pending same-receiver loads remain serialized until the
+actual transport reply. Cleanup targets the captured receiver/session; an invalid
+old server context never rebuilds a cleanup request with replacement headers.
+Old server HLS sessions may therefore wait for their existing expiry. This does
+not revoke an already delivered remote URL. Local-file, restricted and unknown
+profile casting remains unavailable without a supported permission.
+
+All 1,372 native cases passed, including 35 new cases, actual local HTTP/redirect
+checks, controlled deferred receiver replies and original trailer orchestration.
+Both APKs built, five private debug prefills are empty, and source/APK/registry
+hashes were checked independently. The 37-file final freeze supersedes the
+preliminary 35-file state: the trailer preparation gap was corrected before
+publication and the full suite/builds were repeated.
+[Exact delta](https://github.com/stefnats/mediastorm-androidtv/compare/22e1cbe574f3636793ed3bab9c15607992ebbb97...0a15453cabc9bcfbcf3dba733019c74e5710065a).
+
+This branch inherits fork prerequisites and requires isolated extraction before
+upstream review. No new public authorization protocol, persisted grant or age
+policy was introduced. Other auxiliary endpoint ownership, server transport
+coverage and protected parent controls remain follow-up work. Physical receivers,
+rendering, focus and touch were not tested. No provider, private playlist, device
+installation, production activation or new upstream PR/comment occurred.
