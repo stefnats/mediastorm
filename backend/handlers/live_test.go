@@ -273,7 +273,11 @@ func TestTagChannelsWithSourcePrefixesIDs(t *testing.T) {
 }
 
 func TestGetChannelsFiltersBySourceID(t *testing.T) {
+	var playlistRequests atomic.Int32
 	playlistServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/sports.m3u" {
+			playlistRequests.Add(1)
+		}
 		switch r.URL.Path {
 		case "/news.m3u":
 			_, _ = w.Write([]byte(`#EXTM3U
@@ -298,8 +302,8 @@ http://stream.example/sports`))
 			XtreamUsername: "legacy-user",
 			XtreamPassword: "legacy-pass",
 			Sources: []config.LivePlaylistSource{
-				{ID: "news-src", Name: "News Source", Mode: "m3u", PlaylistURL: playlistServer.URL + "/news.m3u", Enabled: &enabled},
-				{ID: "sports-src", Name: "Sports Source", Mode: "m3u", PlaylistURL: playlistServer.URL + "/sports.m3u", Enabled: &enabled},
+				{ID: "news-src", Name: "News Source", Mode: "m3u", PlaylistURL: stationPlaylistURL(t, playlistServer.URL+"/news.m3u"), Enabled: &enabled},
+				{ID: "sports-src", Name: "Sports Source", Mode: "m3u", PlaylistURL: stationPlaylistURL(t, playlistServer.URL+"/sports.m3u"), Enabled: &enabled},
 			},
 		},
 	}); err != nil {
@@ -310,6 +314,10 @@ http://stream.example/sports`))
 	req := httptest.NewRequest(http.MethodGet, "/live/channels?sourceId=sports-src", nil)
 	rec := httptest.NewRecorder()
 	h.GetChannels(rec, req)
+
+	if playlistRequests.Load() == 0 {
+		t.Fatal("initial request did not fetch this test's synthetic M3U source")
+	}
 
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, body=%s", rec.Code, rec.Body.String())
@@ -331,7 +339,11 @@ http://stream.example/sports`))
 }
 
 func TestGetChannelsReturnsHealthySourcesWhenXtreamFails(t *testing.T) {
+	var playlistRequests atomic.Int32
 	provider := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/healthy.m3u" {
+			playlistRequests.Add(1)
+		}
 		if r.URL.Path == "/player_api.php" {
 			http.Error(w, "provider unavailable", http.StatusBadGateway)
 			return
@@ -347,7 +359,7 @@ func TestGetChannelsReturnsHealthySourcesWhenXtreamFails(t *testing.T) {
 	mgr := config.NewManager(filepath.Join(t.TempDir(), "settings.json"))
 	if err := mgr.Save(config.Settings{Live: config.LiveSettings{Sources: []config.LivePlaylistSource{
 		{ID: "failed", Name: "Failed", Mode: "xtream", XtreamHost: provider.URL, XtreamUsername: "user", XtreamPassword: "pass"},
-		{ID: "healthy", Name: "Healthy", Mode: "m3u", PlaylistURL: provider.URL + "/healthy.m3u"},
+		{ID: "healthy", Name: "Healthy", Mode: "m3u", PlaylistURL: stationPlaylistURL(t, provider.URL+"/healthy.m3u")},
 	}}}); err != nil {
 		t.Fatalf("save settings: %v", err)
 	}
@@ -366,6 +378,9 @@ func TestGetChannelsReturnsHealthySourcesWhenXtreamFails(t *testing.T) {
 		t.Run(test.name, func(t *testing.T) {
 			rec := httptest.NewRecorder()
 			h.GetChannels(rec, httptest.NewRequest(http.MethodGet, "/live/channels"+test.query, nil))
+			if test.name == "combined" && playlistRequests.Load() == 0 {
+				t.Fatal("initial request did not fetch this test's synthetic M3U source")
+			}
 			if rec.Code != test.wantStatus {
 				t.Fatalf("status = %d, want %d: %s", rec.Code, test.wantStatus, rec.Body.String())
 			}
@@ -384,27 +399,35 @@ func TestGetChannelsReturnsHealthySourcesWhenXtreamFails(t *testing.T) {
 }
 
 func TestGetChannelsReturnsErrorWhenAllSourcesFail(t *testing.T) {
+	var playlistRequests atomic.Int32
 	provider := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		playlistRequests.Add(1)
 		http.Error(w, "provider unavailable", http.StatusBadGateway)
 	}))
 	defer provider.Close()
 	mgr := config.NewManager(filepath.Join(t.TempDir(), "settings.json"))
 	if err := mgr.Save(config.Settings{Live: config.LiveSettings{Sources: []config.LivePlaylistSource{
-		{ID: "first", Mode: "m3u", PlaylistURL: provider.URL + "/first.m3u"},
-		{ID: "second", Mode: "m3u", PlaylistURL: provider.URL + "/second.m3u"},
+		{ID: "first", Mode: "m3u", PlaylistURL: stationPlaylistURL(t, provider.URL+"/first.m3u")},
+		{ID: "second", Mode: "m3u", PlaylistURL: stationPlaylistURL(t, provider.URL+"/second.m3u")},
 	}}}); err != nil {
 		t.Fatalf("save settings: %v", err)
 	}
 	h := NewLiveHandler(provider.Client(), false, "", 24, 0, 0, false, mgr, nil)
 	rec := httptest.NewRecorder()
 	h.GetChannels(rec, httptest.NewRequest(http.MethodGet, "/live/channels", nil))
+
+	if playlistRequests.Load() == 0 {
+		t.Fatal("initial request did not fetch this test's synthetic M3U source")
+	}
 	if rec.Code != http.StatusBadGateway {
 		t.Fatalf("status = %d, want 502: %s", rec.Code, rec.Body.String())
 	}
 }
 
 func TestGetChannelsPaginatesCategorySelectionAndFavorites(t *testing.T) {
+	var playlistRequests atomic.Int32
 	playlistServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		playlistRequests.Add(1)
 		_, _ = w.Write([]byte(`#EXTM3U
 #EXTINF:-1 tvg-id="news-1" group-title="News",News One
 http://stream.example/news-1
@@ -420,7 +443,7 @@ http://stream.example/movie-1`))
 	defer playlistServer.Close()
 
 	mgr := config.NewManager(filepath.Join(t.TempDir(), "settings.json"))
-	if err := mgr.Save(config.Settings{Live: config.LiveSettings{PlaylistURL: playlistServer.URL}}); err != nil {
+	if err := mgr.Save(config.Settings{Live: config.LiveSettings{PlaylistURL: stationPlaylistURL(t, playlistServer.URL)}}); err != nil {
 		t.Fatalf("save settings: %v", err)
 	}
 
@@ -428,6 +451,10 @@ http://stream.example/movie-1`))
 	req := httptest.NewRequest(http.MethodGet, "/live/channels?category=Sports&favoriteId=news-1&offset=1&limit=2", nil)
 	rec := httptest.NewRecorder()
 	h.GetChannels(rec, req)
+
+	if playlistRequests.Load() == 0 {
+		t.Fatal("initial request did not fetch this test's synthetic M3U source")
+	}
 
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, body=%s", rec.Code, rec.Body.String())
@@ -489,7 +516,9 @@ http://stream.example/movie-1`))
 }
 
 func TestGetChannelsSearchesWithinFavoritesOnly(t *testing.T) {
+	var playlistRequests atomic.Int32
 	playlistServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		playlistRequests.Add(1)
 		_, _ = w.Write([]byte(`#EXTM3U
 #EXTINF:-1 tvg-id="news-1" group-title="News",News One
 http://stream.example/news-1
@@ -501,7 +530,7 @@ http://stream.example/sports-2`))
 	defer playlistServer.Close()
 
 	mgr := config.NewManager(filepath.Join(t.TempDir(), "settings.json"))
-	if err := mgr.Save(config.Settings{Live: config.LiveSettings{PlaylistURL: playlistServer.URL}}); err != nil {
+	if err := mgr.Save(config.Settings{Live: config.LiveSettings{PlaylistURL: stationPlaylistURL(t, playlistServer.URL)}}); err != nil {
 		t.Fatalf("save settings: %v", err)
 	}
 	h := NewLiveHandler(playlistServer.Client(), false, "", 24, 0, 0, false, mgr, nil)
@@ -520,6 +549,10 @@ http://stream.example/sports-2`))
 		}
 		rec := httptest.NewRecorder()
 		h.GetChannels(rec, httptest.NewRequest(http.MethodPost, "/live/channels", strings.NewReader(string(body))))
+
+		if playlistRequests.Load() == 0 {
+			t.Fatal("initial request did not fetch this test's synthetic M3U source")
+		}
 		if rec.Code != http.StatusOK {
 			t.Fatalf("status = %d, body=%s", rec.Code, rec.Body.String())
 		}
@@ -545,7 +578,9 @@ http://stream.example/sports-2`))
 }
 
 func TestGetChannelsAppliesCategoryBeforeConfiguredChannelLimit(t *testing.T) {
+	var playlistRequests atomic.Int32
 	playlistServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		playlistRequests.Add(1)
 		_, _ = w.Write([]byte(`#EXTM3U
 #EXTINF:-1 tvg-id="news-1" group-title="News",News One
 http://stream.example/news-1
@@ -562,7 +597,7 @@ http://stream.example/sports-3`))
 
 	mgr := config.NewManager(filepath.Join(t.TempDir(), "settings.json"))
 	if err := mgr.Save(config.Settings{Live: config.LiveSettings{
-		PlaylistURL: playlistServer.URL,
+		PlaylistURL: stationPlaylistURL(t, playlistServer.URL),
 		Filtering:   config.LiveTVFilterSettings{MaxChannels: 2},
 	}}); err != nil {
 		t.Fatalf("save settings: %v", err)
@@ -571,6 +606,10 @@ http://stream.example/sports-3`))
 	req := httptest.NewRequest(http.MethodGet, "/live/channels?category=Sports&offset=0&limit=2", nil)
 	rec := httptest.NewRecorder()
 	h.GetChannels(rec, req)
+
+	if playlistRequests.Load() == 0 {
+		t.Fatal("initial request did not fetch this test's synthetic M3U source")
+	}
 
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, body=%s", rec.Code, rec.Body.String())
@@ -636,7 +675,9 @@ func (f fakeLiveEPGNowPlayingProvider) GetNowPlaying(_ []string, _ ...time.Durat
 }
 
 func TestGetChannelsFiltersAndOrdersBeforePagination(t *testing.T) {
+	var playlistRequests atomic.Int32
 	playlistServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		playlistRequests.Add(1)
 		_, _ = w.Write([]byte(`#EXTM3U
 #EXTINF:-1 tvg-id="favorite" group-title="News",Always Favorite
 http://stream.example/favorite
@@ -652,7 +693,7 @@ http://stream.example/other`))
 	defer playlistServer.Close()
 
 	mgr := config.NewManager(filepath.Join(t.TempDir(), "settings.json"))
-	if err := mgr.Save(config.Settings{Live: config.LiveSettings{PlaylistURL: playlistServer.URL}}); err != nil {
+	if err := mgr.Save(config.Settings{Live: config.LiveSettings{PlaylistURL: stationPlaylistURL(t, playlistServer.URL)}}); err != nil {
 		t.Fatalf("save settings: %v", err)
 	}
 
@@ -663,6 +704,10 @@ http://stream.example/other`))
 	req := httptest.NewRequest(http.MethodGet, "/live/channels?filter=match&favoriteId=favorite&offset=0&limit=2", nil)
 	rec := httptest.NewRecorder()
 	h.GetChannels(rec, req)
+
+	if playlistRequests.Load() == 0 {
+		t.Fatal("initial request did not fetch this test's synthetic M3U source")
+	}
 
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, body=%s", rec.Code, rec.Body.String())
@@ -702,7 +747,9 @@ func TestGetChannelsRejectsInvalidPagination(t *testing.T) {
 }
 
 func TestGetChannelsSourceEmptyCategoryFilterOverridesGlobal(t *testing.T) {
+	var playlistRequests atomic.Int32
 	playlistServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		playlistRequests.Add(1)
 		_, _ = w.Write([]byte(`#EXTM3U
 #EXTINF:-1 tvg-id="news" tvg-name="News" group-title="News",News
 http://stream.example/news
@@ -723,7 +770,7 @@ http://stream.example/sports`))
 					ID:          "main",
 					Name:        "Main",
 					Mode:        "m3u",
-					PlaylistURL: playlistServer.URL,
+					PlaylistURL: stationPlaylistURL(t, playlistServer.URL),
 					Enabled:     &enabled,
 					Filtering: config.LiveTVFilterSettings{
 						EnabledCategories: []string{},
@@ -739,6 +786,10 @@ http://stream.example/sports`))
 	req := httptest.NewRequest(http.MethodGet, "/live/channels", nil)
 	rec := httptest.NewRecorder()
 	h.GetChannels(rec, req)
+
+	if playlistRequests.Load() == 0 {
+		t.Fatal("initial request did not fetch this test's synthetic M3U source")
+	}
 
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, body=%s", rec.Code, rec.Body.String())
@@ -922,7 +973,9 @@ func TestLivePlaylistScanHTTPClientDoesNotUseBodyTimeout(t *testing.T) {
 }
 
 func TestFetchM3UCategoriesIgnoresPlaylistBodyLimit(t *testing.T) {
+	var playlistRequests atomic.Int32
 	playlistServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		playlistRequests.Add(1)
 		w.Header().Set("Content-Type", playlistContentTypePlain)
 		_, _ = w.Write([]byte("#EXTM3U\n"))
 		_, _ = w.Write([]byte(`#EXTINF:-1 group-title="News",News 1` + "\nhttp://example.test/news1.ts\n"))
@@ -933,7 +986,7 @@ func TestFetchM3UCategoriesIgnoresPlaylistBodyLimit(t *testing.T) {
 
 	// Disk cache keys include the URL. A unique path prevents a recycled
 	// loopback port from reusing a body left by another test or run.
-	playlistURL := playlistServer.URL + "/" + filepath.Base(filepath.Dir(t.TempDir()))
+	playlistURL := stationPlaylistURL(t, playlistServer.URL+"/"+filepath.Base(filepath.Dir(t.TempDir())))
 
 	mgr := config.NewManager(filepath.Join(t.TempDir(), "settings.json"))
 	settings := config.DefaultSettings()
@@ -945,6 +998,10 @@ func TestFetchM3UCategoriesIgnoresPlaylistBodyLimit(t *testing.T) {
 	h.maxSize = 64
 
 	categories, err := h.fetchM3UCategories(t.Context(), playlistURL, "")
+
+	if playlistRequests.Load() == 0 {
+		t.Fatal("initial request did not fetch this test's synthetic M3U source")
+	}
 	if err != nil {
 		t.Fatalf("fetchM3UCategories() error = %v", err)
 	}
@@ -963,7 +1020,9 @@ func TestFetchM3UCategoriesIgnoresPlaylistBodyLimit(t *testing.T) {
 }
 
 func TestFetchM3UCategoriesKeepsProviderOrder(t *testing.T) {
+	var playlistRequests atomic.Int32
 	playlistServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		playlistRequests.Add(1)
 		w.Header().Set("Content-Type", playlistContentTypePlain)
 		_, _ = w.Write([]byte("#EXTM3U\n"))
 		for _, group := range []string{"Sports", "News", "Sports", "Kids", "Movies", "News"} {
@@ -971,16 +1030,21 @@ func TestFetchM3UCategoriesKeepsProviderOrder(t *testing.T) {
 		}
 	}))
 	defer playlistServer.Close()
+	playlistURL := stationPlaylistURL(t, playlistServer.URL)
 
 	mgr := config.NewManager(filepath.Join(t.TempDir(), "settings.json"))
 	settings := config.DefaultSettings()
-	settings.Live.PlaylistURL = playlistServer.URL
+	settings.Live.PlaylistURL = playlistURL
 	if err := mgr.Save(settings); err != nil {
 		t.Fatalf("save settings: %v", err)
 	}
 	h := NewLiveHandler(playlistServer.Client(), false, "", 24, 0, 0, false, mgr, nil)
 
-	categories, err := h.fetchM3UCategories(t.Context(), playlistServer.URL, "")
+	categories, err := h.fetchM3UCategories(t.Context(), playlistURL, "")
+
+	if playlistRequests.Load() == 0 {
+		t.Fatal("initial request did not fetch this test's synthetic M3U source")
+	}
 	if err != nil {
 		t.Fatalf("fetchM3UCategories() error = %v", err)
 	}
@@ -1240,6 +1304,7 @@ func TestXtreamRequestErrorOmitsCredentials(t *testing.T) {
 }
 
 func TestGetCategoriesSourceIndexIsolatesOtherSources(t *testing.T) {
+	var playlistRequests atomic.Int32
 	provider := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Query().Get("action") {
 		case "get_live_categories":
@@ -1255,6 +1320,7 @@ func TestGetCategoriesSourceIndexIsolatesOtherSources(t *testing.T) {
 	var otherFails atomic.Bool
 	otherFails.Store(true)
 	other := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		playlistRequests.Add(1)
 		if otherFails.Load() {
 			http.Error(w, "addon unavailable", http.StatusBadGateway)
 			return
@@ -1262,13 +1328,14 @@ func TestGetCategoriesSourceIndexIsolatesOtherSources(t *testing.T) {
 		_, _ = w.Write([]byte("#EXTM3U\n#EXTINF:-1 group-title=\"Other Addon\",Other Channel\nhttp://example.com/stream\n"))
 	}))
 	defer other.Close()
+	otherPlaylistURL := stationPlaylistURL(t, other.URL)
 
 	disabled := false
 	mgr := config.NewManager(filepath.Join(t.TempDir(), "settings.json"))
 	if err := mgr.Save(config.Settings{Live: config.LiveSettings{Sources: []config.LivePlaylistSource{
-		{Mode: "m3u", PlaylistURL: other.URL, Enabled: &disabled},
+		{Mode: "m3u", PlaylistURL: otherPlaylistURL, Enabled: &disabled},
 		{Mode: "xtream", XtreamHost: provider.URL, XtreamUsername: "user", XtreamPassword: "pass"},
-		{Mode: "m3u", PlaylistURL: other.URL},
+		{Mode: "m3u", PlaylistURL: otherPlaylistURL},
 	}}}); err != nil {
 		t.Fatalf("save settings: %v", err)
 	}
@@ -1289,6 +1356,11 @@ func TestGetCategoriesSourceIndexIsolatesOtherSources(t *testing.T) {
 	if status, _ := get(""); status != http.StatusBadGateway {
 		t.Fatalf("unscoped status = %d, want 502 from other source", status)
 	}
+
+	if playlistRequests.Load() == 0 {
+		t.Fatal("initial request did not fetch this test's synthetic M3U source")
+	}
+
 	status, response := get("?sourceIndex=1")
 	if status != http.StatusOK || len(response.Categories) != 1 || response.Categories[0].Name != "Xtream News" {
 		t.Fatalf("scoped status = %d, categories = %+v, want only Xtream News", status, response.Categories)
@@ -1419,7 +1491,11 @@ func TestLiveSourceMayContainFavorites(t *testing.T) {
 }
 
 func TestGetFavoriteChannelsSkipsUnrelatedProviders(t *testing.T) {
+	var playlistRequests atomic.Int32
 	playlistServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/main" {
+			playlistRequests.Add(1)
+		}
 		if r.URL.Path != "/main" {
 			t.Error("contacted unrelated provider")
 			http.Error(w, "unavailable", 503)
@@ -1431,14 +1507,18 @@ func TestGetFavoriteChannelsSkipsUnrelatedProviders(t *testing.T) {
 	enabled := true
 	mgr := config.NewManager(filepath.Join(t.TempDir(), "settings.json"))
 	if err := mgr.Save(config.Settings{Live: config.LiveSettings{Sources: []config.LivePlaylistSource{
-		{ID: "main", Name: "Main", Mode: "m3u", PlaylistURL: playlistServer.URL + "/main", Enabled: &enabled},
-		{ID: "other", Name: "Other", Mode: "m3u", PlaylistURL: playlistServer.URL + "/other", Enabled: &enabled},
+		{ID: "main", Name: "Main", Mode: "m3u", PlaylistURL: stationPlaylistURL(t, playlistServer.URL+"/main"), Enabled: &enabled},
+		{ID: "other", Name: "Other", Mode: "m3u", PlaylistURL: stationPlaylistURL(t, playlistServer.URL+"/other"), Enabled: &enabled},
 	}}}); err != nil {
 		t.Fatal(err)
 	}
 	h := NewLiveHandler(playlistServer.Client(), false, "", 24, 0, 0, false, mgr, nil)
 	rec := httptest.NewRecorder()
 	h.GetChannels(rec, httptest.NewRequest(http.MethodGet, "/live/channels?favoritesOnly=true&favoriteId=main:news", nil))
+
+	if playlistRequests.Load() == 0 {
+		t.Fatal("initial request did not fetch this test's synthetic M3U source")
+	}
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status %d: %s", rec.Code, rec.Body.String())
 	}
@@ -1603,20 +1683,26 @@ func TestFillLogosFromGuideKeepsPlaylistLogosAndCache(t *testing.T) {
 }
 
 func TestGetChannelsEncodesEmptyResultAsArray(t *testing.T) {
+	var playlistRequests atomic.Int32
 	playlistServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		playlistRequests.Add(1)
 		_, _ = w.Write([]byte("#EXTM3U\n#EXTINF:-1,5.1 TESTTV\nhttp://stream.example/5.1\n"))
 	}))
 	defer playlistServer.Close()
 
 	mgr := config.NewManager(filepath.Join(t.TempDir(), "settings.json"))
 	// The category filter hides the ungrouped tuner channel.
-	settings := config.Settings{Live: config.LiveSettings{PlaylistURL: playlistServer.URL, Filtering: config.LiveTVFilterSettings{EnabledCategories: []string{"News"}}}}
+	settings := config.Settings{Live: config.LiveSettings{PlaylistURL: stationPlaylistURL(t, playlistServer.URL), Filtering: config.LiveTVFilterSettings{EnabledCategories: []string{"News"}}}}
 	if err := mgr.Save(settings); err != nil {
 		t.Fatalf("save settings: %v", err)
 	}
 	h := NewLiveHandler(playlistServer.Client(), false, "", 24, 0, 0, false, mgr, nil)
 	rec := httptest.NewRecorder()
 	h.GetChannels(rec, httptest.NewRequest(http.MethodGet, "/live/channels?offset=0&limit=50", nil))
+
+	if playlistRequests.Load() == 0 {
+		t.Fatal("initial request did not fetch this test's synthetic M3U source")
+	}
 
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, body=%s", rec.Code, rec.Body.String())
