@@ -1128,6 +1128,8 @@ func TestOpenAPIContract(t *testing.T) {
 
 	t.Run("recording_parts_export", func(t *testing.T) { recordingExportOpenAPIContract(t, v) })
 
+	t.Run("local_library_language", func(t *testing.T) { localLibraryLanguageOpenAPIContract(t, v) })
+
 	t.Run("coverage", func(t *testing.T) {
 		covered := v.Covered()
 		var missing []string

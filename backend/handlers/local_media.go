@@ -196,6 +196,16 @@ func (h *LocalMediaHandler) ListGroups(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "local media service unavailable", http.StatusServiceUnavailable)
 		return
 	}
+	language, languageErr := parseDisplayListOriginalLanguageQuery(r)
+	if languageErr != nil {
+		http.Error(w, languageErr.Error(), http.StatusBadRequest)
+		return
+	}
+	includeCards := strings.EqualFold(strings.TrimSpace(r.URL.Query().Get("include")), "cards")
+	if language.active() && !includeCards {
+		http.Error(w, "original-language filtering requires local library cards", http.StatusBadRequest)
+		return
+	}
 	limit, _ := strconv.Atoi(strings.TrimSpace(r.URL.Query().Get("limit")))
 	offset, _ := strconv.Atoi(strings.TrimSpace(r.URL.Query().Get("offset")))
 
@@ -214,7 +224,7 @@ func (h *LocalMediaHandler) ListGroups(w http.ResponseWriter, r *http.Request) {
 		Alphabet:       r.URL.Query().Get("alphabet"),
 		Limit:          limit,
 		Offset:         offset,
-		IncludeCards:   strings.EqualFold(strings.TrimSpace(r.URL.Query().Get("include")), "cards"),
+		IncludeCards:   includeCards,
 		MaxMovieRating: maxMovieRating,
 		MaxTVRating:    maxTVRating,
 	}
@@ -224,10 +234,17 @@ func (h *LocalMediaHandler) ListGroups(w http.ResponseWriter, r *http.Request) {
 		if remoteLibrary, remoteErr := h.remote.GetLibrary(r.Context(), libraryID); remoteErr != nil {
 			err = remoteErr
 		} else if remoteLibrary != nil {
+			if language.active() {
+				http.Error(w, "original-language filtering is unavailable for remote libraries", http.StatusBadRequest)
+				return
+			}
 			groups, err = h.remote.ListGroups(r.Context(), libraryID, listQuery)
 		}
 	}
 	if groups == nil && err == nil {
+		if language.active() {
+			listQuery.OriginalLanguageMatches = h.localLibraryLanguageMatcher(r, language)
+		}
 		groups, err = h.service.ListGroups(r.Context(), libraryID, listQuery)
 	}
 	if err != nil {
@@ -247,11 +264,40 @@ func (h *LocalMediaHandler) ListGroups(w http.ResponseWriter, r *http.Request) {
 	// Stored local-media metadata (including poster artwork) is resolved once at
 	// scan time in the global metadata language. Re-localize artwork for profiles
 	// whose effective language differs so shelves match the profile's setting.
-	h.localizeGroupArtwork(r, groups.Groups)
+	if !language.active() {
+		h.localizeGroupArtwork(r, groups.Groups)
+	}
 
 	log.Printf("[localmedia] ListGroups: libraryID=%s returned %d groups (total=%d) in %s", libraryID, len(groups.Groups), groups.Total, time.Since(t0).Round(time.Millisecond))
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(groups)
+}
+
+// Keep one observation time and one cache lookup per catalogue reference for
+// this response. The existing getter validates provider identity and freshness;
+// saved library metadata is never passed as proof or used to warm a cache miss.
+func (h *LocalMediaHandler) localLibraryLanguageMatcher(r *http.Request, q displayListOriginalLanguageQuery) func(string, string) bool {
+	profile := strings.TrimSpace(r.URL.Query().Get("profileId"))
+	if profile == "" {
+		profile = strings.TrimSpace(r.URL.Query().Get("userId"))
+	}
+	reader, _ := metadataServiceForUser(h.metadata, h.cfgManager, h.userSettings, profile).(cachedOriginalLanguageReader)
+	at := time.Now()
+	type reference struct{ id, kind string }
+	facts := make(map[reference]string)
+	return func(id, kind string) bool {
+		key := reference{id, kind}
+		language, found := facts[key]
+		if !found {
+			if id != "" && reader != nil {
+				if fact := reader.GetCachedOriginalLanguageEvidence(id, kind, at); fact != nil {
+					language = models.NormalizeEvidenceLanguage(fact.Language)
+				}
+			}
+			facts[key] = language
+		}
+		return language == "" && q.IncludeUnknown || language != "" && q.Languages[language]
+	}
 }
 
 // localizeGroupArtwork actively fetches localized TMDB artwork for each group

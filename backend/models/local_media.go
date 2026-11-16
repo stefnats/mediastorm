@@ -124,16 +124,19 @@ type LocalMediaItem struct {
 }
 
 type LocalMediaItemListQuery struct {
-	Filter         string `json:"filter"`
-	Sort           string `json:"sort"`
-	Dir            string `json:"dir"`
-	Query          string `json:"query"`
-	MediaType      string `json:"mediaType"`
-	Alphabet       string `json:"alphabet"`
-	Limit          int    `json:"limit"`
-	Offset         int    `json:"offset"`
-	IncludeMissing bool   `json:"includeMissing"`
-	IncludeCards   bool   `json:"includeCards"`
+	// OriginalLanguageMatches is a request-local cache predicate for catalogue
+	// assignments, never a source, file, audio, or age authorization.
+	OriginalLanguageMatches func(titleID, mediaType string) bool `json:"-"`
+	Filter                  string                               `json:"filter"`
+	Sort                    string                               `json:"sort"`
+	Dir                     string                               `json:"dir"`
+	Query                   string                               `json:"query"`
+	MediaType               string                               `json:"mediaType"`
+	Alphabet                string                               `json:"alphabet"`
+	Limit                   int                                  `json:"limit"`
+	Offset                  int                                  `json:"offset"`
+	IncludeMissing          bool                                 `json:"includeMissing"`
+	IncludeCards            bool                                 `json:"includeCards"`
 	// Kids profile rating caps. When set, groups whose certification exceeds
 	// the cap for their media type (or have no known certification) are removed.
 	MaxMovieRating string `json:"-"`
@@ -208,11 +211,12 @@ type LocalMediaItemGroup struct {
 }
 
 type LocalMediaGroupListResult struct {
-	Groups          []LocalMediaItemGroup `json:"groups"`
-	Total           int                   `json:"total"`
-	Limit           int                   `json:"limit"`
-	Offset          int                   `json:"offset"`
-	AlphabetBuckets []string              `json:"alphabetBuckets,omitempty"`
+	OriginalLanguageFilterSupported bool                  `json:"originalLanguageFilterSupported,omitempty"`
+	Groups                          []LocalMediaItemGroup `json:"groups"`
+	Total                           int                   `json:"total"`
+	Limit                           int                   `json:"limit"`
+	Offset                          int                   `json:"offset"`
+	AlphabetBuckets                 []string              `json:"alphabetBuckets,omitempty"`
 }
 
 type LocalMediaMatchQuery struct {

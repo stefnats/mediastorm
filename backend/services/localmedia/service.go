@@ -391,6 +391,9 @@ func (s *Service) ListItems(ctx context.Context, libraryID string, query models.
 }
 
 func (s *Service) ListGroups(ctx context.Context, libraryID string, query models.LocalMediaItemListQuery) (*models.LocalMediaGroupListResult, error) {
+	if query.OriginalLanguageMatches != nil && !query.IncludeCards {
+		return nil, errors.New("original-language filtering requires local library cards")
+	}
 	query.Filter = strings.TrimSpace(query.Filter)
 	switch query.Filter {
 	case "", "all", string(models.LocalMediaMatchStatusMatched), string(models.LocalMediaMatchStatusLowConfidence), string(models.LocalMediaMatchStatusUnmatched), string(models.LocalMediaMatchStatusManual):
@@ -435,6 +438,19 @@ func (s *Service) ListGroups(ctx context.Context, libraryID string, query models
 	}
 
 	groups := buildLocalMediaGroups(filtered)
+	if query.OriginalLanguageMatches != nil {
+		// Validate the catalogue assignment across the entire stored group, not
+		// merely versions left by the current match-status/query filters.
+		references := localMediaLanguageReferences(result.Items)
+		selected := make([]models.LocalMediaItemGroup, 0, len(groups))
+		for _, group := range groups {
+			ref := references[group.ID]
+			if query.OriginalLanguageMatches(ref.id, ref.kind) {
+				selected = append(selected, group)
+			}
+		}
+		groups = selected
+	}
 	groups = kids.FilterLibraryGroupsByRatings(groups, query.MaxMovieRating, query.MaxTVRating)
 	groups = filterLocalMediaGroupsByMediaType(groups, query.MediaType)
 	alphabetBuckets := localMediaAlphabetBuckets(groups)
@@ -453,11 +469,12 @@ func (s *Service) ListGroups(ctx context.Context, libraryID string, query models
 
 	if query.IncludeCards {
 		return &models.LocalMediaGroupListResult{
-			Groups:          trimLocalMediaGroupsToCards(pageGroups),
-			Total:           total,
-			Limit:           query.Limit,
-			Offset:          query.Offset,
-			AlphabetBuckets: alphabetBuckets,
+			OriginalLanguageFilterSupported: true,
+			Groups:                          trimLocalMediaGroupsToCards(pageGroups),
+			Total:                           total,
+			Limit:                           query.Limit,
+			Offset:                          query.Offset,
+			AlphabetBuckets:                 alphabetBuckets,
 		}, nil
 	}
 
@@ -474,6 +491,40 @@ func (s *Service) ListGroups(ctx context.Context, libraryID string, query models
 		Offset:          query.Offset,
 		AlphabetBuckets: alphabetBuckets,
 	}, nil
+}
+
+// A stored match is only the library's catalogue reference. Metadata.ID, side
+// IDs, filename guesses, and language scalars cannot repair missing assignments.
+// Every member must agree, including versions hidden by other item filters.
+type localMediaLanguageReference struct{ id, kind string }
+
+func localMediaLanguageReferences(items []models.LocalMediaItem) map[string]localMediaLanguageReference {
+	refs := make(map[string]localMediaLanguageReference)
+	invalid := make(map[string]bool)
+	for _, item := range items {
+		key, _ := localMediaGroupKey(item)
+		kind := ""
+		switch item.LibraryType {
+		case models.LocalMediaLibraryTypeMovie:
+			kind = "movie"
+		case models.LocalMediaLibraryTypeShow:
+			kind = "series"
+		}
+		matchedKind := strings.TrimSpace(item.MatchedMediaType)
+		if matchedKind == "tv" {
+			matchedKind = "series"
+		}
+		ref := localMediaLanguageReference{id: strings.TrimSpace(item.MatchedTitleID), kind: kind}
+		previous, exists := refs[key]
+		if ref.id == "" || kind == "" || matchedKind != kind || exists && previous != ref {
+			invalid[key] = true
+		}
+		refs[key] = ref
+	}
+	for key := range invalid {
+		refs[key] = localMediaLanguageReference{}
+	}
+	return refs
 }
 
 func filterLocalMediaGroupsByAlphabet(groups []models.LocalMediaItemGroup, alphabet string) []models.LocalMediaItemGroup {

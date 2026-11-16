@@ -113,6 +113,101 @@ tags:
   - name: clients
 
 paths:
+  /api/library/libraries/{libraryID}/groups:
+    get:
+      operationId: listLibraryGroups
+      summary: Browse the stored library index
+      description: |
+        Existing local and remote library group listing. Only local `include=cards`
+        responses advertise `originalLanguageFilterSupported: true`. Negotiate on
+        this normal response; no additional probe request is needed. Active
+        original-language filters require local cards; remote libraries and
+        non-card views return 400 before group/provider demand.
+
+        The complete saved local index is grouped and filtered before alphabet
+        buckets, total, limit and offset. Existing library access and profile
+        restrictions still apply. Each group's catalogue reference requires one
+        consistent MatchedTitleID and matching movie/series kind from ALL saved
+        members, including versions omitted by another item filter. Missing or
+        inconsistent assignments are Unknown. Metadata IDs, saved side IDs,
+        filenames and scalar languages do not supply replacement evidence.
+
+        Languages use only current, provider-bound cached original-language facts.
+        Filtered cards keep saved artwork and do not enrich episodes, localize
+        images, scan files, probe media or fetch metadata/providers. Missing,
+        expired, malformed and wrong-identity facts are Unknown. Cache housekeeping
+        may create cache directories or remove expired entries; observation times
+        are not refreshed. This concerns the assigned catalogue work, not file
+        identity, audio tracks, regional certification or playback permission.
+        Remote provider completeness and a cross-request immutable snapshot are
+        not claimed. Unfiltered legacy loading/enrichment remains unchanged.
+      parameters:
+        - name: libraryID
+          in: path
+          required: true
+          schema: {type: string, minLength: 1}
+        - name: profileId
+          in: query
+          schema: {type: string}
+        - name: userId
+          in: query
+          description: Existing profile selector alias.
+          schema: {type: string}
+        - name: include
+          in: query
+          schema: {type: string}
+        - name: originalLanguages
+          in: query
+          description: Up to 32 distinct canonical registered ISO 639-3 codes, comma-separated. No aliases or regional tags. Omit when inactive.
+          schema: {type: string, maxLength: 128}
+        - name: includeUnknownOriginalLanguage
+          in: query
+          description: Explicit OR with selected codes; true without codes is Unknown-only. No selection leaves the list unfiltered.
+          schema: {type: boolean}
+        - name: filter
+          in: query
+          schema: {type: string}
+        - name: query
+          in: query
+          schema: {type: string}
+        - name: mediaType
+          in: query
+          schema: {type: string}
+        - name: alphabet
+          in: query
+          schema: {type: string}
+        - name: sort
+          in: query
+          schema: {type: string}
+        - name: dir
+          in: query
+          schema: {type: string}
+        - name: limit
+          in: query
+          description: Existing default 50, maximum 200; values outside 1..200 use 50.
+          schema: {type: integer}
+        - name: offset
+          in: query
+          schema: {type: integer}
+      responses:
+        '200':
+          description: Page from the effective stored group collection.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/LocalLibraryGroups'}
+        '400':
+          description: Invalid original-language query or active filter on an unsupported library/view.
+          content:
+            text/plain:
+              schema: {type: string}
+        '401':
+          description: Missing or invalid account session.
+        '403':
+          description: Profile PIN required or access denied.
+        '404':
+          description: Library unavailable to the current account/profile.
+        '503':
+          description: Local media service unavailable.
   /api/users/{userId}/recommendation-interests:
     delete:
       operationId: clearRecommendationInterests
@@ -2964,6 +3059,61 @@ components:
             $ref: '#/components/schemas/Error'
 
   schemas:
+    LocalLibraryGroups:
+      type: object
+      required: [groups, total, limit, offset]
+      properties:
+        groups:
+          type: array
+          items: {$ref: '#/components/schemas/LocalLibraryGroupCard'}
+        total: {type: integer, minimum: 0}
+        limit: {type: integer}
+        offset: {type: integer}
+        alphabetBuckets:
+          type: array
+          items: {type: string}
+        originalLanguageFilterSupported:
+          type: boolean
+          description: True only for local cards using the full saved index. Older servers and unsupported responses omit it. An active filter response without true must not be silently treated as filtered.
+    LocalLibraryGroupCard:
+      type: object
+      description: Existing library group shape with original group IDs and aggregate counts. Cards omit nested Items/Seasons; filtered groups retain all otherwise-visible versions in their counts. Other existing group fields remain unchanged.
+      required: [id, groupType, libraryType, title, itemCount]
+      properties:
+        id: {type: string}
+        groupType: {type: string}
+        libraryType: {type: string}
+        title: {type: string}
+        itemCount: {type: integer, minimum: 0}
+        missingCount: {type: integer, minimum: 0}
+        year: {type: integer}
+        overview: {type: string}
+        certification: {type: string}
+        certificationEvidence:
+          type: array
+          items: {$ref: '#/components/schemas/CertificationEvidence'}
+        tmdbId: {type: integer}
+        tvdbId: {type: integer}
+        imdbId: {type: string}
+        poster: {$ref: '#/components/schemas/Image'}
+        textPoster: {$ref: '#/components/schemas/Image'}
+        backdrop: {$ref: '#/components/schemas/Image'}
+        textBackdrop: {$ref: '#/components/schemas/Image'}
+        matchStatus: {type: string}
+        confidenceMin: {type: number}
+        confidenceMax: {type: number}
+        totalSizeBytes: {type: integer}
+        latestModifiedAt: {type: string, format: date-time}
+        latestUpdatedAt: {type: string, format: date-time}
+        latestCreatedAt: {type: string, format: date-time}
+        items:
+          type: array
+          description: Existing unfiltered non-card versions.
+          items: {type: object, additionalProperties: true}
+        seasons:
+          type: array
+          description: Existing unfiltered non-card seasons.
+          items: {type: object, additionalProperties: true}
     RecordingPreviewRequest:
       type: object
       additionalProperties: false
