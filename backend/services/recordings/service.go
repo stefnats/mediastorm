@@ -59,6 +59,7 @@ type Service struct {
 	outputDir       string
 	remuxRecording  func(string) error
 	syncCaptureFile func(*os.File) error
+	partTiming      *partTimingState
 
 	mu       sync.Mutex
 	statusMu sync.Mutex

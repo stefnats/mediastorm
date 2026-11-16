@@ -915,6 +915,7 @@ func main() {
 	if store != nil {
 		recordingsService = recordings.NewService(store.Recordings(), settings.Transmux.FFmpegPath, filepath.Join(settings.Cache.Directory, "recordings"))
 		recordingsService.SetRuleRepository(store.RecordingRules())
+		recordingsService.SetPartTimingProber(settings.Transmux.FFprobePath)
 	}
 	var recordingsStreamProvider streaming.Provider
 	if recordingsService != nil {
