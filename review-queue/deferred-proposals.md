@@ -1554,3 +1554,42 @@ suggestion instance required by the existing UI path.
 
 [Exact nineteen-file delta](https://github.com/stefnats/mediastorm-androidtv/compare/4a2ad7eafb70a5d5f4e37c8e96ce4c0f65f27400...dfcf4ed12cd782b444adcf5ca0702453ba829561).
 No production activation, private playlist or new upstream submission occurred.
+
+## Fork-only complete stored Love-rating language browse
+
+The [stored preference browse source](https://github.com/stefnats/mediastorm/tree/feature/loved-stored-language)
+adds explicit source=loved-stored without changing the existing loved view or its
+watch-state/editability behavior. Complete saved Love ratings are selected before
+totals, alphabet and pagination, including late matches beyond the discovery
+window. Hidden suppression precedes cache-language lookup. Only exact stored
+work ID/kind can anchor language evidence; aliases serve suppression, never
+language repair. Unknown remains explicit. Stored names, kinds, years and rating
+updatedAt are preserved; unsupported metadata-dependent requirements reject early.
+
+The path bypasses history, artwork, provider, source, reminder, prequeue and
+encodeMetadata work. Only actually returned titles receive existing bounded
+profile/client rating-edit receipts. The private 2,000-entry capacity and expiry
+remain in force; a 2,101-item pool test verifies eviction and explicit reload.
+No unlimited editing, audio, age, file or playback authorization is inferred.
+Existing owner, profile, PIN, client, scope and kids checks remain. Required reader
+absence is unavailable, while absent language evidence is Unknown. This is not
+literal read-only memory/filesystem behavior: delivery receipts and existing
+cache housekeeping retain their narrow effects.
+
+All 4,792 focused normal cases passed with 45 optional skips; 414 race events
+passed with six documented skips from two existing browser opt-ins repeated
+three times. All 43 API cases and both builds passed. Nine actual HTTP replies
+and schema/source provenance are retained. Root's 18/54 account/session/PIN/client
+cases are overlapping final subsets; their earlier isolated reports describe a
+WIP handler before the missing-reader guard. Independent and root checks verify
+eight sources, four production, pre-run pin, complete patch/archive, binary and
+raw reports. Repository completeness is backed by the existing unbounded List
+contract and synthetic service fixtures, not a new actual PostgreSQL/provider or
+native UI execution claim. Preliminary fixture mistakes remain historical; no
+executed product RED is claimed.
+
+The clean combined commit d5f45990fc4e96a1405c35f72932c7c71196f450 passed 10,307 cases across
+106 packages with 38 optional skips, including local browser/database fixtures
+and the frozen native request contract, then built at the same revision.
+The separate native consumer remains pending. No production activation, private
+playlist, real provider request or new upstream submission occurred.
