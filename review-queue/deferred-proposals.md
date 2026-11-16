@@ -939,3 +939,31 @@ device, real login or successful full Android send is claimed. An interrupted
 start without a known usable original-owner cleanup may rely on server expiry.
 No public content/age grant, private playlist, real provider, production activation
 or new upstream submission occurred.
+
+## Fork-only native startup timing
+
+The [native timing foundation](https://github.com/stefnats/mediastorm-androidtv/tree/feature/native-startup-timing)
+carries one private original-owner observation from the actual Coordinator entry
+through PlayerSession to the claimed PlayerController. Success is completed only
+by its onRenderedFirstFrame callback. Failure, cancellation, release, owner loss,
+timeout and external handoff remain separate once-only outcomes; stale/repeated
+callbacks cannot complete a replacement attempt. The monotonic local history is
+bounded to 128 anonymous samples, without content, owner, URL or credential fields,
+network endpoint or persistence.
+
+Input labels state only whether ready preparation, resolved input or direct input
+was supplied. They do not infer warm/cold cache behavior from duration. Automatic
+unknown cases stay unknown. This is Coordinator-entry timing, not a measured
+physical touch timestamp, and external Cast handoff is not first-frame success.
+
+Validation: all 1,582 native tests passed, including 20 new deterministic cases;
+both APKs built. Independent review and root verification checked all five files
+(four production), raw JUnit, APK hashes, registry and five empty private prefills.
+[Exact five-file delta](https://github.com/stefnats/mediastorm-androidtv/compare/b5e3dd73564c9c48c0fb3d252adb401744360687...615ae62aefea71afaf18590ccb4ebc0223763130).
+
+Tests run the actual production recorder, input classifier and player adapter.
+Coordinator and Android Listener wiring are source-reviewed; no physical touch,
+Activity/decoder render, device p95, measured warm/cold performance, tile, audio-only
+or Cast rendering result is claimed. Device benchmarking remains outstanding.
+No real provider, private playlist, production activation or new upstream
+submission occurred.
