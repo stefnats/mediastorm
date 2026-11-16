@@ -144,12 +144,12 @@
 <dialog id="recordingExportPIN" style="max-width:min(26rem,90vw);background:var(--bg-secondary);color:var(--text-primary);border:1px solid var(--border);border-radius:0.75rem;">
     <form>
         <h2>Unlock recording profile</h2>
-        <p>Enter this profile's PIN to download its original parts. The parts remain separate files.</p>
+        <p data-recording-pin-purpose>Enter this profile's PIN to download its original parts. The parts remain separate files.</p>
         <label for="recordingExportPINInput">Profile PIN</label>
         <input id="recordingExportPINInput" data-export-pin type="password" autocomplete="off" class="form-input" maxlength="256">
         <p data-export-pin-status role="status" aria-live="polite"></p>
         <div style="display:flex;gap:0.5rem;flex-wrap:wrap;">
-            <button type="submit" class="btn btn-primary">Unlock and download</button>
+            <button type="submit" class="btn btn-primary" data-recording-pin-submit>Unlock and download</button>
             <button type="button" data-export-pin-cancel class="btn btn-secondary">Cancel</button>
         </div>
     </form>
@@ -641,6 +641,12 @@ function renderRecordings(recordings) {
                 <div style="display: flex; gap: 0.5rem; flex-wrap: wrap;">
                     ${canPlay ? `<a class="btn btn-primary btn-sm" href="${streamRecordingURL(recording.id)}" target="_blank" rel="noreferrer">${playLabel}</a>` : ''}
                     ${exportInfo && exportInfo.exportable ? `<button type="button" class="btn btn-secondary btn-sm" data-recording-export="${escapeHtml(recording.id)}">Download parts ZIP</button>` : ''}
+                    ${exportInfo && exportInfo.exportable ? `<div style="display:flex;gap:0.4rem;flex-wrap:wrap;align-items:center;">
+                        <label>Part <select class="form-input" style="width:auto;" data-recording-part="${escapeHtml(recording.id)}" aria-label="Part for estimated length">${exportInfo.indices.map(index => `<option value="${index}" ${index === recordingExportUI.selectedPart(recording.id) ? 'selected' : ''}>${index}</option>`).join('')}</select></label>
+                        <button type="button" class="btn btn-secondary btn-sm" data-recording-timing="${escapeHtml(recording.id)}" data-timing-operation="read">View last estimate</button>
+                        <button type="button" class="btn btn-secondary btn-sm" data-recording-timing="${escapeHtml(recording.id)}" data-timing-operation="inspect">Inspect estimated part length</button>
+                        <button type="button" class="btn btn-secondary btn-sm" data-recording-timing-cancel>Cancel estimate request</button>
+                    </div>` : ''}
                     ${canCancel ? `<button class="btn btn-secondary btn-sm" onclick="cancelRecording('${escapeHtml(recording.id)}')">Cancel</button>` : ''}
                     ${canDelete ? `<button class="btn btn-danger btn-sm" onclick="deleteRecording('${escapeHtml(recording.id)}')">Delete</button>` : ''}
                 </div>
