@@ -1379,3 +1379,45 @@ physical devices remain outside this evidence. No executed pre-fix RED is claime
 [Backend delta](https://github.com/stefnats/mediastorm/compare/79005bb6e18f3f4a69a7f1063dd3c791fa7c4526...86d144bf186ff4f95b32011ba25d5050034c9a44).
 [Native delta](https://github.com/stefnats/mediastorm-androidtv/compare/fb27be664f33e89283fd48553f34de6bc14fdd94...a9b360c3670453a656ee0b764bee44c966b1bccd).
 No production activation, private playlist or new upstream submission occurred.
+
+## Fork-only complete local-library original-language cards
+
+The [local-library card filter](https://github.com/stefnats/mediastorm/tree/feature/local-library-language)
+selects complete saved local groups before totals and pagination. It retains all
+versions of a selected group. A consistent stored catalogue assignment across all
+members is required, including members hidden by other filters. Missing or
+conflicting assignments stay Unknown. Manual assignments name a catalogue work;
+they do not prove a file, audio track, age or playback permission. Existing strict
+cached provider evidence supplies original language without warming a cache miss.
+
+The same local include=cards response advertises the boolean capability. Active
+queries on remote libraries or detail projections reject before listing or demand.
+Filtered cards skip episode enrichment and artwork localization. No extra probe,
+scan, file open or provider request is introduced. Real synthetic PostgreSQL tests
+seed 1,304 versions, reach a matching group beyond index 650, preserve the complete
+stored index and exercise concurrent views. A poisoned remote table verifies that
+filtered remote rejection occurs before remote listing. Separate actual API
+ownership and wire/schema fixtures have explicitly narrower claims. Eight actual
+serialized Go replies are retained for the native consumer.
+
+All 4,683 focused normal cases passed with 41 explicit optional skips, alongside
+207 race pass events, 41 API cases and both builds. Root and independent review
+verified ten sources, four production, source archive, binary, runners and raw
+reports. The first combined run remains recorded as 10,102 pass and one existing
+station pagination failure with playlist cache hits; it is not reported as green.
+
+The separate [test fixture correction](https://github.com/stefnats/mediastorm/tree/test/playlist-fixture-isolation)
+isolates eight existing test files using the existing URL nonce helper and real
+first-fetch counters. Warm reuse and all access/revocation/grouping/media assertions
+remain. No production source or cache contents were read, scanned or removed.
+Only the grouped-pagination failure was executed; the other affected fixtures
+were identified from source. The unchanged final test delta passed 315 repeated
+normal and 189 race events, plus both real offline/silent failover variants in
+normal and race runs. Existing API coverage is included, not counted twice.
+
+Only the corrected clean combined commit 81811752a0543fc5debecdef6acaadeb633bb20b passed 10,103
+cases across 106 packages with 38 optional skips,
+then built at the same revision. Original-language catalogue filtering does not
+prove spoken audio or complete remote metadata. The separate native management
+consumer remains in progress. No deployment, private playlist, real provider or
+new upstream submission occurred.
