@@ -105,6 +105,10 @@ with sync_playwright() as p:
     delayed = []
     page.route('**/recordings/preview', lambda route: delayed.append(route))
     page.get_by_role('button', name='Schedule Manual Block', exact=True).click()
+    for _ in range(500):
+        if delayed:
+            break
+        page.wait_for_timeout(10)
     assert len(delayed) == 1
     page.evaluate("other => { document.getElementById('recordingProfile').value = other; document.getElementById('recordingProfile').dispatchEvent(new Event('change', {bubbles:true})); }", fixture['other'])
     delayed[0].fulfill(status=200, content_type='application/json', body=json.dumps({'complete': True, 'candidate': {'state': 'clear'}}))
