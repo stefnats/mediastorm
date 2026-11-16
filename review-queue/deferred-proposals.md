@@ -225,6 +225,47 @@ proposal still needs extraction onto an agreed upstream base and its own checks.
 The two-file alias follow-up recognizes only known numeric same-provider series
 anchors without optional cached metadata. It retains exact-episode, current
 library access and conflicting-ID checks. Its full localmedia package and
-13 new table cases pass; independent review is clean. This follow-up is not part
-of the earlier 8,722-case run. It is queued for the next combined verification.
+13 new table cases pass; independent review is clean. It was not part of the earlier 8,722-case run; the later 8,818-case
+media-evidence integration includes it.
 No upstream PR or deployment was made.
+
+## Fork-only media evidence and native display
+
+[Backend](https://github.com/stefnats/mediastorm/tree/feature/media-evidence-foundation)
+and [TV/phone](https://github.com/stefnats/mediastorm-androidtv/tree/feature/native-media-evidence)
+separate catalogue original language, release claims and observed file metadata.
+Catalogue facts come from existing normal TMDB movie/series detail responses;
+legacy/search-only scalar language does not establish provenance. Catalogue
+facts last at most 24 hours; source observations at most 15 minutes. Cache reads
+and copies retain original times. Imported/manual metadata cannot forge proof.
+
+Source facts reuse existing searches and full probes. Old path/torrent caches
+cannot acquire file provenance. Release and concrete input identities use
+separate opaque digests, not content checksums. Movie/explicit-health facts stay
+source-only; series binding requires an already verified exact official episode.
+Missing HDR/AD stays unknown; clipped raw inventories carry completeness flags.
+Container tags do not verify spoken language, content identity, decoded quality
+or device output. These facts grant no availability or playback entitlement.
+
+Native details and existing source/track panels display the facts without new
+search/probe/prewarm actions. Profile epochs and exact rendered probe snapshots
+retire stale responses and dialog actions. TV uses existing expandable text to
+retain the track list's initial focus target. Full filters and correct filtered
+server pagination remain separate work; physical focus/touch/rendering is open.
+
+Validation: 8,767 backend cases, 58 optional environment skips in the package
+run, 84 race cases, server build and full-source build. Native: 1,106 tests,
+51 new cases, zero skips, both APKs and empty private debug prefills. Eight
+unchanged Go JSON examples (including two actual local handler responses) are
+portable native tests; eight native component examples validate on the backend.
+Final independent production and fixture reviews are clean.
+
+Exact fork deltas: [backend 1d74f9e6 to b62f5ef1](https://github.com/stefnats/mediastorm/compare/1d74f9e6cf4a49445c9f10be5ac67c91b26f20a0...b62f5ef10ed773e88e3fc6f9bcba0fd7772accbd)
+and [TV/phone d1250c19 to 85022e69](https://github.com/stefnats/mediastorm-androidtv/compare/d1250c19fc5cee529aaecc12e03c3b457798da1a...85022e69270b86e9fb722c3ead2bc100f70e00dd).
+They inherit fork prerequisites and are not isolated upstream submissions.
+
+Combined commit `33101c78523d2752afe270f6b67ae508da2132d9` includes the local
+series-alias follow-up and passes 8,818 cases with 38 explicit opt-in skips,
+synthetic PostgreSQL, local browser fixtures and existing native contracts.
+The server binary has matching clean commit metadata. No upstream PR, external
+comment, provider query, production deployment or application activation.
