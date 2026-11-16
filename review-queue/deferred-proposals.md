@@ -1512,3 +1512,45 @@ and frozen native query bytes stayed unchanged. The server then built at that
 same revision. Native device execution and a complete managed download/import
 workflow remain separate. No production activation, private playlist, real
 provider request or new upstream submission occurred.
+
+## Fork-only original Watchlist mutation context
+
+The [Watchlist mutation correction](https://github.com/stefnats/mediastorm-androidtv/tree/fix/native-watchlist-context)
+binds all seven inventoried writers to their original immutable title, owner,
+producer and displayed desired state before deferred work. Existing operation
+receipts remain unchanged. The actual HomeScreen/stacked carousel carriers and
+TV/phone Details page predicates retire old actions; retained visible returns
+receive fresh operation and busy generations. PostPlay uses the original player
+context and actual suggestion instance, retiring its list work on replacement.
+
+Owner-serialized mutations and read revisions prevent old refreshes or rollbacks
+from replacing newer state. Alias overlays are retired by later overlapping
+accepted mutations. Owned readback rejects malformed or partial rows and totals.
+It is still only the complete visible display projection: Hidden and profile
+unreleased rules can legitimately omit a saved title. Absence never disproves an
+accepted save and overrides never insert hidden rows into the visible projection.
+
+A confirmed successful write retains its desired local intent when subsequent
+nonterminal refresh fails, with an explicit saved-but-refresh-failed error and
+no fresh-row/loaded success. Pre-write failure rolls back; cancellation or terminal
+readback publishes no late confirmation/success. Already accepted server writes
+may remain. The existing background refresh keeps its actual caller contract:
+a failed attempt finishes with a visible static error and unchanged rows, rather
+than an endless loading state or successful empty result. Direct owned reads
+remain strict. Normal menu dismissal still allows the accepted action's bounded
+error notification without touching a replacement page.
+
+All 1,904 native cases passed, including 37 new cases, and both APKs built.
+Independent and root review verify nineteen sources, fourteen production, all
+240 JUnit reports, pre-run source/runner pins, APK/DEX symbols, registry and five
+empty private prefills. Actual Store, Editor, menu/operation adapters, API entry
+cancellation and Call.await loopback boundaries execute. Full successful Android
+ApiClient.send, Compose transitions, physical touch, device playback and complete
+Launcher/Watched/ratings transport coverage remain separate. Review source points
+were corrected before final tests; no executed production RED is claimed.
+Preliminary test compilation errors retain separate logs. Existing PostPlay test
+assertions remain; the fake signature and two positive inputs now use the actual
+suggestion instance required by the existing UI path.
+
+[Exact nineteen-file delta](https://github.com/stefnats/mediastorm-androidtv/compare/4a2ad7eafb70a5d5f4e37c8e96ce4c0f65f27400...dfcf4ed12cd782b444adcf5ca0702453ba829561).
+No production activation, private playlist or new upstream submission occurred.
