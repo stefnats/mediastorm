@@ -1053,3 +1053,45 @@ station fixture isolation and passes 9,804 cases with 38 optional skips and 106
 successful packages, isolated PostgreSQL/local browser fixtures and a server build
 carrying that same unmodified revision. No production activation, real provider,
 private playlist or new upstream submission occurred.
+
+## Fork-only native list-dialog write context
+
+The [list-write correction](https://github.com/stefnats/mediastorm-androidtv/tree/fix/native-list-write-context)
+carries the original dialog/list/target owner and private operation identity
+through rename, delete, create/add, membership and refresh. Deferred old work cannot
+capture replacement credentials or publish into the replacement Store, picker or
+page. Cancellation stays cancellation. Actual page and referential picker identity
+prevent an old result from closing a new equal-valued target. An already accepted
+remote create may leave an empty list in the original profile; it is not rolled
+back with replacement credentials. SetAside/TitleActions legacy entrypoints remain
+a separate follow-up, not an all-writers migration claim.
+
+Validation: all 1,658 native cases passed, including 37 new ones, and both APKs
+built. Independent source/frozen review and root verification checked all 16 files
+(13 production), raw XML, APK hashes, registry and five empty prefills. Tests run
+actual receipts, Store/revision/serialization, request constructors and shared
+Call.await over loopback. Complete successful Android ApiClient.send and Compose/
+Activity navigation are source/compile-reviewed, not executed. Actual historical
+picker-reference RED XML/logs are retained; exact old WIP source was not separately
+archived or reconstructed.
+[Exact sixteen-file delta](https://github.com/stefnats/mediastorm-androidtv/compare/3a0598006b5ce26fb68289c0528c7853b4f8b1eb...482460592ef0cbb307077034165ae76e75a482e8).
+
+## Fork-only saved-pair layout namespace
+
+The [two-file namespace correction](https://github.com/stefnats/mediastorm-androidtv/tree/fix/native-saved-pair-namespace)
+checks saved and unreadable pairing state before route/account identity. A
+disconnected paired bridge cannot fall back to a previously typed server's layout
+namespace. Unknown pairing or identity causes no layout-storage read/write;
+existing layout data is retained and fresh manual selection remains possible.
+Cancellation is preserved and this bookkeeping never grants media authority.
+
+All 1,664 native cases passed, including six new predicate/storage cases; both APKs
+built. Independent review/root verification checked both source files, patch,
+reports, APKs, registry and five empty prefills. Zero I/O refers specifically to
+layout storage. Android SecureStore identity/pairing reads remain source-reviewed;
+the JVM tests inject those readings. This is a source-found correction followed
+by tests, not an asserted pre-fix executed RED or device run.
+[Exact two-file delta](https://github.com/stefnats/mediastorm-androidtv/compare/482460592ef0cbb307077034165ae76e75a482e8...46fbc147e5faa8788eda20bbcc0b71ca07410361).
+
+Both packets remain only in the fork. No production activation, real provider,
+private playlist or new upstream submission occurred.
