@@ -1823,7 +1823,8 @@ paths:
         `TrendingItem[]` for `permanent-prequeue` and custom-list shelves,
         `HiddenItem[]` for the complete stored `hidden` management index,
         `LovedStoredItem[]` for the complete `loved-stored` browse view,
-        plain `Title[]` for `collection-cached`, and
+        plain `Title[]` for `collection-cached`,
+        whitelisted `CachedContinueWatchingItem[]` for `continue-watching-cached`, and
         the delegated metadata payload (usually `TrendingItem[]`) for
         discovery sources.
       parameters:
@@ -1833,7 +1834,7 @@ paths:
             Up to 32 distinct registered canonical ISO639-3 codes, separated by
             commas. Supported only for stored watchlist, custom-list (including
             aliases and custom-list shelves), permanent-prequeue, hidden, loved-stored
-            and collection-cached. Matches
+            and collection-cached / continue-watching-cached. Matches
             current cached provider original-language facts before paging;
             missing, expired or unbound facts are unknown. No provider lookup
             is started. Invalid or unsupported active queries return 400.
@@ -1855,7 +1856,28 @@ paths:
             `popular-on-server`, `recently-watched`, `trending`, `genre`,
             `decade`, `mdblist`, `stremio`, `tmdb-list`, `trakt-list`,
             `publicmetadb-list`, `simkl-list`, `letterboxd-list`,
-            `personalized`, `loved`, `loved-stored`, `custom-ai`, `similar`, `collection`, `collection-cached`.
+            `personalized`, `loved`, `loved-stored`, `custom-ai`, `similar`, `collection`, `collection-cached`, `continue-watching-cached`.
+            `continue-watching-cached` is an explicit adult-profile cache browse.
+            Only the normal Continue Watching producer can capture its complete
+            service feed before the legacy display cap. Pools are independent
+            whitelist projections with at most 4096 rows / 4 MiB and 32 profile
+            pools. Original expiry is at most 10 minutes, or 30 seconds for an
+            estimated episode airtime. Cache reads never renew or rebuild it.
+            Missing, expired, invalid, evicted or revision-lost pools return 409
+            code continue_watching_snapshot_unavailable; a missing reader is 503.
+            Current Hidden and Set Aside records and verified cached original
+            language selection precede total and paging. Supports titleFilter,
+            filterMediaType, alphabet and default/name/year sorting; limit=0
+            returns the complete matching observed pool without the discovery cap.
+            Watched, genre, runtime, rating, count, facets and added-sort requests
+            return 400. No cold builder, metadata, identity repair, recording
+            repository, Plex, artwork, prequeue or delivery-receipt work occurs.
+            Whitelist rows retain canonical episode/history/resume coordinates,
+            omit private URL/path/maps, and are not playback or history grants.
+            Pool correlation does not freeze language or suppression facts.
+            Existing normal Continue Watching/next-episode and Recently Watched
+            privacy windows are unchanged. A normal explicit Continue Watching
+            read remains its existing producer; no automatic fallback is allowed.
             `collection-cached` is an explicit adult-only cache browse, separate
             from the normal collection GET. Requires collectionId (or matching id).
             Only a complete normal TMDB collection response with its actual ID,
@@ -5094,6 +5116,49 @@ components:
           format: date-time
           description: Original saved preference update time; never the browse observation time.
 
+    CachedContinueWatchingEpisode:
+      type: object
+      additionalProperties: false
+      required: [seasonNumber, episodeNumber]
+      properties:
+        numbering:
+          $ref: '#/components/schemas/EpisodeNumbering'
+        seasonNumber: {type: integer, minimum: 0}
+        episodeNumber: {type: integer, minimum: 1}
+        absoluteEpisodeNumber: {type: integer, minimum: 0}
+        episodeId: {type: string}
+        itemId: {type: string, description: Existing server-built progress/history target; never assemble or rebind it.}
+        tvdbId: {type: string}
+        title: {type: string}
+        airDate: {type: string}
+        airDateTimeUTC: {type: string}
+
+    CachedContinueWatchingItem:
+      type: object
+      additionalProperties: false
+      required: [seriesId, seriesTitle, mediaType, updatedAt]
+      properties:
+        seriesId: {type: string}
+        seriesTitle: {type: string}
+        mediaType: {type: string, enum: [movie, series]}
+        year: {type: integer, minimum: 0, maximum: 9999}
+        externalIds:
+          type: object
+          additionalProperties: false
+          properties:
+            tmdb: {type: string}
+            tvdb: {type: string}
+            imdb: {type: string}
+        updatedAt: {type: string, format: date-time}
+        nextEpisode:
+          $ref: '#/components/schemas/CachedContinueWatchingEpisode'
+        lastWatched:
+          $ref: '#/components/schemas/CachedContinueWatchingEpisode'
+        resume:
+          $ref: '#/components/schemas/Resume'
+        percentWatched: {type: number, minimum: 0, maximum: 100}
+        resumePercent: {type: number, minimum: 0, maximum: 100}
+
     DisplayListResponse:
       type: object
       required: [source, items, total]
@@ -5101,7 +5166,17 @@ components:
         originalLanguageFilterSupported:
           type: boolean
           readOnly: true
-          description: True only for normalized stored watchlist, custom-list, permanent-prequeue, hidden, loved-stored and explicit collection-cached sources. On these sources total is the effective filtered count before pagination; sourceTotal or unfilteredTotal must not drive paging.
+          description: True only for normalized stored watchlist, custom-list, permanent-prequeue, hidden, loved-stored and explicit collection-cached / continue-watching-cached sources. On these sources total is the effective filtered count before pagination; sourceTotal or unfilteredTotal must not drive paging.
+        pool:
+          type: object
+          description: Present only for continue-watching-cached. Original complete feed observation; not a language-view snapshot or grant.
+          additionalProperties: false
+          required: [id, observedAt, expiresAt, complete]
+          properties:
+            id: {type: string, pattern: '^[0-9a-f]{32}$'}
+            observedAt: {type: string, format: date-time}
+            expiresAt: {type: string, format: date-time}
+            complete: {type: boolean, enum: [true]}
         collection:
           type: object
           description: Present only for collection-cached. Original provider observation without renewal or immutable-page guarantee.
@@ -5124,6 +5199,7 @@ components:
               - $ref: '#/components/schemas/WatchlistItem'
               - $ref: '#/components/schemas/TrendingItem'
               - $ref: '#/components/schemas/SeriesWatchState'
+              - $ref: '#/components/schemas/CachedContinueWatchingItem'
               - $ref: '#/components/schemas/HiddenItem'
               - $ref: '#/components/schemas/LovedStoredItem'
               - $ref: '#/components/schemas/Title'

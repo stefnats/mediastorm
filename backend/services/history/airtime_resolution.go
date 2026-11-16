@@ -107,5 +107,7 @@ func (s *Service) cacheContinueWatchingLocked(userID string, items []models.Seri
 	if s.continueWatchingCache == nil {
 		s.continueWatchingCache = make(map[string]*cachedContinueWatching)
 	}
-	s.continueWatchingCache[userID] = &cachedContinueWatching{items: items, cachedAt: time.Now(), expiresAt: time.Now().Add(ttl)}
+	at := time.Now()
+	s.continueWatchingCache[userID] = &cachedContinueWatching{items: items, cachedAt: at, expiresAt: at.Add(ttl)}
+	s.projectContinueWatchingPoolLocked(userID, s.continueWatchingCache[userID])
 }
