@@ -1815,3 +1815,56 @@ The clean combined commit 8e224a3c09043029cf078d8322edf62d038b3d71 passed 10,662
 with 38 optional skips and built at the same revision. Source, runner and all
 three native query exports stayed unchanged. No production activation, real
 provider request, private playlist or new upstream submission occurred.
+
+## Fork-only explicit DVR timing UI and fresh parent proof
+
+The [DVR timing UI](https://github.com/stefnats/mediastorm/tree/feature/web-dvr-part-timing)
+adds separate explicit read and inspect actions for an original closed part.
+No render, list, profile or part change starts a timing request. The existing
+cookie/PIN/action controller and ZIP download remain shared. Actual response
+HTTP-Date, one-second precision, original measured request RTT and monotonic
+elapsed time bound display and token expiry conservatively. A delayed response
+cannot renew a deadline. No global timeline, exact media duration, file/age or
+playback permission is inferred.
+
+Eight sources/three production files passed 4,888 normal events with 46 optional
+skips, 159 race events with nine optional skips, 49 OpenAPI cases, five browser
+cases and fifteen repeated race/browser cases; both builds passed. Local browser
+proof covers account/admin, 390/1280, original parts 1/3, actual FFprobe FD and
+process join, PIN, unchanged ZIP bytes, +/-1h wall-clock shifts, malformed/expired
+DTOs, original delayed responses and retirement. The actual pre-fix transit-delay
+regression and exact sources/raw are retained; the backend still rejected the
+expired token. Earlier fixture/environment failures are documented separately.
+One existing planning harness gained a bounded arrival barrier before its
+unchanged assertions. Independent/root checks cover all archives, pins, phases,
+runners, tools, raw reports, binary and screenshots.
+
+The separate [fresh parent proof foundation](https://github.com/stefnats/mediastorm/tree/feature/parent-fresh-context)
+adds explicit RequireFresh and AuthenticateContext. Fresh verification requires
+the current account password even for administrators, propagates the original
+request to the account reader and checks cancellation after blocking work and
+bcrypt. Cancelled waiters leave the shared guess budget without waiting for a
+legacy verifier. Existing Require/Authenticate remain compatibility adapters.
+Four sources/two production files passed 4,732 normal events with 44 optional
+skips, 492 race events, the full 227-case API package and both builds. Twenty-two
+new pass events cover ten actual test functions and their subcases, including
+actual JSON AccountService/bcrypt, blocked/late readers and mixed guess budgets.
+Reader cancellation uses controlled ports; no live PostgreSQL cancellation or
+complete login-flow proof is asserted. The initial sandbox loopback failure and
+exact sources/raw are retained.
+
+RequireFresh is deliberately not installed in any public parental route. It is
+not a continuously revalidated session/actor/target snapshot. Existing cached
+profile writes and their persistence boundary need a separate guarded mutation
+step before public installation; a guard followed by a later write is not an
+atomic mutation. There is no new family acceptance or age/file/playback grant.
+
+The clean combined revision 9415f036b4ded83937060716966c888ea7c2737a passed 10,702 events in
+106 packages with 38 optional skips and built at the same clean revision.
+Runner, source and the three existing native query exports stayed unchanged.
+The separate local native source-preference lifetime and historical DVR timing
+consumer packets passed 2,070 and 2,088 tests respectively and both APKs, with
+independent/root checks; those two new branches remain local. The latest
+separately authorized native publication is still the exact Saved Love branch.
+Repeated targeted events overlap the normal suites. No production activation,
+real provider request, private playlist or new upstream submission occurred.
