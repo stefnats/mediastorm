@@ -39,14 +39,15 @@ type persistentPrequeueStore interface {
 }
 
 type DisplayListResponse struct {
-	Source          string      `json:"source"`
-	ListID          string      `json:"listId,omitempty"`
-	Items           interface{} `json:"items"`
-	Total           int         `json:"total"`
-	UnfilteredTotal int         `json:"unfilteredTotal,omitempty"`
-	Genres          []string    `json:"genres,omitempty"`
-	AlphabetBuckets []string    `json:"alphabetBuckets,omitempty"`
-	MetadataPending bool        `json:"metadataPending,omitempty"`
+	Source                          string      `json:"source"`
+	ListID                          string      `json:"listId,omitempty"`
+	Items                           interface{} `json:"items"`
+	Total                           int         `json:"total"`
+	UnfilteredTotal                 int         `json:"unfilteredTotal,omitempty"`
+	Genres                          []string    `json:"genres,omitempty"`
+	AlphabetBuckets                 []string    `json:"alphabetBuckets,omitempty"`
+	MetadataPending                 bool        `json:"metadataPending,omitempty"`
+	OriginalLanguageFilterSupported bool        `json:"originalLanguageFilterSupported,omitempty"`
 }
 
 const (
@@ -87,6 +88,10 @@ func (h *DisplayListHandler) SetPrequeueStore(store persistentPrequeueStore) {
 }
 
 func (h *DisplayListHandler) Get(w http.ResponseWriter, r *http.Request) {
+	if _, err := parseDisplayListOriginalLanguageQuery(r); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
 	view := r.URL.Query().Get("homeView")
 	filter := view
 	if view != "movies" && view != "shows" && config.IsHomeViewID(view) {
@@ -97,6 +102,26 @@ func (h *DisplayListHandler) Get(w http.ResponseWriter, r *http.Request) {
 		filter = config.HomeViewFilter(h.homeViewSettings(userID).Views, view)
 	}
 	if homeViewMediaType(filter) != "" {
+		// Stored indexes already apply media filters before paging. In particular,
+		// a custom-list shelf sentinel must not inherit the discovery window cap.
+		source := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("source")))
+		if source == "" {
+			source = "watchlist"
+		}
+		stored := displayListOriginalLanguageSupportedSource(source)
+		if (source == "mdblist" || source == "mdblist-url" || source == "mdblist-shelf") && strings.HasPrefix(strings.TrimSpace(r.URL.Query().Get("url")), customListShelfURLPrefix) {
+			stored = true
+		}
+		if stored {
+			delegated := r.Clone(r.Context())
+			u := *r.URL
+			query := r.URL.Query()
+			query.Set("filterMediaType", homeViewMediaType(filter))
+			u.RawQuery = query.Encode()
+			delegated.URL = &u
+			h.get(w, delegated)
+			return
+		}
 		h.getHomeView(w, r, filter)
 		return
 	}
@@ -124,6 +149,16 @@ func (h *DisplayListHandler) get(w http.ResponseWriter, r *http.Request) {
 			listID = strings.TrimSpace(strings.TrimPrefix(listURL, customListShelfURLPrefix))
 			customListShelf = true
 		}
+	}
+	languageQuery, queryErr := parseDisplayListOriginalLanguageQuery(r)
+	if queryErr != nil {
+		http.Error(w, queryErr.Error(), http.StatusBadRequest)
+		return
+	}
+	languageSupported := displayListOriginalLanguageSupportedSource(source)
+	if languageQuery.active() && !languageSupported {
+		http.Error(w, "original-language filtering is unsupported for this source", http.StatusBadRequest)
+		return
 	}
 	metadataSource := source != "watchlist" &&
 		source != "custom-list" &&
@@ -303,6 +338,7 @@ func (h *DisplayListHandler) get(w http.ResponseWriter, r *http.Request) {
 			items = visible
 		}
 	}
+	items = h.filterOriginalLanguages(userID, items, languageQuery)
 	items, genres, alphabet := queryWatchlistItems(items, parseDisplayListQuery(r))
 	total := len(items)
 	limit, offset := parseLimitOffset(r)
@@ -347,14 +383,15 @@ func (h *DisplayListHandler) get(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(DisplayListResponse{
-		Source:          source,
-		ListID:          listID,
-		Items:           responseItems,
-		Total:           total,
-		UnfilteredTotal: unfilteredTotal,
-		Genres:          genres,
-		AlphabetBuckets: alphabet,
-		MetadataPending: metadataPending,
+		Source:                          source,
+		ListID:                          listID,
+		Items:                           responseItems,
+		Total:                           total,
+		UnfilteredTotal:                 unfilteredTotal,
+		Genres:                          genres,
+		AlphabetBuckets:                 alphabet,
+		MetadataPending:                 metadataPending,
+		OriginalLanguageFilterSupported: languageSupported,
 	})
 }
 

@@ -1631,6 +1631,24 @@ paths:
         the delegated metadata payload (usually `TrendingItem[]`) for
         discovery sources.
       parameters:
+        - name: originalLanguages
+          in: query
+          description: |
+            Up to 32 distinct registered canonical ISO639-3 codes, separated by
+            commas. Supported only for stored watchlist, custom-list (including
+            aliases and custom-list shelves), and permanent-prequeue. Matches
+            current cached provider original-language facts before paging;
+            missing, expired or unbound facts are unknown. No provider lookup
+            is started. Invalid or unsupported active queries return 400.
+          schema:
+            type: string
+            maxLength: 128
+        - name: includeUnknownOriginalLanguage
+          in: query
+          description: Include unknown original language in addition to selected codes; alone selects only unknown items. False with no codes leaves the list unfiltered.
+          schema:
+            type: boolean
+            default: false
         - $ref: '#/components/parameters/UserID'
         - name: source
           in: query
@@ -4462,6 +4480,10 @@ components:
       type: object
       required: [source, items, total]
       properties:
+        originalLanguageFilterSupported:
+          type: boolean
+          readOnly: true
+          description: True only for normalized stored watchlist, custom-list and permanent-prequeue sources. On these sources total is the effective filtered count before pagination; sourceTotal or unfilteredTotal must not drive paging.
         source:
           type: string
           description: Canonical source name actually served.
