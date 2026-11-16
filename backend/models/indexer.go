@@ -12,18 +12,22 @@ const (
 
 // NZBResult represents a normalized search result from a Torznab/Newznab indexer.
 type NZBResult struct {
-	Title        string             `json:"title"`
-	Indexer      string             `json:"indexer"`
-	GUID         string             `json:"guid"`
-	Link         string             `json:"link"`
-	DownloadURL  string             `json:"downloadUrl"`
-	SizeBytes    int64              `json:"sizeBytes"`
-	PublishDate  time.Time          `json:"publishDate"`
-	Categories   []string           `json:"categories,omitempty"`
-	Attributes   map[string]string  `json:"attributes,omitempty"`
-	ServiceType  ContentServiceType `json:"serviceType,omitempty"`
-	EpisodeCount int                `json:"episodeCount,omitempty"` // Number of episodes in pack (0 if not a pack)
-	SizePerFile  bool               `json:"sizePerFile,omitempty"`  // True when sizeBytes is per-file (Stremio scrapers), false when total pack
+	// Observation times are server-only and survive internal search cache copies.
+	EvidenceObservedAt       time.Time          `json:"-"`
+	EvidenceExpiresAt        time.Time          `json:"-"`
+	EvidenceCandidateVersion string             `json:"-"`
+	Title                    string             `json:"title"`
+	Indexer                  string             `json:"indexer"`
+	GUID                     string             `json:"guid"`
+	Link                     string             `json:"link"`
+	DownloadURL              string             `json:"downloadUrl"`
+	SizeBytes                int64              `json:"sizeBytes"`
+	PublishDate              time.Time          `json:"publishDate"`
+	Categories               []string           `json:"categories,omitempty"`
+	Attributes               map[string]string  `json:"attributes,omitempty"`
+	ServiceType              ContentServiceType `json:"serviceType,omitempty"`
+	EpisodeCount             int                `json:"episodeCount,omitempty"` // Number of episodes in pack (0 if not a pack)
+	SizePerFile              bool               `json:"sizePerFile,omitempty"`  // True when sizeBytes is per-file (Stremio scrapers), false when total pack
 }
 
 // EffectiveItemSizeBytes returns the size represented by one playable item.
@@ -52,6 +56,7 @@ type ScoreBreakdownItem struct {
 
 // ScoredNZBResult extends NZBResult with filter status, scoring breakdown, and rejection reason.
 type ScoredNZBResult struct {
+	MediaEvidence *MediaEvidence `json:"mediaEvidence,omitempty"`
 	NZBResult
 	FilterStatus   string               `json:"filterStatus"`             // "passed" or "filtered"
 	FilterReason   string               `json:"filterReason,omitempty"`   // Reason for exclusion (empty if passed)

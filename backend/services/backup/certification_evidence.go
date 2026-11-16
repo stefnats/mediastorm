@@ -14,7 +14,7 @@ func decodeDatabaseExport(data []byte) (databaseExport, error) {
 	// provider's source identity or freshness. Normal trusted refreshes can
 	// restore evidence later; importing data creates no metadata requests.
 	for i := range export.LocalMediaItems {
-		export.LocalMediaItems[i].Metadata = models.WithoutCertificationEvidence(export.LocalMediaItems[i].Metadata)
+		export.LocalMediaItems[i].Metadata = models.WithoutProviderEvidence(export.LocalMediaItems[i].Metadata)
 	}
 	for i := range export.RemoteMediaItems {
 		models.ClearRemoteSelectionProof(&export.RemoteMediaItems[i])

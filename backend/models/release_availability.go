@@ -26,6 +26,7 @@ const ComingSoonWindow = 30 * 24 * time.Hour
 func (t Title) MarshalJSON() ([]byte, error) {
 	type titleAlias Title
 	alias := titleAlias(t)
+	alias.OriginalLanguageEvidence = CurrentOriginalLanguageEvidence(t, time.Now())
 	(*Title)(&alias).ApplyReleaseAvailability(time.Now())
 	return json.Marshal(alias)
 }

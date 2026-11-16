@@ -21,15 +21,19 @@ import (
 	"novastream/internal/streamheaders"
 	"novastream/internal/torboxrate"
 	"novastream/models"
+	"novastream/services/mediaevidence"
 	"novastream/utils"
 )
 
 // trackCacheEntry stores cached track probe results
 type trackCacheEntry struct {
-	audioTracks    []AudioTrackInfo
-	subtitleTracks []SubtitleTrackInfo
-	probeError     string
-	expiresAt      time.Time
+	mediaEvidence    *models.MediaEvidence
+	selection        string
+	candidateVersion string
+	audioTracks      []AudioTrackInfo
+	subtitleTracks   []SubtitleTrackInfo
+	probeError       string
+	expiresAt        time.Time
 }
 
 type preResolvedHealthCacheEntry struct {
@@ -146,6 +150,7 @@ func preResolvedHealthCacheKey(result models.NZBResult) string {
 
 func cloneDebridHealthCheck(in DebridHealthCheck) DebridHealthCheck {
 	out := in
+	out.MediaEvidence = models.CopyMediaEvidence(in.MediaEvidence)
 	if in.AudioTracks != nil {
 		out.AudioTracks = append([]AudioTrackInfo(nil), in.AudioTracks...)
 	}
@@ -161,6 +166,9 @@ func cloneVideoFullResult(in *models.VideoFullResult) *models.VideoFullResult {
 		return nil
 	}
 	out := *in
+	if in.MetadataEvidence != nil {
+		out.MetadataEvidence = models.CopyMediaEvidence(&models.MediaEvidence{Probed: in.MetadataEvidence}).Probed
+	}
 	out.AudioStreams = append([]models.AudioStreamInfo(nil), in.AudioStreams...)
 	out.SubtitleStreams = append([]models.SubtitleStreamInfo(nil), in.SubtitleStreams...)
 	if in.DolbyVisionConfiguration != nil {
@@ -219,12 +227,13 @@ func appendProbeNote(existing, note string) string {
 
 // DebridHealthCheck represents the health status of a debrid item.
 type DebridHealthCheck struct {
-	Healthy      bool   `json:"healthy"`
-	Status       string `json:"status"`
-	Cached       bool   `json:"cached"`
-	Provider     string `json:"provider"`
-	InfoHash     string `json:"infoHash,omitempty"`
-	ErrorMessage string `json:"errorMessage,omitempty"`
+	MediaEvidence *models.MediaEvidence `json:"mediaEvidence,omitempty"`
+	Healthy       bool                  `json:"healthy"`
+	Status        string                `json:"status"`
+	Cached        bool                  `json:"cached"`
+	Provider      string                `json:"provider"`
+	InfoHash      string                `json:"infoHash,omitempty"`
+	ErrorMessage  string                `json:"errorMessage,omitempty"`
 	// Track info (populated when cached)
 	AudioTracks     []AudioTrackInfo        `json:"audioTracks,omitempty"`
 	SubtitleTracks  []SubtitleTrackInfo     `json:"subtitleTracks,omitempty"`
@@ -738,7 +747,13 @@ func (s *HealthService) checkHealth(ctx context.Context, result models.NZBResult
 				mediaProbe, err = s.fullProber.ProbeVideoFull(probeCtx, streamURL)
 				probeCancel()
 				if err == nil && mediaProbe != nil {
+					mediaProbe = cloneVideoFullResult(mediaProbe)
 					tracks = trackProbeResultFromMediaProbe(mediaProbe)
+					if mediaProbe.MetadataEvidenceInputVersion != mediaevidence.InputVersion(streamURL) {
+						tracks.MetadataEvidence = nil
+						mediaProbe.MetadataEvidence = nil
+						mediaProbe.MetadataEvidenceInputVersion = ""
+					}
 				} else if err == nil {
 					err = fmt.Errorf("full media probe returned no result")
 				}
@@ -748,6 +763,12 @@ func (s *HealthService) checkHealth(ctx context.Context, result models.NZBResult
 			if err != nil {
 				log.Printf("[debrid-health] probe failed for pre-resolved stream %s: %v", result.Title, err)
 				if cached, ok := s.cachedPreResolvedHealth(preResolvedCacheKey); ok {
+					if cached.MediaEvidence == nil || cached.MediaEvidence.SourceVersion != mediaevidence.InputVersion(streamURL) || cached.MediaEvidence.CandidateVersion != mediaevidence.CandidateVersion(result) {
+						cached.MediaEvidence = nil
+						if cached.MediaProbe != nil {
+							cached.MediaProbe.MetadataEvidence = nil
+						}
+					}
 					cached.TrackProbeError = appendProbeNote(cached.TrackProbeError, fmt.Sprintf("recent probe failed: %v", err))
 					log.Printf("[debrid-health] using recent positive pre-resolved health cache for %s after probe failure", result.Title)
 					return cached, nil
@@ -771,8 +792,18 @@ func (s *HealthService) checkHealth(ctx context.Context, result models.NZBResult
 				}, nil
 			}
 			healthResult.AudioTracks = tracks.AudioTracks
+			// Existing shared prober calls here use the extracted URL, not the
+			// original encoded header context. Do not attach new association
+			// evidence when those inputs differ; legacy tracks stay unchanged.
+			if len(requestHeaders) > 0 {
+				tracks.MetadataEvidence = nil
+				if mediaProbe != nil {
+					mediaProbe.MetadataEvidence = nil
+				}
+			}
 			healthResult.SubtitleTracks = tracks.SubtitleTracks
 			healthResult.MediaProbe = cloneVideoFullResult(mediaProbe)
+			healthResult.MediaEvidence = mediaevidence.Probed(result, streamURL, "", 0, tracks.MetadataEvidence, "", nil, time.Now())
 			log.Printf("[debrid-health] pre-resolved stream %s verified with %d audio streams", result.Title, len(tracks.AudioTracks))
 		}
 
@@ -830,8 +861,9 @@ func (s *HealthService) checkHealth(ctx context.Context, result models.NZBResult
 
 func trackProbeResultFromMediaProbe(probe *models.VideoFullResult) *TrackProbeResult {
 	result := &TrackProbeResult{
-		AudioTracks:    make([]AudioTrackInfo, 0, len(probe.AudioStreams)),
-		SubtitleTracks: make([]SubtitleTrackInfo, 0, len(probe.SubtitleStreams)),
+		MetadataEvidence: probe.MetadataEvidence,
+		AudioTracks:      make([]AudioTrackInfo, 0, len(probe.AudioStreams)),
+		SubtitleTracks:   make([]SubtitleTrackInfo, 0, len(probe.SubtitleStreams)),
 	}
 	for _, track := range probe.AudioStreams {
 		result.AudioTracks = append(result.AudioTracks, AudioTrackInfo{
@@ -1325,6 +1357,7 @@ func (s *HealthService) checkProviderHealth(ctx context.Context, client Provider
 		}
 
 		// Check track cache first
+		proofSelection := mediaevidence.FileVersion(info.Links[preferredLinkIdx], fmt.Sprintf("%s|%d", providerName, preferredLinkIdx), 0)
 		s.trackCacheMu.RLock()
 		cached, hasCached := s.trackCache[trackCacheKey]
 		s.trackCacheMu.RUnlock()
@@ -1334,6 +1367,9 @@ func (s *HealthService) checkProviderHealth(ctx context.Context, client Provider
 			healthResult.AudioTracks = cached.audioTracks
 			healthResult.SubtitleTracks = cached.subtitleTracks
 			healthResult.TrackProbeError = cached.probeError
+			if cached.selection == proofSelection && cached.candidateVersion == mediaevidence.CandidateVersion(result) {
+				healthResult.MediaEvidence = models.CurrentMediaEvidence(cached.mediaEvidence, time.Now())
+			}
 			log.Printf("[debrid-health] track cache HIT for %s: %d audio, %d subtitle",
 				trackCacheKey, len(cached.audioTracks), len(cached.subtitleTracks))
 		} else {
@@ -1363,7 +1399,7 @@ func (s *HealthService) checkProviderHealth(ctx context.Context, client Provider
 					// Start async probe with the download URL
 					downloadURL := unrestricted.DownloadURL
 					healthResult.TracksLoading = true
-					go s.probeTracksAsync(trackCacheKey, downloadURL)
+					go s.probeTracksAsync(trackCacheKey, downloadURL, trackEvidenceBinding{candidate: result, selection: proofSelection})
 					log.Printf("[debrid-health] started async track probe for %s (link %d: %s)",
 						trackCacheKey, preferredLinkIdx, unrestricted.Filename)
 				}
@@ -1618,8 +1654,9 @@ var bitmapSubtitleCodecs = map[string]string{
 
 // TrackProbeResult holds audio and subtitle track information from probing.
 type TrackProbeResult struct {
-	AudioTracks    []AudioTrackInfo
-	SubtitleTracks []SubtitleTrackInfo
+	MetadataEvidence *models.MediaProbeFacts
+	AudioTracks      []AudioTrackInfo
+	SubtitleTracks   []SubtitleTrackInfo
 }
 
 // probeAllTracks probes a URL for audio and subtitle track information.
@@ -1680,14 +1717,7 @@ func (s *HealthService) probeAllTracksWithTimeout(ctx context.Context, streamURL
 	}
 
 	var result struct {
-		Streams []struct {
-			Index       int               `json:"index"`
-			CodecType   string            `json:"codec_type"`
-			CodecName   string            `json:"codec_name"`
-			Profile     string            `json:"profile"`
-			Tags        map[string]string `json:"tags"`
-			Disposition map[string]int    `json:"disposition"`
-		} `json:"streams"`
+		Streams []mediaevidence.ProbeStream `json:"streams"`
 	}
 
 	if err := json.Unmarshal(stdout.Bytes(), &result); err != nil {
@@ -1695,6 +1725,9 @@ func (s *HealthService) probeAllTracksWithTimeout(ctx context.Context, streamURL
 	}
 
 	probeResult := &TrackProbeResult{}
+	if len(result.Streams) > 0 {
+		probeResult.MetadataEvidence = mediaevidence.ProbeFacts(result.Streams, time.Now().UTC())
+	}
 
 	for _, stream := range result.Streams {
 		codec := strings.ToLower(strings.TrimSpace(stream.CodecName))
@@ -1752,7 +1785,12 @@ func (s *HealthService) probeAllTracksWithTimeout(ctx context.Context, streamURL
 }
 
 // probeTracksAsync probes tracks in the background and caches the results.
-func (s *HealthService) probeTracksAsync(infoHash, downloadURL string) {
+type trackEvidenceBinding struct {
+	candidate models.NZBResult
+	selection string
+}
+
+func (s *HealthService) probeTracksAsync(infoHash, downloadURL string, bindings ...trackEvidenceBinding) {
 	defer func() {
 		// Clear probing state when done
 		s.probingMu.Lock()
@@ -1774,6 +1812,11 @@ func (s *HealthService) probeTracksAsync(infoHash, downloadURL string) {
 	} else {
 		entry.audioTracks = tracks.AudioTracks
 		entry.subtitleTracks = tracks.SubtitleTracks
+		if len(bindings) == 1 {
+			binding := bindings[0]
+			entry.selection, entry.candidateVersion = binding.selection, mediaevidence.CandidateVersion(binding.candidate)
+			entry.mediaEvidence = mediaevidence.Probed(binding.candidate, downloadURL, binding.selection, 0, tracks.MetadataEvidence, "", nil, time.Now())
+		}
 		log.Printf("[debrid-health] async track probe complete for %s: %d audio, %d subtitle",
 			infoHash, len(tracks.AudioTracks), len(tracks.SubtitleTracks))
 	}

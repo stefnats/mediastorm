@@ -21,20 +21,23 @@ type SubtitleStreamInfo struct {
 
 // VideoFullResult contains the reusable result of a full playback metadata probe.
 type VideoFullResult struct {
-	HasDolbyVision           bool
-	HasHDR10                 bool
-	DolbyVisionProfile       string
-	DolbyVisionConfiguration *DolbyVisionConfiguration
-	VideoCodec               string
-	VideoPixFmt              string
-	VideoProfile             string
-	VideoWidth               int
-	VideoHeight              int
-	VideoLevel               int
-	AvgFrameRate             string
-	HasTrueHD                bool
-	HasCompatibleAudio       bool
-	AudioStreams             []AudioStreamInfo
-	SubtitleStreams          []SubtitleStreamInfo
-	Duration                 float64
+	// MetadataEvidence is set only by a completed actual probe, never a path-only cache read.
+	MetadataEvidence             *MediaProbeFacts `json:"-"`
+	MetadataEvidenceInputVersion string           `json:"-"`
+	HasDolbyVision               bool
+	HasHDR10                     bool
+	DolbyVisionProfile           string
+	DolbyVisionConfiguration     *DolbyVisionConfiguration
+	VideoCodec                   string
+	VideoPixFmt                  string
+	VideoProfile                 string
+	VideoWidth                   int
+	VideoHeight                  int
+	VideoLevel                   int
+	AvgFrameRate                 string
+	HasTrueHD                    bool
+	HasCompatibleAudio           bool
+	AudioStreams                 []AudioStreamInfo
+	SubtitleStreams              []SubtitleStreamInfo
+	Duration                     float64
 }

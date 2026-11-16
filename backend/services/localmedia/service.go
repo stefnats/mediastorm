@@ -1292,7 +1292,7 @@ func (s *Service) UpdateItemMatch(ctx context.Context, itemID string, input mode
 	if item.MatchStatus == "" {
 		item.MatchStatus = models.LocalMediaMatchStatusManual
 	}
-	item.Metadata = models.WithoutCertificationEvidence(input.Metadata)
+	item.Metadata = models.WithoutProviderEvidence(input.Metadata)
 	item.UpdatedAt = time.Now().UTC()
 
 	if err := s.repo.UpsertItem(ctx, item); err != nil {

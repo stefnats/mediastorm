@@ -1793,6 +1793,46 @@ paths:
         '504':
           $ref: '#/components/responses/SearchError'
 
+  /api/usenet/health:
+    post:
+      tags: [sources]
+      operationId: checkUsenetHealth
+      summary: Run the existing explicit Usenet health or requested track check
+      description: Optional mediaEvidence reports only work already performed. Caller result attributes never establish a catalogue or episode binding; source-only facts do not establish playback eligibility.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/ExplicitHealthRequest'}
+      responses:
+        '200':
+          description: Existing health result with optional source-only input metadata
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/ExplicitHealthResponse'}
+        '400': {$ref: '#/components/responses/Error'}
+        '502': {$ref: '#/components/responses/Error'}
+
+  /api/debrid/cached:
+    post:
+      tags: [sources]
+      operationId: checkDebridCached
+      summary: Run the existing explicit debrid cache or requested verification check
+      description: The optional evidence does not start additional work. Legacy cached tracks lacking exact input/probe provenance remain unknown. Movie and caller-supplied episode associations are not inferred.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/ExplicitHealthRequest'}
+      responses:
+        '200':
+          description: Existing cache result with optional source-only input metadata
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/ExplicitHealthResponse'}
+        '400': {$ref: '#/components/responses/Error'}
+        '502': {$ref: '#/components/responses/Error'}
+
   /api/indexers/source-health:
     get:
       tags: [sources]
@@ -3469,6 +3509,8 @@ components:
       type: object
       required: [id, name, mediaType]
       properties:
+        originalLanguageEvidence:
+          $ref: '#/components/schemas/OriginalLanguageEvidence'
         personalRating:
           type: string
           enum: [like, love, dislike]
@@ -4371,6 +4413,8 @@ components:
       required: [title, indexer, guid, link, downloadUrl, sizeBytes, publishDate]
       description: A playable source. Scoring fields appear only with `includeFiltered=true`.
       properties:
+        mediaEvidence:
+          $ref: '#/components/schemas/MediaEvidence'
         title:
           type: string
         indexer:
@@ -4578,6 +4622,8 @@ components:
           type: boolean
         isBitmap:
           type: boolean
+        bitmapType:
+          type: string
 
     SubtitleSessionInfo:
       type: object
@@ -4699,6 +4745,8 @@ components:
       type: object
       required: [prequeueId, status]
       properties:
+        mediaEvidence:
+          $ref: '#/components/schemas/MediaEvidence'
         automaticLibrarySelection:
           type: boolean
           description: True only for preparations created with automatic library selection.
@@ -4965,6 +5013,166 @@ components:
           format: date-time
         filterEnabled:
           type: boolean
+
+    ExplicitHealthRequest:
+      type: object
+      required: [result]
+      properties:
+        result:
+          type: object
+          additionalProperties: true
+          description: Existing NZBResult input. Any caller-supplied evidence fields are ignored and never trusted.
+        profileId: {type: string}
+        probeForTracks: {type: boolean}
+        quickOnly: {type: boolean}
+        verifyUncached: {type: boolean}
+
+    ExplicitHealthResponse:
+      type: object
+      required: [status, healthy]
+      properties:
+        status: {type: string}
+        healthy: {type: boolean}
+        cached: {type: boolean}
+        provider: {type: string}
+        infoHash: {type: string}
+        checkedSegments: {type: integer}
+        totalSegments: {type: integer}
+        missingSegments:
+          type: array
+          items: {type: string}
+        fileName: {type: string}
+        sampled: {type: boolean}
+        tracksProbed: {type: boolean}
+        tracksLoading: {type: boolean}
+        trackProbeError: {type: string}
+        errorMessage: {type: string}
+        audioTracks:
+          type: array
+          items: {$ref: '#/components/schemas/AudioTrackInfo'}
+        subtitleTracks:
+          type: array
+          items: {$ref: '#/components/schemas/SubtitleTrackInfo'}
+        mediaEvidence: {$ref: '#/components/schemas/MediaEvidence'}
+
+    OriginalLanguageEvidence:
+      type: object
+      required: [language, source, sourceTitleId, observedAt, expiresAt]
+      description: Actual TMDB original-language metadata, never an available dub or spoken-content proof. Maximum lifetime 24 hours; cache copies never renew it. Missing, conflicting or expired provenance is unknown.
+      properties:
+        language: {type: string, minLength: 2, maxLength: 16}
+        source: {type: string, enum: [tmdb]}
+        sourceTitleId: {type: string, pattern: '^tmdb:(movie|series):[1-9][0-9]*$'}
+        observedAt: {type: string, format: date-time}
+        expiresAt: {type: string, format: date-time}
+
+    MediaEvidence:
+      type: object
+      required: [version, sourceVersion]
+      description: |
+        Read-only input/container metadata. Candidate claims and observed probe
+        facts remain separate and never establish spoken language, decoded
+        quality, correct content, device output or playback eligibility.
+        No additional request, probe, poller or catalogue-filter completeness
+        is implied. Facts belong to one exact release/file and, when verified,
+        one official episode. Never combine properties across files/episodes.
+        Missing title/episode binding means source-only, unconfirmed association.
+        Movie bindings remain absent in this initial foundation.
+      properties:
+        version: {type: integer, enum: [1]}
+        sourceVersion:
+          type: string
+          pattern: '^(candidate_v1_|file_v1_)[0-9a-f]{64}$'
+          description: Domain-separated opaque release identity for candidate-only envelopes or concrete input-file/part identity for probed envelopes. This is not a content hash or a report-dialog version.
+        candidateVersion:
+          type: string
+          pattern: '^candidate_v1_[0-9a-f]{64}$'
+          description: Optional originating-release association. Never compare it with the probed file-version domain or merge envelopes by array index.
+        titleId: {type: string}
+        targetEpisode:
+          $ref: '#/components/schemas/EpisodeReference'
+        candidate:
+          $ref: '#/components/schemas/MediaCandidateFacts'
+        probed:
+          $ref: '#/components/schemas/MediaProbeFacts'
+
+    MediaHDRFact:
+      type: string
+      enum: [sdr, hdr10, hlg, dolby_vision]
+      description: Omission means unknown. SDR requires a recognized actual transfer/colour signal in a probed block; a release label remains a candidate claim.
+
+    MediaCandidateFacts:
+      type: object
+      required: [source, observedAt, expiresAt]
+      description: Provider/release claims observed during normal search. Maximum lifetime 15 minutes with original timestamps. No track inventory, playable-source proof or audio-description inference.
+      properties:
+        source: {type: string, enum: [release_metadata]}
+        observedAt: {type: string, format: date-time}
+        expiresAt: {type: string, format: date-time}
+        audioLanguages:
+          type: array
+          maxItems: 16
+          items: {type: string}
+        subtitleLanguages:
+          type: array
+          maxItems: 16
+          items: {type: string}
+        resolution: {type: string}
+        videoCodec: {type: string}
+        audioCodecs:
+          type: array
+          maxItems: 16
+          items: {type: string}
+        hdr: {$ref: '#/components/schemas/MediaHDRFact'}
+
+    MediaProbeFacts:
+      type: object
+      required: [source, observedAt, expiresAt, audioStreams, subtitleStreams, video]
+      description: Actual ffprobe input-stream metadata, maximum lifetime 15 minutes. Path-only legacy caches cannot create this block. Primary languages use normalized ISO 639-3, without regional specificity. Complete flags default false and cannot prove absence from a clipped, missing or ambiguous inventory.
+      properties:
+        source: {type: string, enum: [ffprobe]}
+        observedAt: {type: string, format: date-time}
+        expiresAt: {type: string, format: date-time}
+        audioStreams:
+          type: array
+          maxItems: 32
+          items: {$ref: '#/components/schemas/MediaAudioFacts'}
+        audioStreamsComplete: {type: boolean, default: false}
+        subtitleStreams:
+          type: array
+          maxItems: 32
+          items: {$ref: '#/components/schemas/MediaSubtitleFacts'}
+        subtitleStreamsComplete: {type: boolean, default: false}
+        video: {$ref: '#/components/schemas/MediaVideoFacts'}
+
+    MediaAudioFacts:
+      type: object
+      required: [index]
+      properties:
+        index: {type: integer, minimum: 0}
+        language: {type: string}
+        codec: {type: string, maxLength: 32}
+        audioDescription:
+          type: boolean
+          description: Present only when the actual visual_impaired disposition field was present. Neither a missing field nor a title/name heuristic proves false or true.
+
+    MediaSubtitleFacts:
+      type: object
+      required: [index]
+      properties:
+        index: {type: integer, minimum: 0}
+        language: {type: string}
+        codec: {type: string, maxLength: 32}
+        forced: {type: boolean}
+
+    MediaVideoFacts:
+      type: object
+      properties:
+        codec: {type: string, maxLength: 32}
+        width: {type: integer, minimum: 1, maximum: 32768}
+        height: {type: integer, minimum: 1, maximum: 32768}
+        hdr: {$ref: '#/components/schemas/MediaHDRFact'}
+        dolbyVisionProfile: {type: string}
 
     ClientRegistrationResponse:
       type: object

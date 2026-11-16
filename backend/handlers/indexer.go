@@ -16,6 +16,7 @@ import (
 	"novastream/services/badstreams"
 	"novastream/services/debrid"
 	"novastream/services/indexer"
+	"novastream/services/mediaevidence"
 	"novastream/services/sourcehealth"
 	"novastream/services/trackselect"
 	"novastream/utils/filter"
@@ -222,6 +223,9 @@ func (h *IndexerHandler) Search(w http.ResponseWriter, r *http.Request) {
 		annotateScoredResultsProfile(scored, userID, titleID)
 		for i := range scored {
 			annotateReportEpisode(scored[i].Attributes, opts)
+			if h.BadStreams == nil || h.BadStreams.MatchFor(scored[i].NZBResult, reportContextForSearch(h.TrackPreferences, opts)) == nil {
+				scored[i].MediaEvidence = mediaevidence.Candidate(scored[i].NZBResult, time.Now())
+			}
 		}
 
 		// Ensure we return [] instead of null for empty results
@@ -292,7 +296,11 @@ func (h *IndexerHandler) Search(w http.ResponseWriter, r *http.Request) {
 		json.NewEncoder(w).Encode(h.annotatePlainResults(r.Context(), results))
 		return
 	}
-	json.NewEncoder(w).Encode(results)
+	projected := make([]annotatedNZBResult, len(results))
+	for i := range results {
+		projected[i] = annotatedNZBResult{NZBResult: results[i], MediaEvidence: mediaevidence.Candidate(results[i], time.Now())}
+	}
+	json.NewEncoder(w).Encode(projected)
 }
 
 func wantsSourceHealth(r *http.Request) bool {
@@ -303,7 +311,8 @@ func wantsSourceHealth(r *http.Request) bool {
 // source health annotation (keeps the response free of scoring fields).
 type annotatedNZBResult struct {
 	models.NZBResult
-	SourceHealth *models.SourceHealth `json:"sourceHealth,omitempty"`
+	MediaEvidence *models.MediaEvidence `json:"mediaEvidence,omitempty"`
+	SourceHealth  *models.SourceHealth  `json:"sourceHealth,omitempty"`
 }
 
 func (h *IndexerHandler) annotatePlainResults(ctx context.Context, results []models.NZBResult) []annotatedNZBResult {
@@ -314,7 +323,7 @@ func (h *IndexerHandler) annotatePlainResults(ctx context.Context, results []mod
 	h.SourceHealthSvc.Annotate(ctx, scored)
 	out := make([]annotatedNZBResult, len(results))
 	for i := range results {
-		out[i] = annotatedNZBResult{NZBResult: results[i], SourceHealth: scored[i].SourceHealth}
+		out[i] = annotatedNZBResult{NZBResult: results[i], SourceHealth: scored[i].SourceHealth, MediaEvidence: mediaevidence.Candidate(results[i], time.Now())}
 	}
 	return out
 }

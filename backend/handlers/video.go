@@ -6334,8 +6334,10 @@ func (h *VideoHandler) ProbeVideoFull(ctx context.Context, path string) (*VideoF
 	h.setCachedMetadata(cleanPath, &metadataResponse)
 
 	result := &VideoFullResult{
-		AudioStreams:    make([]AudioStreamInfo, 0),
-		SubtitleStreams: make([]SubtitleStreamInfo, 0),
+		MetadataEvidence:             fullProbeEvidence(meta, time.Now().UTC()),
+		MetadataEvidenceInputVersion: probeInputVersion(path),
+		AudioStreams:                 make([]AudioStreamInfo, 0),
+		SubtitleStreams:              make([]SubtitleStreamInfo, 0),
 	}
 
 	// Extract duration from format

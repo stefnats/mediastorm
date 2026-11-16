@@ -61,3 +61,21 @@ func TestCertificationEvidenceManualMatchRejectsForgedProviderFieldsBeforePersis
 		t.Fatal("sanitizing caller metadata mutated its shared input")
 	}
 }
+
+func TestOriginalLanguageManualMatchCannotCreateProviderProof(t *testing.T) {
+	now := time.Now().UTC()
+	repo := &fakeLocalMediaRepo{library: &models.LocalMediaLibrary{ID: "lib1", CreatedAt: now, UpdatedAt: now}, items: map[string]*models.LocalMediaItem{"synthetic.mkv": {ID: "synthetic", LibraryID: "lib1", RelativePath: "synthetic.mkv", CreatedAt: now, UpdatedAt: now}}}
+	service := &Service{repo: repo}
+	title := &models.Title{ID: "tmdb:movie:41", TMDBID: 41, MediaType: "movie", Name: "Manual title", Language: "de", OriginalLanguageEvidence: &models.OriginalLanguageEvidence{Language: "fr", Source: "tmdb", SourceTitleID: "tmdb:movie:41", ObservedAt: now, ExpiresAt: now.Add(time.Hour)}}
+	got, err := service.UpdateItemMatch(t.Context(), "synthetic", models.LocalMediaMatchInput{MatchedTitleID: title.ID, MatchedName: title.Name, Metadata: title})
+	if err != nil {
+		t.Fatal(err)
+	}
+	persisted, err := repo.GetItem(t.Context(), "synthetic")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Metadata.OriginalLanguageEvidence != nil || persisted.Metadata.OriginalLanguageEvidence != nil || got.Metadata.Language != "de" || title.OriginalLanguageEvidence == nil {
+		t.Fatal("manual match forged provenance or mutated input")
+	}
+}
