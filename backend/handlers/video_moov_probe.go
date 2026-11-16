@@ -138,7 +138,7 @@ func (h *VideoHandler) readProviderRange(ctx context.Context, cleanPath string, 
 	if end-start+1 > providerProbeSampleBytes {
 		end = start + providerProbeSampleBytes - 1
 	}
-	resp, err := h.streamer.Stream(ctx, streaming.Request{
+	resp, err := h.vodOpenStream(ctx, streaming.Request{
 		Path:        cleanPath,
 		Method:      http.MethodGet,
 		RangeHeader: fmt.Sprintf("bytes=%d-%d", start, end),
@@ -175,6 +175,9 @@ func (h *VideoHandler) runFFProbeFileInner(ctx context.Context, path string, pro
 		"-show_format",
 		"-i", path,
 	}
+	if err := h.vodRawCheck(ctx); err != nil {
+		return nil, err
+	}
 	cmd := exec.CommandContext(ctx, h.ffprobePath, args...)
 	out, err := cmd.Output()
 	if err != nil {
@@ -191,6 +194,9 @@ func (h *VideoHandler) runFFProbeFileInner(ctx context.Context, path string, pro
 		}
 		return nil, err
 	}
+	if err := h.vodRawCheck(ctx); err != nil {
+		return nil, err
+	}
 	var parsed ffprobeOutput
 	if err := json.Unmarshal(out, &parsed); err != nil {
 		return nil, fmt.Errorf("parse ffprobe output: %w", err)
@@ -199,6 +205,9 @@ func (h *VideoHandler) runFFProbeFileInner(ctx context.Context, path string, pro
 }
 
 func (h *VideoHandler) ffprobeFtypMoov(ctx context.Context, prefix, moov []byte, originalTotalSize int64) (*ffprobeOutput, error) {
+	if err := h.vodRawCheck(ctx); err != nil {
+		return nil, err
+	}
 	ftyp := extractMP4Box(prefix, "ftyp")
 	if len(ftyp) == 0 {
 		ftyp = []byte{
@@ -245,7 +254,7 @@ func (h *VideoHandler) runFFProbeProviderMoovAtEnd(ctx context.Context, cleanPat
 		return nil, fmt.Errorf("stream provider not configured")
 	}
 	if totalSize <= 0 {
-		head, err := h.streamer.Stream(ctx, streaming.Request{Path: cleanPath, Method: http.MethodHead})
+		head, err := h.vodOpenStream(ctx, streaming.Request{Path: cleanPath, Method: http.MethodHead})
 		if err != nil {
 			return nil, err
 		}

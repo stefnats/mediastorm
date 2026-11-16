@@ -46,6 +46,7 @@ const (
 	vodAdopt
 	vodCleanup
 	vodQueue
+	vodMedia
 )
 
 var errVODOwner = errors.New("current VOD owner authorization unavailable")
@@ -134,6 +135,7 @@ func (b *vodBoundary) requestOwner(w http.ResponseWriter, r *http.Request, op vo
 	if r == nil || b.identity == nil {
 		return deny(kidsvod.CodeAccessDenied)
 	}
+	requestDeadline, hasRequestDeadline := r.Context().Deadline()
 	checkCtx, checkCancel := context.WithTimeout(r.Context(), 500*time.Millisecond)
 	defer checkCancel()
 	r = r.WithContext(checkCtx)
@@ -238,6 +240,14 @@ func (b *vodBoundary) requestOwner(w http.ResponseWriter, r *http.Request, op vo
 		return deny(kidsvod.CodeAccessDenied)
 	}
 	expires := b.now().Add(15 * time.Minute)
+	// A raw response can remain open for a whole movie. Its original session
+	// and request deadline bound it; reads never renew this non-regional owner.
+	if op == vodMedia {
+		expires = current.ExpiresAt
+		if hasRequestDeadline && requestDeadline.Before(expires) {
+			expires = requestDeadline
+		}
+	}
 	if current.ExpiresAt.Before(expires) {
 		expires = current.ExpiresAt
 	}

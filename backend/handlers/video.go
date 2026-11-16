@@ -122,6 +122,7 @@ type VideoHandler struct {
 	prewarmSvc      PrewarmService
 	libraryAccess   *libraryaccess.Service
 	recordingAccess *RecordingStreamAccess
+	vodBoundary     *vodBoundary
 
 	// castCaps answers "what can this receiver actually decode" from cache.
 	// Never probes on this path: a cast start must not wait on a device.
@@ -1176,6 +1177,11 @@ func (h *VideoHandler) StreamVideo(w http.ResponseWriter, r *http.Request) {
 	} else if strings.HasPrefix(cleanPath, "webdav/") {
 		cleanPath = "/" + strings.TrimPrefix(cleanPath, "webdav/")
 	}
+	w, r, finishVOD, permittedVOD := h.beginVideoVOD(w, r, cleanPath)
+	if !permittedVOD {
+		return
+	}
+	defer finishVOD()
 	if !h.requireLibraryStreamAccess(w, r, cleanPath) {
 		return
 	}
@@ -1276,7 +1282,7 @@ func (h *VideoHandler) streamViaProvider(w http.ResponseWriter, r *http.Request,
 	// seek storms from hammering the debrid CDN. ExoPlayer on Android TV generates
 	// hundreds of 2-byte range requests when seeking through DV files with
 	// interleaved tracks. Each CDN round trip takes ~1s, causing multi-second stalls.
-	if rangeHeader != "" && r.Method == http.MethodGet && isDebridPath && !isLocalMediaPath {
+	if h.vodBoundary == nil && rangeHeader != "" && r.Method == http.MethodGet && isDebridPath && !isLocalMediaPath {
 		if rangeStart, rangeEnd, ok := parseByteRange(rangeHeader); ok {
 			rangeLen := rangeEnd - rangeStart + 1
 			if rangeLen > 0 && rangeLen <= rangeCacheMinFetchSize {
@@ -1329,7 +1335,7 @@ func (h *VideoHandler) streamViaProvider(w http.ResponseWriter, r *http.Request,
 					videoTracef("[video] range cache MISS: expanding %q to %q for path=%q", rangeHeader, expandedRange, cleanPath)
 
 					fetchCtx, fetchCancel := context.WithTimeout(context.Background(), 15*time.Second)
-					fetchResp, fetchErr := h.streamer.Stream(fetchCtx, streaming.Request{
+					fetchResp, fetchErr := h.vodOpenStream(fetchCtx, streaming.Request{
 						Path:        cleanPath,
 						RangeHeader: expandedRange,
 						Method:      r.Method,
@@ -1393,7 +1399,7 @@ func (h *VideoHandler) streamViaProvider(w http.ResponseWriter, r *http.Request,
 	// in non-interleaved MP4 files. The pool keeps CDN connections alive after
 	// client disconnects, so the next request at a nearby position is served
 	// from the buffer instead of making a new CDN round-trip.
-	if rangeHeader != "" && r.Method == http.MethodGet && h.streamPool != nil && isDebridPath && !isLocalMediaPath && !isPlaybackProbe {
+	if h.vodBoundary == nil && rangeHeader != "" && r.Method == http.MethodGet && h.streamPool != nil && isDebridPath && !isLocalMediaPath && !isPlaybackProbe {
 		if reqStart, ok := parseRangeStart(rangeHeader); ok {
 			displayName := sanitizeExternalDisplayName(r.URL.Query().Get("displayName"))
 			if displayName == "" {
@@ -1425,7 +1431,7 @@ func (h *VideoHandler) streamViaProvider(w http.ResponseWriter, r *http.Request,
 		r.URL.RawQuery,
 	)
 
-	resp, err := h.streamer.Stream(ctx, streaming.Request{
+	resp, err := h.vodOpenStream(ctx, streaming.Request{
 		Path:        cleanPath,
 		RangeHeader: rangeHeader,
 		IfRange:     r.Header.Get("If-Range"),
@@ -1455,11 +1461,13 @@ func (h *VideoHandler) streamViaProvider(w http.ResponseWriter, r *http.Request,
 	contentRange := resp.Headers.Get("Content-Range")
 	contentLength := resp.Headers.Get("Content-Length")
 	acceptRanges := resp.Headers.Get("Accept-Ranges")
-	if total := parseContentRangeTotal(contentRange); total > 0 {
-		h.rangeCache.setTotal(cleanPath, total)
-	} else if resp.Status == http.StatusOK && resp.ContentLength > 0 {
-		// A full-body 200 (including the HEAD probe) names the whole file.
-		h.rangeCache.setTotal(cleanPath, resp.ContentLength)
+	if h.vodBoundary == nil {
+		if total := parseContentRangeTotal(contentRange); total > 0 {
+			h.rangeCache.setTotal(cleanPath, total)
+		} else if resp.Status == http.StatusOK && resp.ContentLength > 0 {
+			// A full-body 200 (including the HEAD probe) names the whole file.
+			h.rangeCache.setTotal(cleanPath, resp.ContentLength)
+		}
 	}
 	expectedLength := resp.ContentLength
 	if expectedLength <= 0 && contentLength != "" {
@@ -2062,7 +2070,7 @@ func (h *VideoHandler) streamWithTransmuxProvider(w http.ResponseWriter, r *http
 		plan = h.buildTransmuxPlan(meta, "pipe:0", forceAAC, fallbackReason)
 	}
 
-	resp, err := h.streamer.Stream(ctx, streaming.Request{Path: cleanPath, Method: http.MethodGet})
+	resp, err := h.vodOpenStream(ctx, streaming.Request{Path: cleanPath, Method: http.MethodGet})
 	if err != nil {
 		return false, fmt.Errorf("provider stream: %w", err)
 	}
@@ -2099,6 +2107,10 @@ func (h *VideoHandler) streamWithTransmuxProvider(w http.ResponseWriter, r *http
 		return false, fmt.Errorf("ffmpeg stderr pipe: %w", err)
 	}
 
+	if err := h.vodRawCheck(ctx); err != nil {
+		_ = pw.CloseWithError(err)
+		return false, err
+	}
 	if err := cmd.Start(); err != nil {
 		_ = pw.CloseWithError(err)
 		return false, fmt.Errorf("ffmpeg start: %w", err)
@@ -2247,20 +2259,28 @@ func (h *VideoHandler) buildWebDAVURL(cleanPath string) string {
 // providerOrCachedDuration returns a known duration without blocking on ffprobe
 // when possible: catalog DurationProvider first, then in-memory metadata cache.
 func (h *VideoHandler) providerOrCachedDuration(ctx context.Context, cleanPath string) float64 {
+	if h.vodRawCheck(ctx) != nil {
+		return 0
+	}
 	if h.streamer != nil {
 		if dp, ok := h.streamer.(streaming.DurationProvider); ok {
-			if d, err := dp.GetDuration(ctx, cleanPath); err == nil && d > 0 {
+			if d, err := dp.GetDuration(ctx, cleanPath); err == nil && d > 0 && h.vodRawCheck(ctx) == nil {
 				return d
 			}
 		}
 	}
-	if cached := h.getCachedMetadata(cleanPath); cached != nil && cached.DurationSeconds > 0 {
-		return cached.DurationSeconds
+	if h.vodBoundary == nil {
+		if cached := h.getCachedMetadata(cleanPath); cached != nil && cached.DurationSeconds > 0 {
+			return cached.DurationSeconds
+		}
 	}
 	return 0
 }
 
 func (h *VideoHandler) runFFProbeFromProvider(ctx context.Context, cleanPath string) (*ffprobeOutput, error) {
+	if err := h.vodRawCheck(ctx); err != nil {
+		return nil, err
+	}
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
@@ -2282,8 +2302,8 @@ func (h *VideoHandler) runFFProbeFromProvider(ctx context.Context, cleanPath str
 	}
 
 	// Try to get a direct URL first - this allows ffprobe to seek for moov atom at end of file
-	if directProvider, ok := h.streamer.(streaming.DirectURLProvider); ok {
-		directURL, err := directProvider.GetDirectURL(ctx, cleanPath)
+	if _, ok := h.streamer.(streaming.DirectURLProvider); ok {
+		directURL, err := h.vodDirectURL(ctx, cleanPath)
 		if err == nil && directURL != "" {
 			videoTracef("[video] ffprobe using direct URL for seekable access: %s", cleanPath)
 			meta, err := h.runFFProbe(ctx, directURL, nil)
@@ -2335,7 +2355,7 @@ func (h *VideoHandler) runFFProbeFromProvider(ctx context.Context, cleanPath str
 		request.RangeHeader = fmt.Sprintf("bytes=0-%d", providerProbeSampleBytes-1)
 	}
 
-	resp, err := h.streamer.Stream(ctx, request)
+	resp, err := h.vodOpenStream(ctx, request)
 	if err != nil {
 		return nil, err
 	}
@@ -2503,6 +2523,11 @@ func parseFFProbeStreamPID(value string) (int, bool) {
 }
 
 func (h *VideoHandler) enrichBluRayStreamLanguages(ctx context.Context, sourcePath string, meta *ffprobeOutput) {
+	// A companion file has no captured raw input in this packet. Missing
+	// languages remain unknown instead of opening an unbound CLPI file.
+	if h.vodBoundary != nil {
+		return
+	}
 	if meta == nil || h.streamer == nil {
 		return
 	}
@@ -2606,6 +2631,11 @@ func (h *VideoHandler) ProbeVideo(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Missing path parameter", http.StatusBadRequest)
 		return
 	}
+	w, r, finishVOD, permittedVOD := h.beginVideoVOD(w, r, cleanVideoPathParam(filePath))
+	if !permittedVOD {
+		return
+	}
+	defer finishVOD()
 	if !h.requireAllowedExternalPath(w, r, filePath) {
 		return
 	}
@@ -2630,42 +2660,45 @@ func (h *VideoHandler) ProbeVideo(w http.ResponseWriter, r *http.Request) {
 		sanitizedPath = filePath
 	}
 
-	// Check cache first to avoid repeated ffprobe calls during playback
-	if cachedResp := h.getCachedMetadata(cleanPath); cachedResp != nil {
-		videoTracef("[video] ProbeVideo: using cached metadata for path=%q", cleanPath)
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(cachedResp)
-		return
-	}
-
-	// Deduplicate in-flight probes: if another request is already probing this path, wait for it
-	doneChan := make(chan struct{})
-	if existing, loaded := h.probeInFlight.LoadOrStore(cleanPath, doneChan); loaded {
-		// Another probe is in progress - wait for it to complete
-		videoTracef("[video] ProbeVideo: waiting for in-flight probe for path=%q", cleanPath)
-		existingChan := existing.(chan struct{})
-		select {
-		case <-existingChan:
-			// Probe completed, result should now be in cache
-			if cachedResp := h.getCachedMetadata(cleanPath); cachedResp != nil {
-				videoTracef("[video] ProbeVideo: using result from completed in-flight probe for path=%q", cleanPath)
-				w.Header().Set("Content-Type", "application/json")
-				json.NewEncoder(w).Encode(cachedResp)
-				return
-			}
-			// If not in cache (probe failed?), fall through to probe ourselves
-			videoTracef("[video] ProbeVideo: in-flight probe completed but no cache entry, will probe again for path=%q", cleanPath)
-		case <-r.Context().Done():
-			videoTracef("[video] ProbeVideo: request cancelled while waiting for in-flight probe for path=%q", cleanPath)
+	if h.vodBoundary == nil {
+		// Check cache first to avoid repeated ffprobe calls during playback
+		if cachedResp := h.getCachedMetadata(cleanPath); cachedResp != nil {
+			videoTracef("[video] ProbeVideo: using cached metadata for path=%q", cleanPath)
+			w.Header().Set("Content-Type", "application/json")
+			json.NewEncoder(w).Encode(cachedResp)
 			return
 		}
-	}
 
-	// We're the first request for this path - ensure cleanup when done
-	defer func() {
-		h.probeInFlight.Delete(cleanPath)
-		close(doneChan)
-	}()
+		// Deduplicate in-flight probes: if another request is already probing this path, wait for it
+		doneChan := make(chan struct{})
+		if existing, loaded := h.probeInFlight.LoadOrStore(cleanPath, doneChan); loaded {
+			// Another probe is in progress - wait for it to complete
+			videoTracef("[video] ProbeVideo: waiting for in-flight probe for path=%q", cleanPath)
+			existingChan := existing.(chan struct{})
+			select {
+			case <-existingChan:
+				// Probe completed, result should now be in cache
+				if cachedResp := h.getCachedMetadata(cleanPath); cachedResp != nil {
+					videoTracef("[video] ProbeVideo: using result from completed in-flight probe for path=%q", cleanPath)
+					w.Header().Set("Content-Type", "application/json")
+					json.NewEncoder(w).Encode(cachedResp)
+					return
+				}
+				// If not in cache (probe failed?), fall through to probe ourselves
+				videoTracef("[video] ProbeVideo: in-flight probe completed but no cache entry, will probe again for path=%q", cleanPath)
+			case <-r.Context().Done():
+				videoTracef("[video] ProbeVideo: request cancelled while waiting for in-flight probe for path=%q", cleanPath)
+				return
+			}
+		}
+
+		// We're the first request for this path - ensure cleanup when done
+		defer func() {
+			h.probeInFlight.Delete(cleanPath)
+			close(doneChan)
+		}()
+
+	}
 
 	// Extract profile info from query params for DV policy check
 	profileID := r.URL.Query().Get("profileId")
@@ -2704,7 +2737,7 @@ func (h *VideoHandler) ProbeVideo(w http.ResponseWriter, r *http.Request) {
 			headReq.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36")
 			streamheaders.Apply(headReq.Header, requestHeaders)
 			h.applyExternalUsenetWebDAVAuth(headReq)
-			headResp, headErr := http.DefaultClient.Do(headReq)
+			headResp, headErr := h.vodHTTPDo(http.DefaultClient, headReq)
 			if headErr == nil {
 				defer headResp.Body.Close()
 				if headResp.ContentLength > 0 {
@@ -2758,7 +2791,7 @@ func (h *VideoHandler) ProbeVideo(w http.ResponseWriter, r *http.Request) {
 		}
 
 		// Cache successful probe results to avoid repeated ffprobe calls
-		if meta != nil {
+		if meta != nil && h.vodBoundary == nil {
 			h.setCachedMetadata(cleanPath, &response)
 		}
 
@@ -2771,7 +2804,7 @@ func (h *VideoHandler) ProbeVideo(w http.ResponseWriter, r *http.Request) {
 
 	if h.streamer != nil {
 		videoTracef("[video] ProbeVideo: attempting HEAD request for path=%q", cleanPath)
-		resp, err := h.streamer.Stream(r.Context(), streaming.Request{
+		resp, err := h.vodOpenStream(r.Context(), streaming.Request{
 			Path:   cleanPath,
 			Method: http.MethodHead,
 		})
@@ -2814,7 +2847,7 @@ func (h *VideoHandler) ProbeVideo(w http.ResponseWriter, r *http.Request) {
 					}
 				}
 			}
-			if fileSize > 0 {
+			if fileSize > 0 && h.vodBoundary == nil {
 				h.rangeCache.setTotal(cleanPath, fileSize)
 			}
 		}
@@ -2882,7 +2915,7 @@ func (h *VideoHandler) ProbeVideo(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Cache successful probe results to avoid repeated ffprobe calls
-	if meta != nil {
+	if meta != nil && h.vodBoundary == nil {
 		h.setCachedMetadata(cleanPath, &response)
 	}
 
@@ -3592,6 +3625,9 @@ func (h *VideoHandler) runFFProbeWithHeaders(ctx context.Context, inputSpecifier
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
 
+	if err := h.vodRawCheck(probeCtx); err != nil {
+		return nil, err
+	}
 	if err := cmd.Run(); err != nil {
 		if errors.Is(probeCtx.Err(), context.DeadlineExceeded) {
 			return nil, fmt.Errorf("ffprobe timeout after %s", timeout)
@@ -3603,6 +3639,9 @@ func (h *VideoHandler) runFFProbeWithHeaders(ctx context.Context, inputSpecifier
 		return nil, err
 	}
 
+	if err := h.vodRawCheck(probeCtx); err != nil {
+		return nil, err
+	}
 	var parsed ffprobeOutput
 	if err := json.Unmarshal(stdout.Bytes(), &parsed); err != nil {
 		return nil, fmt.Errorf("parse ffprobe output: %w", err)
@@ -6627,7 +6666,7 @@ func (h *VideoHandler) proxyExternalURL(w http.ResponseWriter, r *http.Request, 
 	videoTracef("[video] external proxy: final URL host=%s", parsedURL.Host)
 	allowRestricted := h.configuredExternalHostPolicy()
 	requestStartedAt := time.Now()
-	startupExperiment := strings.TrimSpace(r.URL.Query().Get("_startupExperiment")) == "1"
+	startupExperiment := h.vodBoundary == nil && strings.TrimSpace(r.URL.Query().Get("_startupExperiment")) == "1"
 	requestID := atomic.AddUint64(&h.externalProxyRequestSeq, 1)
 	if err := requestsecurity.ValidateOutboundURL(r.Context(), cleanURL, allowRestricted); err != nil {
 		http.Error(w, "external URL is not allowed", http.StatusBadRequest)
@@ -6683,7 +6722,10 @@ func (h *VideoHandler) proxyExternalURL(w http.ResponseWriter, r *http.Request, 
 		}
 	}
 	// Snapshot for startup diagnostics only; live opens re-check the cache.
-	_, usedRedirectCache := h.cachedExternalRedirectURL(cleanURL)
+	usedRedirectCache := false
+	if h.vodBoundary == nil {
+		_, usedRedirectCache = h.cachedExternalRedirectURL(cleanURL)
+	}
 
 	var traceMu sync.Mutex
 	var dnsStartedAt time.Time
@@ -6773,7 +6815,10 @@ func (h *VideoHandler) proxyExternalURL(w http.ResponseWriter, r *http.Request, 
 	// doExternalProxyOpen issues one upstream request, refreshing a stale cached
 	// redirect once when needed. Caller owns the response body.
 	doExternalProxyOpen := func(rangeValue string) (*http.Response, error) {
-		target, fromCache := h.cachedExternalRedirectURL(cleanURL)
+		target, fromCache := cleanURL, false
+		if h.vodBoundary == nil {
+			target, fromCache = h.cachedExternalRedirectURL(cleanURL)
+		}
 		if err := requestsecurity.ValidateOutboundURL(ctx, target, allowRestricted); err != nil {
 			h.forgetExternalRedirect(cleanURL)
 			target = cleanURL
@@ -6786,7 +6831,7 @@ func (h *VideoHandler) proxyExternalURL(w http.ResponseWriter, r *http.Request, 
 		videoTracef("[video] external proxy request: method=%s host=%s path=%s range=%q redirectCache=%t",
 			proxyReq.Method, proxyReq.URL.Host, proxyReq.URL.Path, rangeValue, fromCache)
 
-		resp, doErr := h.externalProxyHTTPClient.Do(proxyReq)
+		resp, doErr := h.vodHTTPDo(h.externalProxyHTTPClient, proxyReq)
 		if doErr != nil && fromCache {
 			// A cached signed CDN URL may expire. Retry through the stable addon URL
 			// once and refresh the redirect without surfacing a playback error.
@@ -6794,7 +6839,7 @@ func (h *VideoHandler) proxyExternalURL(w http.ResponseWriter, r *http.Request, 
 			fromCache = false
 			proxyReq, doErr = buildProxyRequest(cleanURL, rangeValue)
 			if doErr == nil {
-				resp, doErr = h.externalProxyHTTPClient.Do(proxyReq)
+				resp, doErr = h.vodHTTPDo(h.externalProxyHTTPClient, proxyReq)
 			}
 		}
 		if doErr != nil {
@@ -6807,7 +6852,7 @@ func (h *VideoHandler) proxyExternalURL(w http.ResponseWriter, r *http.Request, 
 			if doErr != nil {
 				return nil, doErr
 			}
-			resp, doErr = h.externalProxyHTTPClient.Do(proxyReq)
+			resp, doErr = h.vodHTTPDo(h.externalProxyHTTPClient, proxyReq)
 			if doErr != nil {
 				return nil, doErr
 			}
@@ -6841,7 +6886,7 @@ func (h *VideoHandler) proxyExternalURL(w http.ResponseWriter, r *http.Request, 
 		http.Error(w, "external stream expired — please re-resolve", http.StatusGone)
 		return true, fmt.Errorf("%w: %s", errExternalStreamPlaceholder, requestsecurity.URLForLog(finalURL))
 	}
-	if finalURL != cleanURL {
+	if finalURL != cleanURL && h.vodBoundary == nil {
 		h.rememberExternalRedirect(cleanURL, finalURL)
 	}
 	startupTimingLogged := false
@@ -7251,7 +7296,7 @@ func (h *VideoHandler) proxyExternalURL(w http.ResponseWriter, r *http.Request, 
 				}
 				return true, fmt.Errorf("%w: %s", errExternalStreamPlaceholder, requestsecurity.URLForLog(finalReconnectURL))
 			}
-			if finalReconnectURL != "" && finalReconnectURL != cleanURL {
+			if h.vodBoundary == nil && finalReconnectURL != "" && finalReconnectURL != cleanURL {
 				h.rememberExternalRedirect(cleanURL, finalReconnectURL)
 			}
 			// Prefer Content-Range start; if missing, assume the server honoured Range.
@@ -7392,6 +7437,11 @@ func (h *VideoHandler) GetDirectURL(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "missing path parameter", http.StatusBadRequest)
 		return
 	}
+	w, r, finishVOD, permittedVOD := h.beginVideoVOD(w, r, path)
+	if !permittedVOD {
+		return
+	}
+	defer finishVOD()
 	if !h.requireLibraryStreamAccess(w, r, path) {
 		return
 	}
@@ -7402,13 +7452,13 @@ func (h *VideoHandler) GetDirectURL(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Check if provider supports direct URLs
-	directProvider, ok := h.streamer.(streaming.DirectURLProvider)
+	_, ok := h.streamer.(streaming.DirectURLProvider)
 	if !ok {
 		http.Error(w, "direct URL not supported for this path", http.StatusNotImplemented)
 		return
 	}
 
-	directURL, err := directProvider.GetDirectURL(r.Context(), path)
+	directURL, err := h.vodDirectURL(r.Context(), path)
 	if err != nil {
 		if err == streaming.ErrNotFound {
 			http.Error(w, "path not found", http.StatusNotFound)
