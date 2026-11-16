@@ -6,9 +6,18 @@ import (
 	"strings"
 
 	"novastream/internal/profileaccess"
+	"novastream/services/kidsvod"
 )
 
 func (h *VideoHandler) requireHLSSessionAccess(w http.ResponseWriter, r *http.Request, sessionID string) bool {
+	if h.vodBoundary != nil {
+		scope := hlsScope(r)
+		if scope == nil || scope.handler != h || scope.snapshot.id != sessionID || scope.check(r.Context()) != nil {
+			vodDeny(w, kidsvod.CodeContextChanged)
+			return false
+		}
+	}
+
 	// Read identity without touching LastAccess: a denied request must neither
 	// keep somebody else's stream alive nor disclose its playback status.
 	h.hlsManager.mu.RLock()

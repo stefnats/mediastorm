@@ -17,6 +17,7 @@ import (
 	"net/http/httptrace"
 	"net/url"
 	"novastream/services/castcaps"
+	"novastream/services/kidsvod"
 	"os"
 	"os/exec"
 	"path"
@@ -5647,6 +5648,11 @@ func (h *VideoHandler) ServeHLSPlaylist(w http.ResponseWriter, r *http.Request) 
 		http.Error(w, "missing session ID", http.StatusBadRequest)
 		return
 	}
+	w, r, finishVOD, allowedVOD := h.beginHLSVOD(w, r, sessionID, false)
+	if !allowedVOD {
+		return
+	}
+	defer finishVOD()
 	if !h.requireHLSSessionAccess(w, r, sessionID) {
 		return
 	}
@@ -5668,6 +5674,11 @@ func (h *VideoHandler) ServeHLSMasterPlaylist(w http.ResponseWriter, r *http.Req
 		http.Error(w, "missing session ID", http.StatusBadRequest)
 		return
 	}
+	w, r, finishVOD, allowedVOD := h.beginHLSVOD(w, r, sessionID, false)
+	if !allowedVOD {
+		return
+	}
+	defer finishVOD()
 	if !h.requireHLSSessionAccess(w, r, sessionID) {
 		return
 	}
@@ -5690,6 +5701,11 @@ func (h *VideoHandler) ServeHLSSegment(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "missing session ID or segment name", http.StatusBadRequest)
 		return
 	}
+	w, r, finishVOD, allowedVOD := h.beginHLSVOD(w, r, sessionID, false)
+	if !allowedVOD {
+		return
+	}
+	defer finishVOD()
 	if !h.requireHLSSessionAccess(w, r, sessionID) {
 		return
 	}
@@ -5711,6 +5727,11 @@ func (h *VideoHandler) ServeHLSSubtitles(w http.ResponseWriter, r *http.Request)
 		http.Error(w, "missing session ID", http.StatusBadRequest)
 		return
 	}
+	w, r, finishVOD, allowedVOD := h.beginHLSVOD(w, r, sessionID, false)
+	if !allowedVOD {
+		return
+	}
+	defer finishVOD()
 	if !h.requireHLSSessionAccess(w, r, sessionID) {
 		return
 	}
@@ -5733,6 +5754,11 @@ func (h *VideoHandler) ServeHLSSubtitlePlaylist(w http.ResponseWriter, r *http.R
 		http.Error(w, "missing session ID or subtitle track", http.StatusBadRequest)
 		return
 	}
+	w, r, finishVOD, allowedVOD := h.beginHLSVOD(w, r, sessionID, false)
+	if !allowedVOD {
+		return
+	}
+	defer finishVOD()
 	if !h.requireHLSSessionAccess(w, r, sessionID) {
 		return
 	}
@@ -5761,6 +5787,11 @@ func (h *VideoHandler) ServeHLSSubtitleTrack(w http.ResponseWriter, r *http.Requ
 		http.Error(w, "missing session ID or subtitle track", http.StatusBadRequest)
 		return
 	}
+	w, r, finishVOD, allowedVOD := h.beginHLSVOD(w, r, sessionID, false)
+	if !allowedVOD {
+		return
+	}
+	defer finishVOD()
 	if !h.requireHLSSessionAccess(w, r, sessionID) {
 		return
 	}
@@ -5788,10 +5819,19 @@ func (h *VideoHandler) ServeHLSLiveCaptions(w http.ResponseWriter, r *http.Reque
 		http.Error(w, "missing session ID", http.StatusBadRequest)
 		return
 	}
+	w, r, finishVOD, allowedVOD := h.beginHLSVOD(w, r, sessionID, false)
+	if !allowedVOD {
+		return
+	}
+	defer finishVOD()
 	if !h.requireHLSSessionAccess(w, r, sessionID) {
 		return
 	}
 
+	if h.vodBoundary != nil {
+		vodDeny(w, kidsvod.CodeUnsupportedSource)
+		return
+	}
 	h.hlsManager.ServeLiveCaptions(w, r, sessionID)
 }
 
@@ -5809,10 +5849,19 @@ func (h *VideoHandler) GetHLSLiveCCStatus(w http.ResponseWriter, r *http.Request
 		http.Error(w, "missing session ID", http.StatusBadRequest)
 		return
 	}
+	w, r, finishVOD, allowedVOD := h.beginHLSVOD(w, r, sessionID, false)
+	if !allowedVOD {
+		return
+	}
+	defer finishVOD()
 	if !h.requireHLSSessionAccess(w, r, sessionID) {
 		return
 	}
 
+	if h.vodBoundary != nil {
+		vodDeny(w, kidsvod.CodeUnsupportedSource)
+		return
+	}
 	h.hlsManager.ServeLiveCCStatus(w, r, sessionID)
 }
 
@@ -5830,6 +5879,11 @@ func (h *VideoHandler) KeepAliveHLSSession(w http.ResponseWriter, r *http.Reques
 		http.Error(w, "missing session ID", http.StatusBadRequest)
 		return
 	}
+	w, r, finishVOD, allowedVOD := h.beginHLSVOD(w, r, sessionID, false)
+	if !allowedVOD {
+		return
+	}
+	defer finishVOD()
 	if !h.requireHLSSessionAccess(w, r, sessionID) {
 		return
 	}
@@ -5852,10 +5906,29 @@ func (h *VideoHandler) StopHLSSession(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "missing session ID", http.StatusBadRequest)
 		return
 	}
+	w, r, finishVOD, allowedVOD := h.beginHLSVOD(w, r, sessionID, true)
+	if !allowedVOD {
+		return
+	}
+	defer finishVOD()
 	if !h.requireHLSSessionAccess(w, r, sessionID) {
 		return
 	}
 
+	if h.vodBoundary != nil {
+		scope := hlsScope(r)
+		if scope == nil || scope.check(r.Context()) != nil || !h.hlsManager.cleanupHLSSessionSnapshot(scope.snapshot) {
+			vodDeny(w, kidsvod.CodeContextChanged)
+			return
+		}
+		if scope.owner.recheck(r.Context(), vodCleanup) != nil {
+			vodDeny(w, kidsvod.CodeContextChanged)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]bool{"stopped": true})
+		return
+	}
 	log.Printf("[hls] explicit stop requested for session %s", sessionID)
 	h.hlsManager.CleanupSession(sessionID)
 
@@ -5879,6 +5952,11 @@ func (h *VideoHandler) GetHLSSessionStatus(w http.ResponseWriter, r *http.Reques
 		http.Error(w, "missing session ID", http.StatusBadRequest)
 		return
 	}
+	w, r, finishVOD, allowedVOD := h.beginHLSVOD(w, r, sessionID, false)
+	if !allowedVOD {
+		return
+	}
+	defer finishVOD()
 	if !h.requireHLSSessionAccess(w, r, sessionID) {
 		return
 	}
@@ -5901,10 +5979,19 @@ func (h *VideoHandler) SeekHLSSession(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "missing session ID", http.StatusBadRequest)
 		return
 	}
+	w, r, finishVOD, allowedVOD := h.beginHLSVOD(w, r, sessionID, false)
+	if !allowedVOD {
+		return
+	}
+	defer finishVOD()
 	if !h.requireHLSSessionAccess(w, r, sessionID) {
 		return
 	}
 
+	if h.vodBoundary != nil {
+		vodDeny(w, kidsvod.CodeUnsupportedSource)
+		return
+	}
 	h.hlsManager.Seek(w, r, sessionID)
 }
 
