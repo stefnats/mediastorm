@@ -1546,6 +1546,7 @@ func main() {
 	r.HandleFunc("/admin/api/live/recordings/time-block", adminUIHandler.RequireAuth(recordingsHandler.CreateTimeBlock)).Methods(http.MethodPost)
 	r.HandleFunc("/admin/api/live/recordings/{recordingID}", adminUIHandler.RequireAuth(recordingsHandler.Get)).Methods(http.MethodGet)
 	r.HandleFunc("/admin/api/live/recordings/{recordingID}", adminUIHandler.RequireAuth(recordingsHandler.Delete)).Methods(http.MethodDelete)
+	r.HandleFunc("/admin/api/live/recordings/{recordingID}/export", adminUIHandler.RequireAuth(recordingsHandler.ExportParts)).Methods(http.MethodGet)
 	r.HandleFunc("/admin/api/live/recordings/{recordingID}/stream", adminUIHandler.RequireAuth(recordingsHandler.Stream)).Methods(http.MethodGet)
 	r.HandleFunc("/admin/api/live/recordings/{recordingID}/cancel", adminUIHandler.RequireAuth(recordingsHandler.Cancel)).Methods(http.MethodPost)
 
@@ -1845,6 +1846,7 @@ func main() {
 	r.HandleFunc("/account/api/live/recordings/time-block", adminUIHandler.RequireAuth(recordingsHandler.CreateTimeBlock)).Methods(http.MethodPost)
 	r.HandleFunc("/account/api/live/recordings/{recordingID}", adminUIHandler.RequireAuth(recordingsHandler.Get)).Methods(http.MethodGet)
 	r.HandleFunc("/account/api/live/recordings/{recordingID}", adminUIHandler.RequireAuth(recordingsHandler.Delete)).Methods(http.MethodDelete)
+	r.HandleFunc("/account/api/live/recordings/{recordingID}/export", adminUIHandler.RequireAuth(recordingsHandler.ExportParts)).Methods(http.MethodGet)
 	r.HandleFunc("/account/api/live/recordings/{recordingID}/stream", adminUIHandler.RequireAuth(recordingsHandler.Stream)).Methods(http.MethodGet)
 	r.HandleFunc("/account/api/live/recordings/{recordingID}/cancel", adminUIHandler.RequireAuth(recordingsHandler.Cancel)).Methods(http.MethodPost)
 

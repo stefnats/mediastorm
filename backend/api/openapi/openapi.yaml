@@ -2705,6 +2705,53 @@ paths:
         default:
           description: Invalid request, insufficient management authority, or a foreign profile.
 
+  /api/live/recordings/{recordingID}/export:
+    get:
+      tags: [live]
+      operationId: exportRecordingParts
+      summary: Download closed recording parts without merging them
+      description: |
+        Streams a ZIP Store archive containing every closed part of a terminal
+        completed, failed or cancelled capture-v1 recording and manifest.json.
+        Requires the current full account session, stored recording owner and
+        current profile PIN access. Scoped sharing and restored/unproven ledgers
+        are unsupported. A profile selector, when supplied, must match the owner.
+        This does not concatenate media, fill gaps or declare incomplete capture
+        complete. No providers, probes or media processes are invoked. Two
+        transfers may run concurrently; additional requests are rejected.
+        Byte ranges and resume are unsupported. A failed or revoked transfer is
+        aborted without finalizing the ZIP; clients must reject partial archives.
+        The manifest contains observed capture times and fixed gap reasons, not
+        a continuous playback timeline or provider/file system identifiers.
+      parameters:
+        - name: recordingID
+          in: path
+          required: true
+          schema: {type: string}
+        - name: profileId
+          in: query
+          schema: {type: string}
+      responses:
+        '200':
+          description: Complete archive of the closed original attempt files.
+          content:
+            application/zip:
+              schema: {type: string, format: binary}
+        '401':
+          $ref: '#/components/responses/Error'
+        '403':
+          $ref: '#/components/responses/Error'
+        '404':
+          $ref: '#/components/responses/Error'
+        '409':
+          description: Capture is active, has unclosed or invalid parts, is restored or unavailable.
+        '416':
+          description: Byte ranges are unsupported.
+        '429':
+          description: Both export slots are occupied; retry explicitly later.
+        '503':
+          description: Export service is unavailable.
+
 components:
   securitySchemes:
     accountSession:
