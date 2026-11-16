@@ -1134,6 +1134,8 @@ func TestOpenAPIContract(t *testing.T) {
 
 	t.Run("loved_stored_language", func(t *testing.T) { lovedStoredLanguageOpenAPIContract(t, v) })
 
+	t.Run("hls_zero_restart", func(t *testing.T) { hlsZeroRestartOpenAPIContract(t, v) })
+
 	t.Run("coverage", func(t *testing.T) {
 		covered := v.Covered()
 		var missing []string

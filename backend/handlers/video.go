@@ -6004,6 +6004,10 @@ func (h *VideoHandler) SeekHLSSession(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "missing session ID", http.StatusBadRequest)
 		return
 	}
+	if h.configuredHLSInput() {
+		h.restartVODHLSZero(w, r, sessionID)
+		return
+	}
 	w, r, finishVOD, allowedVOD := h.beginHLSVOD(w, r, sessionID, false)
 	if !allowedVOD {
 		return

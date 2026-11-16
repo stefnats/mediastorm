@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"errors"
 	"net/http"
 	"strings"
 	"time"
@@ -127,7 +128,27 @@ func (h *VideoHandler) beginVideoVOD(w http.ResponseWriter, r *http.Request, sou
 
 // Shared helper callers not yet wired to this port remain unsupported when
 // configured; a missing original context must never mean disabled policy.
+// A stale registration is local to a private input attempt. Public raw video
+// retains its existing fail-closed owner-release behavior through vodRawCheck.
+var errVODRawStaleRegistration = errors.New("stale private raw registration")
+
 func (h *VideoHandler) vodRawCheck(ctx context.Context) error {
+	err := h.checkVODRawOwner(ctx)
+	if err != nil {
+		raw, ok := ctx.Value(vodRawOwnerKey{}).(*vodRawOwner)
+		if ok && raw != nil && raw.handler == h && raw.owner != nil && raw.owner.issuer == h.vodBoundary && raw.owner.notApplicable() {
+			raw.owner.release()
+		}
+	}
+	if errors.Is(err, errVODRawStaleRegistration) {
+		return errVODOwner
+	}
+	return err
+}
+
+// checkVODRawOwner is shared with HLS attempts. It never retires an owner:
+// callers distinguish stale attempt registration from real authority failure.
+func (h *VideoHandler) checkVODRawOwner(ctx context.Context) error {
 	if h.vodBoundary == nil {
 		return nil
 	}
@@ -140,16 +161,13 @@ func (h *VideoHandler) vodRawCheck(ctx context.Context) error {
 	current := b.active[raw.key] == raw.owner
 	b.mu.Unlock()
 	if !current {
-		raw.owner.release()
-		return errVODOwner
+		return errVODRawStaleRegistration
 	}
 	if err := raw.owner.recheck(ctx, vodMedia); err != nil {
-		raw.owner.release()
 		return err
 	}
 	if isRemoteMediaProviderPath(raw.source) || strings.HasPrefix(strings.TrimSpace(raw.source), "localmedia:") {
 		if h.libraryAccess == nil {
-			raw.owner.release()
 			return errVODOwner
 		}
 	}
@@ -164,13 +182,11 @@ func (h *VideoHandler) vodRawCheck(ctx context.Context) error {
 	}
 	request.URL.RawQuery = q.Encode()
 	if !h.requireLibraryStreamAccess(&vodDiscardWriter{header: make(http.Header)}, request, raw.source) || sourceCtx.Err() != nil {
-		raw.owner.release()
 		return errVODOwner
 	}
 	// Current ACL lookup may block or invoke a repository callback. Do not
 	// publish its result under an original owner that changed while it ran.
 	if err := raw.owner.recheck(ctx, vodMedia); err != nil {
-		raw.owner.release()
 		return err
 	}
 	return nil

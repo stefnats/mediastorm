@@ -1946,6 +1946,69 @@ paths:
         '503':
           $ref: '#/components/responses/Error'
 
+  /api/video/hls/{sessionID}/seek:
+    post:
+      tags: [video]
+      operationId: seekHlsSession
+      summary: Seek a legacy HLS session or explicitly restart the dormant pipe subset at zero
+      description: |
+        Nil/uninstalled legacy seek behavior is unchanged. The dormant configured
+        normal H264/AAC TS pipe subset accepts only one explicitly claimed
+        restart at zero per original session, for at most two input attempts.
+        Its time must be the single canonical query string 0. Body, source/path,
+        track, target, start and other setup flags are rejected before demand.
+        The exact original full session/client, consistent explicit profile,
+        current PIN/source ACL and unchanged explicitly inactive applicability
+        are required. Unknown or active applicability fails closed. Original
+        private authority and its absolute expiry are never reissued or renewed.
+        Old process/body/pump must join before a successor GET can open. Each
+        attempt uses a fresh single GET and confined prefix/probe/pipe, with
+        unique directory and exact runtime/generation replacement. Setup follows
+        request cancellation until successful explicit handoff, then survives
+        HTTP completion only within the unchanged original authority deadline.
+        A failed/canceled reservation cannot be retried. Position greater than
+        zero, automatic recovery and Cast/Live/HDR/HW/CC remain unsupported with
+        this dormant boundary. No remux/continuous timeline, immutable-file or
+        age permission is implied. Main does not install the boundary; this
+        documents an existing endpoint, not public family-policy activation.
+      parameters:
+        - name: sessionID
+          in: path
+          required: true
+          schema: {type: string}
+        - name: time
+          in: query
+          required: true
+          description: Seconds for legacy seek; exactly one canonical 0 for configured zero restart.
+          schema: {type: number, minimum: 0}
+        - $ref: '#/components/parameters/StreamProfileID'
+        - $ref: '#/components/parameters/ClientID'
+        - $ref: '#/components/parameters/ProfileUnlock'
+      responses:
+        '200':
+          description: Setup handed off; not a guarantee of future stream availability or a file/age grant.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [sessionId, playlistUrl, startOffset, actualStartOffset, keyframeDelta]
+                properties:
+                  sessionId: {type: string}
+                  playlistUrl: {type: string}
+                  startOffset: {type: number}
+                  actualStartOffset: {type: number}
+                  keyframeDelta: {type: number}
+                  duration: {type: number}
+                  stableCastTimeline: {type: boolean}
+        '400':
+          $ref: '#/components/responses/Error'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/Error'
+        '503':
+          $ref: '#/components/responses/Error'
+
   /api/indexers/search:
     get:
       tags: [sources]

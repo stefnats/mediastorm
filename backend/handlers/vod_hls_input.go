@@ -25,7 +25,8 @@ import (
 	"novastream/services/streaming"
 )
 
-// This dormant port supports one ordinary H264/AAC TS pipe attempt. Owner
+// This dormant port supports ordinary H264/AAC TS pipe attempts and at most
+// one explicit zero restart under the same original owner. Owner
 // correlation never constitutes a catalogue, exact file or regional child grant.
 func (h *VideoHandler) installHLSInputBoundary(b *vodBoundary) error {
 	if h == nil || h.hlsManager == nil || b == nil {
@@ -64,7 +65,50 @@ func (h *VideoHandler) configuredHLSInput() bool {
 	return h != nil && (h.vodBoundary != nil || h.hlsManager != nil && h.hlsManager.hlsInputConfigured())
 }
 
+// Each input owns one reference until its actual process/body/pump has joined.
+// A restart can retain the same original authority without renewing its expiry.
+type vodHLSAuthority struct {
+	mu    sync.Mutex
+	owner *vodOwnerContext
+	refs  int
+}
+
+func (a *vodHLSAuthority) retain() bool {
+	if a == nil {
+		return false
+	}
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.refs <= 0 || a.owner == nil || a.owner.ctx.Err() != nil {
+		return false
+	}
+	a.refs++
+	return true
+}
+func (a *vodHLSAuthority) release() {
+	if a == nil {
+		return
+	}
+	a.mu.Lock()
+	if a.refs <= 0 {
+		a.mu.Unlock()
+		return
+	}
+	a.refs--
+	last := a.refs == 0
+	owner := a.owner
+	a.mu.Unlock()
+	if last && owner != nil {
+		owner.release()
+	}
+}
+
 type vodHLSInput struct {
+	authority                *vodHLSAuthority
+	predecessor              hlsSessionSnapshot
+	restartUsed, restartHeld bool
+	videoIndex, audioIndex   int // actual original pipe selection, never a later session metadata hint
+
 	opened, probeReady                bool
 	source                            *streaming.Response
 	prefix                            []byte
@@ -122,9 +166,14 @@ func (h *VideoHandler) beginVODHLSInput(w http.ResponseWriter, r *http.Request, 
 			}
 		}
 	}
+	return h.newVODHLSPipeAttempt(w, r, source, owner, &vodHLSAuthority{owner: owner, refs: 1}, hlsSessionSnapshot{})
+}
+
+// authority is a pre-retained reference consumed on every success/error path.
+func (h *VideoHandler) newVODHLSPipeAttempt(w http.ResponseWriter, r *http.Request, source string, owner *vodOwnerContext, authority *vodHLSAuthority, predecessor hlsSessionSnapshot) (*vodHLSInput, bool) {
 	var id [16]byte
 	if _, err := rand.Read(id[:]); err != nil {
-		owner.release()
+		authority.release()
 		vodDeny(w, kidsvod.CodeContextChanged)
 		return nil, false
 	}
@@ -134,13 +183,13 @@ func (h *VideoHandler) beginVODHLSInput(w http.ResponseWriter, r *http.Request, 
 	// HTTP setup cancellation hook. No requestOwner is issued at handoff.
 	ctx, cancel := vodWorkerContext(owner.request.Context(), owner)
 	ctx = context.WithValue(ctx, vodRawOwnerKey{}, raw)
-	c := &vodHLSInput{setupCtx: r.Context(), handler: h, manager: h.hlsManager, owner: owner, raw: raw, ctx: ctx, cancel: cancel, done: make(chan struct{})}
+	c := &vodHLSInput{authority: authority, predecessor: predecessor, restartUsed: predecessor.session != nil, setupCtx: r.Context(), handler: h, manager: h.hlsManager, owner: owner, raw: raw, ctx: ctx, cancel: cancel, done: make(chan struct{})}
 	m := c.manager
 	m.vodInputMu.Lock()
 	if m.vodInputsClosed || len(m.vodInputs) >= 64 {
 		m.vodInputMu.Unlock()
 		cancel()
-		owner.release()
+		authority.release()
 		vodDeny(w, kidsvod.CodeContextChanged)
 		return nil, false
 	}
@@ -192,10 +241,32 @@ func (c *vodHLSInput) check(ctx context.Context) error {
 	retired := c.phase == 2 || c.phase == 0 && (c.setupCtx == nil || c.setupCtx.Err() != nil)
 	published := c.published
 	snapshot := c.snapshot
+	predecessor := c.predecessor
 	c.mu.Unlock()
-	if retired || c.handler.vodRawCheck(c.ctx) != nil {
+	if !published && predecessor.session != nil && !predecessor.current() {
 		return errVODOwner
 	}
+	if retired {
+		return errVODOwner
+	}
+	// Shared complete owner/source checks run under original authority, not a
+	// canceled old input child. Missing old registration is only local stale.
+	stable, stopStable := vodWorkerContext(c.owner.request.Context(), c.owner)
+	defer stopStable()
+	if err := c.handler.checkVODRawOwner(ctxWithHLSRaw(stable, c.raw)); err != nil {
+		if !errors.Is(err, errVODRawStaleRegistration) {
+			c.owner.release()
+		}
+		return errVODOwner
+	}
+	// The successor must keep the original PIN input, including revocation or
+	// unlock expiry not represented by a profile revision. Inactive policy is
+	// not permission to renew that original setup authorization.
+	if predecessor.session != nil && c.handler.checkOriginalVODHLSPIN(stable, c.owner) != nil {
+		c.owner.release()
+		return errVODOwner
+	}
+
 	// Operation-local child cancellation must not retire the original owner.
 	// Recheck it after the bounded stable-authority/source callback returns.
 	c.mu.Lock()
@@ -204,7 +275,7 @@ func (c *vodHLSInput) check(ctx context.Context) error {
 	if retired || ctx.Err() != nil || c.ctx.Err() != nil {
 		return errVODOwner
 	}
-	if published && !snapshot.current() {
+	if published && !snapshot.current() || !published && predecessor.session != nil && !predecessor.current() {
 		return errVODOwner
 	}
 	return nil
@@ -282,30 +353,37 @@ func (c *vodHLSInput) retire() {
 			stop()
 		}
 		c.cancel()
-		c.owner.release()
 		go func() { <-c.done; c.releaseRetired() }()
 	})
 }
 func (c *vodHLSInput) releaseRetired() {
 	c.releaseOnce.Do(func() {
+		c.mu.Lock()
+		snapshot := c.snapshot
+		published := c.published
+		held := c.restartHeld
+		c.mu.Unlock()
 		b := c.owner.issuer
 		b.mu.Lock()
-		if b.active[c.raw.key] == c.owner {
+		// A restart reservation keeps the original owner visible to trusted
+		// invalidation until its successor is registered or setup has failed.
+		if !held && b.active[c.raw.key] == c.owner {
 			delete(b.active, c.raw.key)
 		}
 		b.mu.Unlock()
 		c.manager.vodInputMu.Lock()
 		delete(c.manager.vodInputs, c)
 		c.manager.vodInputMu.Unlock()
-		c.mu.Lock()
-		snapshot := c.snapshot
-		published := c.published
-		c.mu.Unlock()
-		if published && !c.manager.cleanupHLSSessionSnapshot(snapshot) {
+		if published && !held && !c.manager.cleanupHLSSessionSnapshot(snapshot) {
 			claim := snapshot.directory
 			if claim != nil && claim.manager == c.manager && claim.published == snapshot.session && claim.path == snapshot.output {
 				c.manager.removeDetachedHLSInputOutput(snapshot)
 			}
+		}
+		if c.authority != nil {
+			c.authority.release()
+		} else {
+			c.owner.release()
 		}
 	})
 }
@@ -456,11 +534,11 @@ func (c *vodHLSInput) open(ctx context.Context, method, rangeHeader string) (*st
 		resp.Close()
 		return nil, errors.New("stream input unavailable")
 	}
-	owned, wrapErr := c.handler.wrapVODRawBody(ctxWithHLSRaw(ctx, c.raw), resp.Body)
-	if wrapErr != nil {
-		return nil, wrapErr
-	}
-	wrapped := &vodHLSBody{input: c, ctx: ctx, body: owned}
+	// HLS checks already include the original raw owner/source ACL before and
+	// after each read. Its input-local cancellation must close this exact body
+	// without the raw wrapper retiring authority shared with a reserved restart.
+	wrapped := &vodHLSBody{input: c, ctx: ctx, body: resp.Body}
+	context.AfterFunc(ctx, func() { _ = wrapped.Close() })
 	resp.Body = wrapped
 	return resp, nil
 }
@@ -684,6 +762,7 @@ func (c *vodHLSInput) startPipe(video, audio int) error {
 		c.mu.Unlock()
 		return errVODOwner
 	}
+	c.videoIndex, c.audioIndex = video, audio
 	c.started = true
 	c.workerStarted = true
 	source := c.source
@@ -749,66 +828,95 @@ func (h *VideoHandler) startVODPipeHLS(w http.ResponseWriter, r *http.Request, s
 		vodDeny(w, kidsvod.CodeUnsupportedSource)
 		return
 	}
+	h.runVODPipeHLSAttempt(w, r, c, audio)
+}
+
+func (h *VideoHandler) runVODPipeHLSAttempt(w http.ResponseWriter, r *http.Request, c *vodHLSInput, audio int) bool {
+	source := c.raw.source
 	if c.check(r.Context()) != nil {
 		vodDeny(w, kidsvod.CodeContextChanged)
-		return
+		return false
 	}
 	if !h.requireAllowedExternalPath(w, r, source) {
-		return
+		return false
 	}
 	if c.check(r.Context()) != nil {
 		vodDeny(w, kidsvod.CodeContextChanged)
-		return
+		return false
 	}
 	probe, err := c.probe(c.ctx)
 	if err != nil {
 		vodDeny(w, kidsvod.CodeUnsupportedSource)
-		return
+		return false
 	}
 	video, audio, err := chooseVODHLSTracks(probe, audio)
 	if err != nil {
 		vodDeny(w, kidsvod.CodeUnsupportedSource)
-		return
+		return false
+	}
+	if c.predecessor.input != nil {
+		original := c.predecessor.input
+		original.mu.Lock()
+		expectedVideo, expectedAudio := original.videoIndex, original.audioIndex
+		original.mu.Unlock()
+		if video != expectedVideo || audio != expectedAudio {
+			vodDeny(w, kidsvod.CodeUnsupportedSource)
+			return false
+		}
 	}
 	if c.check(r.Context()) != nil {
 		vodDeny(w, kidsvod.CodeContextChanged)
-		return
+		return false
 	}
-	claim, err := c.manager.claimHLSSessionDirectory(generateSessionID())
+	id := generateSessionID()
+	if c.predecessor.session != nil {
+		id = c.predecessor.id
+	}
+	claim, err := c.manager.claimHLSSessionDirectory(id)
 	if err != nil {
 		vodDeny(w, kidsvod.CodeUnsupportedSource)
-		return
+		return false
 	}
 	defer c.manager.discardHLSSessionDirectory(claim)
 	now := time.Now()
 	s := &HLSSession{ID: claim.id, ProfileID: c.owner.profile.ID, ClientID: c.owner.client, Path: source, OriginalPath: source, RequestedSource: source, OutputDir: claim.path, vodDirectory: claim, vodInput: c, CreatedAt: now, StreamStartTime: now, LastAccess: now, LastSegmentRequest: now, AudioTrackIndex: audio, SubtitleTrackIndex: -1, MinSegmentRequested: -1, MaxSegmentRequested: -1, LastPlaybackSegment: -1, LastSegmentServed: -1, FinalSegmentCount: -1}
+	if c.predecessor.session != nil {
+		s.SeekGeneration = c.predecessor.generation + 1
+	}
 	c.mu.Lock()
 	c.session = s
 	c.mu.Unlock()
 	s.Cancel = c.retire
-	if c.check(r.Context()) != nil || !c.manager.publishHLSSession(s) {
+	publish := func() bool {
+		if c.predecessor.session != nil {
+			return c.manager.replaceHLSSession(c.predecessor, s)
+		}
+		return c.manager.publishHLSSession(s)
+	}
+	if c.check(r.Context()) != nil || !publish() {
 		vodDeny(w, kidsvod.CodeContextChanged)
-		return
+		return false
 	}
 	if err = c.startPipe(video, audio); err != nil {
 		vodDeny(w, kidsvod.CodeContextChanged)
-		return
+		return false
 	}
 	writer := &vodHLSWriter{ResponseWriter: w, scope: &vodHLSScope{handler: h, owner: c.owner, snapshot: c.snapshot}, ctx: c.ctx, baseline: w.Header().Clone()}
 	writer.Header().Set("Content-Type", "application/json")
 	playlist, err := hlsOwnedInitialURL(s.ID, c.owner.profile.ID)
 	if err != nil {
 		vodDeny(w, kidsvod.CodeUnsupportedSource)
-		return
+		return false
 	}
 	if c.check(r.Context()) != nil {
 		vodDeny(w, kidsvod.CodeContextChanged)
-		return
+		return false
 	}
 	if json.NewEncoder(writer).Encode(map[string]any{"sessionId": s.ID, "playlistUrl": playlist, "startOffset": 0, "actualStartOffset": 0, "keyframeDelta": 0, "stableCastTimeline": false}) != nil {
-		return
+		return false
 	}
 	if c.handoff(r.Context()) != nil {
-		return
+		return false
 	}
+	return true
 }

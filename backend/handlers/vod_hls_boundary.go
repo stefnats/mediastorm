@@ -110,6 +110,42 @@ func (m *HLSManager) publishHLSSession(s *HLSSession) bool {
 	return true
 }
 
+// An explicit restart replaces only its captured runtime/generation. Directory
+// publication and map replacement share the existing lifecycle lock.
+func (m *HLSManager) replaceHLSSession(old hlsSessionSnapshot, s *HLSSession) bool {
+	if !old.valid() || old.manager != m || s == nil || s.ID != old.id || s.vodInput == nil {
+		return false
+	}
+	m.sessionLifecycleMu.Lock()
+	defer m.sessionLifecycleMu.Unlock()
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	current, ok := m.sessions[old.id]
+	if !ok || current != old.session {
+		return false
+	}
+	current.mu.RLock()
+	same := snapshotHLSLocked(m, current) == old
+	current.mu.RUnlock()
+	if !same {
+		return false
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	claim := s.vodDirectory
+	if claim == nil || claim.manager != m || claim.id != s.ID || claim.path != s.OutputDir || claim.published != nil || claim.discarded || claim == old.directory || s.SeekGeneration != old.generation+1 || s.ProfileID != old.profile || s.ClientID != old.client {
+		return false
+	}
+	s.vodIdentity = &hlsSessionIdentity{manager: m, session: s, id: s.ID, profile: s.ProfileID, directory: claim}
+	if !s.vodInput.bindPublication(s) {
+		s.vodIdentity = nil
+		return false
+	}
+	claim.published = s
+	m.sessions[s.ID] = s
+	return true
+}
+
 // Pure peek: no GetSession/LastAccess, provider, cache refresh or filesystem.
 func (m *HLSManager) snapshotHLSSession(id string) (hlsSessionSnapshot, bool) {
 	if m == nil {
