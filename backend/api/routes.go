@@ -228,7 +228,7 @@ func Register(
 	registerWatchPartyGuestRoutes(api, watchPartyHandler)
 
 	if videoHandler != nil {
-		api.Handle("/video/internal-stream", localhostOnlyMiddleware(http.HandlerFunc(videoHandler.StreamVideo))).Methods(http.MethodGet, http.MethodHead, http.MethodOptions)
+		api.Handle("/video/internal-stream", localhostOnlyMiddleware(http.HandlerFunc(videoHandler.StreamInternalVideo))).Methods(http.MethodGet, http.MethodHead, http.MethodOptions)
 	}
 
 	// A credential-free LAN probe must be registered before the protected catch-all.

@@ -1208,6 +1208,22 @@ func main() {
 	profileUnlockService := profileunlock.NewService(profileUnlockStore)
 	profileUnlockService.StartCleanup(context.Background(), time.Hour)
 
+	// Recording aliases share the video pipeline; authorize repository ownership
+	// and the current stored-profile PIN before any media cache or file access.
+	if recordingsService != nil {
+		recordingAccess := handlers.NewRecordingStreamAccess(recordingsService, sessionsService, accountsService, userService, profileUnlockService, func() (config.SecuritySettings, error) {
+			current, err := cfgManager.Load()
+			if err != nil {
+				return config.SecuritySettings{}, err
+			}
+			return current.Security, nil
+		})
+		videoHandler.SetRecordingStreamAccess(recordingAccess)
+		if recordingsHandler != nil {
+			recordingsHandler.SetRecordingStreamAccess(recordingAccess)
+		}
+	}
+
 	api.Register(
 		r,
 		settingsHandler,

@@ -58,6 +58,7 @@ func TestRecordingPartsHTTPGrowingFirstEndsWhenItsPartCloses(t *testing.T) {
 	ctx, cancel := context.WithTimeout(t.Context(), 3*time.Second)
 	defer cancel()
 	ctx = context.WithValue(ctx, auth.ContextKeyAccountID, "account-one")
+	ctx = context.WithValue(ctx, auth.ContextKeySession, f.session)
 	req := httptest.NewRequest("GET", "/api/live/recordings/recording-one/stream", nil).WithContext(ctx)
 	req = mux.SetURLVars(req, map[string]string{"recordingID": "recording-one"})
 	w := &capturePartProgressWriter{ResponseRecorder: httptest.NewRecorder(), firstWrite: make(chan struct{})}
@@ -99,6 +100,7 @@ type capturePartHTTPFixture struct {
 	repo    *capturePartHTTPRepo
 	root    string
 	users   *fakeRecordingUsersProvider
+	session models.Session
 }
 
 func newCapturePartHTTPFixture(t *testing.T) *capturePartHTTPFixture {
@@ -123,7 +125,11 @@ func newCapturePartHTTPFixture(t *testing.T) *capturePartHTTPFixture {
 			Parts: []models.RecordingPart{{Index: 1, StartedAt: at, EndedAt: &closed, EndReason: "source_ended", Bytes: 13}, {Index: 2, StartedAt: closed, Bytes: 14}}, Gaps: []models.RecordingGap{}}}}
 	users := &fakeRecordingUsersProvider{users: []models.User{{ID: "adult", AccountID: "account-one"}, {ID: "other", AccountID: "account-one"}, {ID: "foreign", AccountID: "account-two"}}}
 	service := recordings.NewService(repo, "", root)
-	return &capturePartHTTPFixture{NewRecordingsHandler(service, users), repo, root, users}
+	handler := NewRecordingsHandler(service, users)
+	access := newRecordingAccessFixture(t)
+	access.guard.owners = service
+	handler.SetRecordingStreamAccess(access.guard)
+	return &capturePartHTTPFixture{handler, repo, root, users, access.session}
 }
 
 func (f *capturePartHTTPFixture) request(t *testing.T, method, query, account, byteRange string, guard func(http.ResponseWriter, *http.Request, string) bool) *httptest.ResponseRecorder {
@@ -131,6 +137,7 @@ func (f *capturePartHTTPFixture) request(t *testing.T, method, query, account, b
 	ctx, cancel := context.WithTimeout(t.Context(), time.Second)
 	defer cancel()
 	ctx = context.WithValue(ctx, auth.ContextKeyAccountID, account)
+	ctx = context.WithValue(ctx, auth.ContextKeySession, f.session)
 	req := httptest.NewRequest(method, "/api/live/recordings/recording-one/stream"+query, nil).WithContext(ctx)
 	req = mux.SetURLVars(req, map[string]string{"recordingID": "recording-one"})
 	if guard != nil {
@@ -194,14 +201,18 @@ func TestRecordingPartsHTTPRejectsMalformedSelectorsAndForeignAccess(t *testing.
 			t.Fatalf("foreign recording access status=%d", r.Code)
 		}
 	}
-	for _, query := range []string{"?part=1", "?profileId=other&part=1", "?profileId=other"} {
+	for _, query := range []string{"?part=1", "?profileId=adult&part=1", "?profileId=other&part=1", "?profileId=other"} {
 		seen := ""
 		r := f.request(t, "HEAD", query, "account-one", "", func(w http.ResponseWriter, _ *http.Request, profile string) bool {
 			seen = profile
 			http.Error(w, "synthetic locked profile", http.StatusForbidden)
 			return false
 		})
-		if r.Code != 403 || seen != "adult" || strings.Contains(r.Body.String(), "FIRST-SECTION") {
+		if strings.Contains(query, "profileId=other") {
+			if r.Code != 404 || seen != "" {
+				t.Fatal("conflicting selector reached stored-profile demand")
+			}
+		} else if r.Code != 403 || seen != "adult" || strings.Contains(r.Body.String(), "FIRST-SECTION") {
 			t.Fatal("resource guard did not enforce the recording's stored profile")
 		}
 	}

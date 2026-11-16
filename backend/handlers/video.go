@@ -112,15 +112,16 @@ func videoTracef(format string, args ...any) {
 
 // VideoHandler handles video streaming requests using the local stream provider.
 type VideoHandler struct {
-	transmux      bool
-	ffmpegPath    string
-	ffprobePath   string
-	streamer      streaming.Provider
-	hlsManager    *HLSManager
-	failures      *streamFailureRegistry
-	prequeueStore *playback.PrequeueStore
-	prewarmSvc    PrewarmService
-	libraryAccess *libraryaccess.Service
+	transmux        bool
+	ffmpegPath      string
+	ffprobePath     string
+	streamer        streaming.Provider
+	hlsManager      *HLSManager
+	failures        *streamFailureRegistry
+	prequeueStore   *playback.PrequeueStore
+	prewarmSvc      PrewarmService
+	libraryAccess   *libraryaccess.Service
+	recordingAccess *RecordingStreamAccess
 
 	// castCaps answers "what can this receiver actually decode" from cache.
 	// Never probes on this path: a cast start must not wait on a device.
@@ -762,7 +763,35 @@ func (h *VideoHandler) SetLibraryAccessService(svc *libraryaccess.Service) {
 	h.libraryAccess = svc
 }
 
+func (h *VideoHandler) SetRecordingStreamAccess(access *RecordingStreamAccess) {
+	h.recordingAccess = access
+}
+
+// StreamInternalVideo preserves the existing private localhost source used by
+// media jobs. Actual peer validation is mandatory even when called without the
+// router. Public URLs, forwarded headers and public StreamVideo cannot mint it.
+// This is the existing local-process trust boundary, not a VOD input grant.
+func (h *VideoHandler) StreamInternalVideo(w http.ResponseWriter, r *http.Request) {
+	if !requestsecurity.IsLoopback(r) {
+		http.Error(w, "internal media access denied", http.StatusForbidden)
+		return
+	}
+	if r.Method != http.MethodGet && r.Method != http.MethodHead && r.Method != http.MethodOptions {
+		w.Header().Set("Allow", "GET, HEAD, OPTIONS")
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	ctx := context.WithValue(r.Context(), recordingInternalStreamKey{}, true)
+	h.StreamVideo(w, r.WithContext(ctx))
+}
+
 func (h *VideoHandler) requireLibraryStreamAccess(w http.ResponseWriter, r *http.Request, streamPath string) bool {
+	if strings.HasPrefix(strings.TrimSpace(streamPath), "recording:") {
+		if isRecordingInternalStream(r) {
+			return true
+		}
+		return h.recordingAccess.Check(w, r, streamPath)
+	}
 	if h.libraryAccess == nil {
 		return true
 	}

@@ -11,6 +11,7 @@ import (
 
 	"novastream/internal/auth"
 	"novastream/models"
+	"novastream/services/recordings"
 
 	"github.com/gorilla/mux"
 )
@@ -98,10 +99,18 @@ func TestRecordingsHandlerTracksRunningRecordingStreamUsage(t *testing.T) {
 		users: []models.User{{ID: "profile-1", AccountID: "acct-1", Name: "Profile 1"}},
 	}
 	handler := NewRecordingsHandler(service, users)
+	access := newRecordingAccessFixture(t)
+	access.session.AccountID = "acct-1"
+	access.accounts["acct-1"] = models.Account{ID: "acct-1"}
+	access.profiles["profile-1"] = models.User{ID: "profile-1", AccountID: "acct-1"}
+	access.owner = recordings.StreamOwner{RecordingID: "rec-1", ProfileID: "profile-1"}
+	handler.SetRecordingStreamAccess(access.guard)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	ctx = context.WithValue(ctx, auth.ContextKeyIsMaster, true)
+	ctx = context.WithValue(ctx, auth.ContextKeyAccountID, access.session.AccountID)
+	ctx = context.WithValue(ctx, auth.ContextKeySession, access.session)
 
 	req := httptest.NewRequest(http.MethodGet, "/api/live/recordings/rec-1/stream?profileId=profile-1", nil).WithContext(ctx)
 	req = mux.SetURLVars(req, map[string]string{"recordingID": "rec-1"})
@@ -172,10 +181,15 @@ func TestCompletedRecordingSupportsByteRangeSeek(t *testing.T) {
 		t.Fatal(err)
 	}
 	service := &fakeRecordingService{recording: models.Recording{
-		ID: "rec-1", Status: models.RecordingStatusCompleted, OutputPath: path,
+		ID: "rec-1", UserID: "adult", Status: models.RecordingStatusCompleted, OutputPath: path,
 	}}
 	handler := NewRecordingsHandler(service, nil)
+	access := newRecordingAccessFixture(t)
+	access.owner.RecordingID = "rec-1"
+	handler.SetRecordingStreamAccess(access.guard)
 	ctx := context.WithValue(context.Background(), auth.ContextKeyIsMaster, true)
+	ctx = context.WithValue(ctx, auth.ContextKeyAccountID, access.session.AccountID)
+	ctx = context.WithValue(ctx, auth.ContextKeySession, access.session)
 	req := httptest.NewRequest(http.MethodGet, "/api/live/recordings/rec-1/stream", nil).WithContext(ctx)
 	req = mux.SetURLVars(req, map[string]string{"recordingID": "rec-1"})
 	req.Header.Set("Range", "bytes=4-6")

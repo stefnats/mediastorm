@@ -49,16 +49,21 @@ type recordingUserSettingsService interface {
 }
 
 type RecordingsHandler struct {
-	service      recordingService
-	rules        recordingRuleService
-	users        recordingUsersProvider
-	userSettings recordingUserSettingsService
-	cfgManager   *config.Manager
-	liveChannels LiveChannelProvider
+	recordingAccess *RecordingStreamAccess
+	service         recordingService
+	rules           recordingRuleService
+	users           recordingUsersProvider
+	userSettings    recordingUserSettingsService
+	cfgManager      *config.Manager
+	liveChannels    LiveChannelProvider
 }
 
 func NewRecordingsHandler(service recordingService, users recordingUsersProvider) *RecordingsHandler {
 	return &RecordingsHandler{service: service, users: users}
+}
+
+func (h *RecordingsHandler) SetRecordingStreamAccess(access *RecordingStreamAccess) {
+	h.recordingAccess = access
 }
 
 func (h *RecordingsHandler) SetRuleService(service recordingRuleService) { h.rules = service }
@@ -300,6 +305,13 @@ func (h *RecordingsHandler) Stream(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	recordingID := strings.TrimSpace(mux.Vars(r)["recordingID"])
+	// Service.Get projects capture files. Authorize the repository owner before
+	// that projection can stat any recorded media, including legacy recordings.
+	authorizedRequest, allowed := h.recordingAccess.Authorize(w, r, "recording:"+recordingID)
+	if !allowed {
+		return
+	}
+	r = authorizedRequest
 	recording, err := h.service.Get(recordingID)
 	if err != nil {
 		status := http.StatusInternalServerError
@@ -308,11 +320,6 @@ func (h *RecordingsHandler) Stream(w http.ResponseWriter, r *http.Request) {
 		}
 		http.Error(w, err.Error(), status)
 		return
-	}
-	if !auth.IsMaster(r) {
-		if _, ok := h.requireProfileOwnership(w, r, recording.UserID); !ok {
-			return
-		}
 	}
 	switch recording.Status {
 	case models.RecordingStatusCompleted,

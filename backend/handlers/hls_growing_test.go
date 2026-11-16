@@ -78,6 +78,9 @@ func startGrowingTestSession(t *testing.T, growing bool) (map[string]any, []stri
 	ffmpeg, argsFile := writeArgsRecordingFFmpeg(t)
 	provider := &growingTestProvider{directURL: inputPath, growing: growing}
 	handler := NewVideoHandlerWithProvider(true, ffmpeg, "/definitely-missing-ffprobe", t.TempDir(), provider)
+	access := newRecordingAccessFixture(t)
+	access.owner.RecordingID = "rec-1"
+	handler.SetRecordingStreamAccess(access.guard)
 	t.Cleanup(handler.hlsManager.Shutdown)
 
 	query := url.Values{
@@ -85,7 +88,7 @@ func startGrowingTestSession(t *testing.T, growing bool) (map[string]any, []stri
 		"durationHint": {"300"},
 	}
 	rec := httptest.NewRecorder()
-	handler.StartHLSSession(rec, httptest.NewRequest(http.MethodGet, "/video/hls/start?"+query.Encode(), nil))
+	handler.StartHLSSession(rec, httptest.NewRequest(http.MethodGet, "/video/hls/start?"+query.Encode(), nil).WithContext(access.request(t, "").Context()))
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, body=%s", rec.Code, rec.Body.String())
 	}
