@@ -2025,3 +2025,15 @@ The unwired SAB copy core reopens a completed receipt's held inventory and write
 The first combined run at `21cb99f20155392fa7f71315f4522f7b119a7ead` passed 11,248 events and failed one existing live-rights browser test: the test requested a second reload before the dashboard's existing automatic reload finished. The original source and full raw run are retained. The test-only branch `test/live-permissions-browser-navigation` waits for the actual successful same-route navigation at both confirmation steps, preserving all original assertions and production assets. Three isolated browser runs pass 36 viewport flows.
 
 The corrected combined revision `b4f6b7a3280fee2dfcef53b7fa71216a8f90ff88` passes 11,249 test events in 106 packages with 38 optional skips and builds at that clean revision. Twelve isolated PostgreSQL opt-ins and five unchanged native request exports run together. No production activation, provider/private-playlist access or new upstream PR is included.
+
+## Fork-only confirmed SAB managed-copy controls
+
+Completed download handoffs now offer an explicit saved-copy view and a separate confirmed copy action in Maintenance. Empty target settings or a zero logical byte budget keep copying disabled. Private source and destination roots remain server-side. The original current master, full session, configuration and receipt context are checked throughout the action.
+
+Saved status is a historical observation. Unknown path aliases omit counts rather than claiming zero usage; existing, partial and ambiguous operations remain charged and cannot be copied again automatically. Copying does not scan a library, identify a title, delete sources or grant playback. Interrupted requests can leave completed or partial writes, and the UI directs users to the saved observation.
+
+`feature/sab-managed-copy-web` is `cd4168c467607297ceb3bba8c7b11728b226dcde`: 17 source files, nine production. The affected normal suite passes 5,483 tests with 49 optional skips; repeated race checks pass 1,197 with six optional skips. API and wire checks pass 62 and seven tests. Dedicated browser checks pass one normal and three repeated race invocations at 390px and 1280px; both builds pass. These subsets overlap and are not summed as unique tests. Cookie/SQLite/file-descriptor copying and separate current PostgreSQL authority checks use synthetic fixtures.
+
+The original YAML schema error and later actual hidden-button CSS failure are retained with their exact sources and raw runs. The narrow visibility fix preserves the original browser assertion. Independent review and source/archive/runner/raw-output verification cover the final component.
+
+The combined clean revision `facf83e83aeebfc28752baca5fe8dc0629b67a9b` passes 11,338 tests in 106 packages with 38 optional skips and builds at that same revision. Twelve isolated PostgreSQL opt-ins and five unchanged native request contracts run together. This publication stays in the fork; no new upstream PR, application activation, real provider request or private playlist is included.
