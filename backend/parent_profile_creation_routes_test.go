@@ -29,7 +29,7 @@ func mainProfileCreationFixture(t *testing.T, master, budget bool) (*mainKidsFla
 	admin.SetAccountsService(actual)
 	admin.SetPGProfilePins(f.base.pins)
 	wireParentKidsFlagHandler(admin, f.shared)
-	registerParentProfileCreationCookieRoutes(f.router, admin)
+	registerParentProfileCreationCookieRoutes(f.router, admin, f.shared, f.settings)
 	return f, verifier
 }
 
@@ -40,10 +40,18 @@ func mainProfileCreationPath(kind int) string {
 	return "/account/api/profiles"
 }
 
-func mainProfileCreationRequest(f *mainKidsFlagFixture, kind int, body, intent, password string) *http.Request {
+type mainProfileCreationBundle struct {
+	ParentIntent      string `json:"parentIntent"`
+	CreationOperation string `json:"creationOperation"`
+}
+
+func mainProfileCreationRequest(f *mainKidsFlagFixture, kind int, body string, intent mainProfileCreationBundle, password string) *http.Request {
 	r := f.base.cookieRequest(http.MethodPost, mainProfileCreationPath(kind), body, "application/json")
-	if intent != "" {
-		r.Header.Set("X-Parent-Intent", intent)
+	if intent.ParentIntent != "" {
+		r.Header.Set("X-Parent-Intent", intent.ParentIntent)
+	}
+	if intent.CreationOperation != "" {
+		r.Header.Set("X-Profile-Creation-Operation", intent.CreationOperation)
 	}
 	if password != "" {
 		r.Header.Set("X-Account-Password", password)
@@ -51,27 +59,27 @@ func mainProfileCreationRequest(f *mainKidsFlagFixture, kind int, body, intent, 
 	return r
 }
 
-func mainProfileCreationCall(f *mainKidsFlagFixture, kind int, body, intent, password string) *httptest.ResponseRecorder {
+func mainProfileCreationCall(f *mainKidsFlagFixture, kind int, body string, intent mainProfileCreationBundle, password string) *httptest.ResponseRecorder {
 	w := httptest.NewRecorder()
 	f.router.ServeHTTP(w, mainProfileCreationRequest(f, kind, body, intent, password))
 	return w
 }
 
-func mainProfileCreationChallenge(t *testing.T, f *mainKidsFlagFixture, kind int, body string) string {
+func mainProfileCreationChallenge(t *testing.T, f *mainKidsFlagFixture, kind int, body string) mainProfileCreationBundle {
 	t.Helper()
 	before := f.physical(t)
-	w := mainProfileCreationCall(f, kind, body, "", "")
+	w := mainProfileCreationCall(f, kind, body, mainProfileCreationBundle{}, "")
 	var result struct {
-		Code         string `json:"code"`
-		ParentIntent string `json:"parentIntent"`
+		Code string `json:"code"`
+		mainProfileCreationBundle
 	}
-	if w.Code != http.StatusForbidden || json.Unmarshal(w.Body.Bytes(), &result) != nil || result.Code != "parent_authorization_required" || !strings.HasPrefix(result.ParentIntent, "pcc_") || len(result.ParentIntent) != 68 {
+	if w.Code != http.StatusForbidden || json.Unmarshal(w.Body.Bytes(), &result) != nil || result.Code != "parent_authorization_required" || !strings.HasPrefix(result.ParentIntent, "pcc_") || len(result.ParentIntent) != 68 || !strings.HasPrefix(result.CreationOperation, "pcr_") || len(result.CreationOperation) != 68 {
 		t.Fatal("actual Main creation route did not issue a private creation challenge", w.Code)
 	}
 	if !bytes.Equal(before, f.physical(t)) {
 		t.Fatal("challenge changed User, Settings or durable Settings revisions")
 	}
-	return result.ParentIntent
+	return result.mainProfileCreationBundle
 }
 
 func TestParentProfileCreationMainActualAliasesAndAtomicProjection(t *testing.T) {
@@ -117,7 +125,7 @@ func TestParentProfileCreationMainOriginalCookieBodyAndAliasBinding(t *testing.T
 	f, _ := mainProfileCreationFixture(t, false, false)
 	body := `{"name":"Main child","accountId":"actor","isKidsProfile":true}`
 	before := f.physical(t)
-	r := mainProfileCreationRequest(f, 0, body, "", "")
+	r := mainProfileCreationRequest(f, 0, body, mainProfileCreationBundle{}, "")
 	r.Header.Del("Cookie")
 	w := httptest.NewRecorder()
 	f.router.ServeHTTP(w, r)
@@ -135,11 +143,11 @@ func TestParentProfileCreationMainOriginalCookieBodyAndAliasBinding(t *testing.T
 	}
 	flagBody := `{"isKidsProfile":true}`
 	flagIntent := f.challenge(t, 2, flagBody)
-	if w = mainProfileCreationCall(f, 0, body, flagIntent, "synthetic-web-parent"); w.Code != http.StatusConflict || !bytes.Equal(before, f.physical(t)) {
+	if w = mainProfileCreationCall(f, 0, body, mainProfileCreationBundle{ParentIntent: flagIntent, CreationOperation: intent.CreationOperation}, "synthetic-web-parent"); w.Code != http.StatusConflict || !bytes.Equal(before, f.physical(t)) {
 		t.Fatal("flag challenge became a creation capability", w.Code)
 	}
 	intent = mainProfileCreationChallenge(t, f, 0, body)
-	if w = f.call(2, flagBody, intent, "synthetic-web-parent"); w.Code != http.StatusConflict || !bytes.Equal(before, f.physical(t)) {
+	if w = f.call(2, flagBody, intent.ParentIntent, "synthetic-web-parent"); w.Code != http.StatusConflict || !bytes.Equal(before, f.physical(t)) {
 		t.Fatal("creation challenge became an existing flag capability", w.Code)
 	}
 }
@@ -182,7 +190,7 @@ func TestParentProfileCreationMainAdultWithoutIntentKeepsLegacyPath(t *testing.T
 			}
 			for _, kind := range []int{0, 1} {
 				body := `{"name":"Main adult","accountId":"actor","isKidsProfile":false}`
-				w := mainProfileCreationCall(f, kind, body, "", "synthetic-web-parent")
+				w := mainProfileCreationCall(f, kind, body, mainProfileCreationBundle{}, "synthetic-web-parent")
 				var result handlers.ProfileWithPinStatus
 				if w.Code != http.StatusOK || json.Unmarshal(w.Body.Bytes(), &result) != nil || result.ID == "" || result.IsKidsProfile {
 					t.Fatal("adult no-intent carrier changed its existing path", w.Code)

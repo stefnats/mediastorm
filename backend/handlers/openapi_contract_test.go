@@ -1148,6 +1148,7 @@ func TestOpenAPIContract(t *testing.T) {
 	t.Run("parent_kids_flag_client", func(t *testing.T) { parentKidsFlagClientOpenAPIContract(t, v) })
 
 	t.Run("profile_recovery", func(t *testing.T) { profileRecoveryOpenAPIContract(t, v) })
+	t.Run("profile_creation_results", func(t *testing.T) { profileCreationResultsOpenAPIContract(t, v) })
 
 	t.Run("coverage", func(t *testing.T) {
 		covered := v.Covered()

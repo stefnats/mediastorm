@@ -275,7 +275,7 @@ func (ds *DataStore) PrepareParentProfileCreationManagement(r *http.Request, bod
 		v := creationOperationUTC(*ownerExpiry)
 		metadata.OwnerExpiry = &v
 	}
-	reference, err := ds.reserveProfileCreationOperation(life, metadata)
+	reference, err := ds.reserveProfileCreationOperationQualified(life, metadata, true)
 	if err != nil {
 		return nil, parentCreationError(err)
 	}
@@ -330,6 +330,10 @@ func (ds *DataStore) BindParentProfileCreationManagementRetry(r *http.Request, i
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.self != i || s.store != ds || s.phase != parentPrepared || s.life.Err() != nil {
+		return ErrParentProfileCreationChanged
+	}
+	echoes := r.Header.Values(ProfileCreationOperationHeader)
+	if len(echoes) != 1 || echoes[0] != parentProfileCreationLocator(s.reference) {
 		return ErrParentProfileCreationChanged
 	}
 	s.phase = parentVerifying
@@ -657,6 +661,9 @@ func (ds *DataStore) CommitParentProfileCreation(i *ParentProfileCreationIntent)
 	}
 	if s.run.Err() != nil {
 		return nil, s.run.Err()
+	}
+	if err = commitQualifiedProfileCreationResult(ctx, tx, fence.record, record, settings); err != nil {
+		return nil, err
 	}
 	// Terminal means ledger bookkeeping, never public restart/recovery evidence.
 	// The actual User+Settings and terminal state commit in this SAME transaction.

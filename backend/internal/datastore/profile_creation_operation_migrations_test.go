@@ -48,9 +48,10 @@ func creationOperationVersion(t *testing.T, ds *DataStore) int64 {
 }
 func TestProfileCreationOperationsFull080EmptyDownUpgradeAndRestart(t *testing.T) {
 	f := creationOperationFixture(t)
+	creationOperationUse080(t, f)
 	creationOperationGoose(t)
 	if version := creationOperationVersion(t, f.ds); version != 80 {
-		t.Fatal("actual New did not discover080", version)
+		t.Fatal("explicit080 fixture version", version)
 	}
 	if e := creationOperationDown(t.Context(), f.ds); e != nil {
 		t.Fatal("empty080 Down", e)
@@ -67,7 +68,7 @@ func TestProfileCreationOperationsFull080EmptyDownUpgradeAndRestart(t *testing.T
 	before := creationOperationExistingRows(t, f)
 	f.ds.Close()
 	f.ds = f.open(t)
-	if creationOperationVersion(t, f.ds) != 80 || creationOperationExistingRows(t, f) != before {
+	if creationOperationVersion(t, f.ds) != 81 || creationOperationExistingRows(t, f) != before {
 		t.Fatal("080 upgrade changed existing records")
 	}
 	r := creationOperationReserve(t, f.ds, t.Context(), "correlation_actor")
@@ -97,6 +98,7 @@ func TestProfileCreationOperationsDownRefusesEveryRetainedState(t *testing.T) {
 	for _, state := range []string{"reserved", "attempting", "unknown", "terminal", "retired_unattempted"} {
 		t.Run(state, func(t *testing.T) {
 			f := creationOperationFixture(t)
+			creationOperationUse080(t, f)
 			creationOperationGoose(t)
 			_, raw := creationOperationSeed(t, f.ds.pool, creationOperationTestMetadata("actor"), state, true)
 			before := creationOperationObserve(t, f.ds, t.Context(), raw)
@@ -119,6 +121,7 @@ func TestProfileCreationOperationsDownRefusesEveryRetainedState(t *testing.T) {
 }
 func TestProfileCreationOperationsDownActualRelationNamespaceNotLeadingHelper(t *testing.T) {
 	f := creationOperationFixture(t)
+	creationOperationUse080(t, f)
 	creationOperationGoose(t)
 	leading := f.schema + "_function"
 	if _, e := f.admin.Exec(t.Context(), "CREATE SCHEMA "+pgx.Identifier{leading}.Sanitize()+" AUTHORIZATION "+pgx.Identifier{f.schema}.Sanitize()); e != nil {
@@ -178,6 +181,7 @@ func TestProfileCreationOperationsSeparateSchemasOwnTheirBudgetsAndRecords(t *te
 }
 func TestProfileCreationOperationsDownTableLockBeforeBudgetWaitAndCancel(t *testing.T) {
 	f := creationOperationFixture(t)
+	creationOperationUse080(t, f)
 	creationOperationGoose(t)
 	held, e := f.ds.pool.Begin(t.Context())
 	if e != nil {
@@ -232,6 +236,7 @@ func TestProfileCreationOperationsDownTableLockBeforeBudgetWaitAndCancel(t *test
 }
 func TestProfileCreationOperationsUnsupportedLeadingViewFailsClosed(t *testing.T) {
 	f := creationOperationFixture(t)
+	creationOperationUse080(t, f)
 	leading := f.schema + "_view"
 	if _, e := f.admin.Exec(t.Context(), "CREATE SCHEMA "+pgx.Identifier{leading}.Sanitize()+" AUTHORIZATION "+pgx.Identifier{f.schema}.Sanitize()); e != nil {
 		t.Fatal(e)
@@ -256,6 +261,7 @@ func TestProfileCreationOperationsUnsupportedLeadingViewFailsClosed(t *testing.T
 
 func TestProfileCreationOperationsRepeatableReadCounterexampleIsReadOnly(t *testing.T) {
 	f := creationOperationFixture(t)
+	creationOperationUse080(t, f)
 	// This deliberately bad manual transaction is a CONTROL, not a supported
 	// primitive. It demonstrates stale pre-wait RR observation without writes.
 	bad, e := f.ds.pool.BeginTx(t.Context(), pgx.TxOptions{IsoLevel: pgx.RepeatableRead})
@@ -280,5 +286,17 @@ func TestProfileCreationOperationsRepeatableReadCounterexampleIsReadOnly(t *test
 	}
 	if e = bad.Rollback(t.Context()); e != nil {
 		t.Fatal(e)
+	}
+}
+
+// The080 feature controls deliberately run UpTo080, preserving their strict
+// per-migration assertions. New() discovery/latest081 has separate controls.
+func creationOperationUse080(t *testing.T, f *settingsDSFixture) {
+	t.Helper()
+	creationOperationGoose(t)
+	db := stdlib.OpenDBFromPool(f.ds.pool)
+	defer db.Close()
+	if err := goose.DownToContext(t.Context(), db, "migrations", 80); err != nil {
+		t.Fatal("prepare exact080 feature fixture", err)
 	}
 }

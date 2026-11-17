@@ -315,6 +315,7 @@ type ProfileRecoveryStatus struct {
 	PendingUncertainty bool
 }
 type profileRecoveryReadState struct {
+	creation     *ProfileCreationRead
 	mu           sync.Mutex
 	ds           *DataStore
 	self         *ProfileRecoveryRead
@@ -448,9 +449,15 @@ func (ds *DataStore) reserveRecovery(ctx context.Context, r *ProfileRecoveryRead
 	return slot, nil
 }
 func (ds *DataStore) ReserveUsersRecovery(ctx context.Context, r *ProfileRecoveryRead) (*ProfileRecoverySlot, error) {
+	if r != nil && r.state != nil && r.state.creation != nil {
+		return nil, ErrProfileRecoveryChanged
+	}
 	return ds.reserveRecovery(ctx, r, 0)
 }
 func (ds *DataStore) ReserveUserSettingsRecovery(ctx context.Context, r *ProfileRecoveryRead) (*ProfileRecoverySlot, error) {
+	if r != nil && r.state != nil && r.state.creation != nil {
+		return nil, ErrProfileRecoveryChanged
+	}
 	return ds.reserveRecovery(ctx, r, 1)
 }
 
@@ -458,6 +465,9 @@ func (ds *DataStore) ReserveUserSettingsRecovery(ctx context.Context, r *Profile
 // persistent lifecycle stamp. No missing-row fallback, bootstrap or DML occurs.
 // A later database change is not a locally detected change or durable permit.
 func (ds *DataStore) ReadProfileRecovery(r *ProfileRecoveryRead) (*ProfileRecoverySnapshot, error) {
+	if r != nil && r.state != nil && r.state.creation != nil {
+		return nil, ErrProfileRecoveryChanged
+	}
 	if r == nil || r.state == nil {
 		return nil, ErrProfileRecoveryChanged
 	}
@@ -592,6 +602,12 @@ func (l *ProfileRecoveryLease) Paired() bool {
 	return l.self == l && l.slot != nil && l.slot.kind < 2 && s.leases[l.slot.kind] == l && l.paired
 }
 func (ds *DataStore) BeginUsersRecoveryLease(ctx context.Context, slot *ProfileRecoverySlot, value *ProfileRecoverySnapshot) (*ProfileRecoveryLease, UserWriteRecord, bool, error) {
+	if slot != nil && slot.state != nil && slot.state.creation != nil {
+		return nil, UserWriteRecord{}, false, ErrProfileRecoveryChanged
+	}
+	return ds.beginUsersRecoveryLease(ctx, slot, value)
+}
+func (ds *DataStore) beginUsersRecoveryLease(ctx context.Context, slot *ProfileRecoverySlot, value *ProfileRecoverySnapshot) (*ProfileRecoveryLease, UserWriteRecord, bool, error) {
 	var empty UserWriteRecord
 	if slot == nil || slot.state == nil {
 		return nil, empty, false, ErrProfileRecoveryChanged
@@ -619,6 +635,12 @@ func (ds *DataStore) BeginUsersRecoveryLease(ctx context.Context, slot *ProfileR
 	return lease, record, value.present, nil
 }
 func (ds *DataStore) BeginUserSettingsRecoveryLease(ctx context.Context, slot *ProfileRecoverySlot, value *ProfileRecoverySnapshot) (*ProfileRecoveryLease, UserSettingsRecord, bool, error) {
+	if slot != nil && slot.state != nil && slot.state.creation != nil {
+		return nil, UserSettingsRecord{}, false, ErrProfileRecoveryChanged
+	}
+	return ds.beginUserSettingsRecoveryLease(ctx, slot, value)
+}
+func (ds *DataStore) beginUserSettingsRecoveryLease(ctx context.Context, slot *ProfileRecoverySlot, value *ProfileRecoverySnapshot) (*ProfileRecoveryLease, UserSettingsRecord, bool, error) {
 	var empty UserSettingsRecord
 	if slot == nil || slot.state == nil {
 		return nil, empty, false, ErrProfileRecoveryChanged
@@ -654,6 +676,12 @@ func (ds *DataStore) BeginUserSettingsRecoveryLease(ctx context.Context, slot *P
 // already hold their locks and prepared all fallible copies. No individual
 // slot can be consumed after leasing. Later cancellation cannot undo this point.
 func (ds *DataStore) TakeProfileRecoveryPair(ctx context.Context, users, settings *ProfileRecoveryLease, value *ProfileRecoverySnapshot) error {
+	if users != nil && users.state != nil && users.state.creation != nil || settings != nil && settings.state != nil && settings.state.creation != nil {
+		return ErrProfileRecoveryChanged
+	}
+	return ds.takeProfileRecoveryPair(ctx, users, settings, value)
+}
+func (ds *DataStore) takeProfileRecoveryPair(ctx context.Context, users, settings *ProfileRecoveryLease, value *ProfileRecoverySnapshot) error {
 	if users == nil || settings == nil || users.state == nil || users.state != settings.state {
 		return ErrProfileRecoveryChanged
 	}
@@ -678,6 +706,9 @@ func (ds *DataStore) TakeProfileRecoveryPair(ctx context.Context, users, setting
 	return nil
 }
 func (ds *DataStore) ValidateProfileRecoverySlot(ctx context.Context, slot *ProfileRecoverySlot, value *ProfileRecoverySnapshot) error {
+	if slot != nil && slot.state != nil && slot.state.creation != nil {
+		return ErrProfileRecoveryChanged
+	}
 	if slot == nil || slot.state == nil {
 		return ErrProfileRecoveryChanged
 	}
@@ -687,6 +718,9 @@ func (ds *DataStore) ValidateProfileRecoverySlot(ctx context.Context, slot *Prof
 	return checkRecoverySlotLocked(ds, ctx, slot, value)
 }
 func (ds *DataStore) TakeUsersRecovery(ctx context.Context, slot *ProfileRecoverySlot, value *ProfileRecoverySnapshot) (UserWriteRecord, bool, error) {
+	if slot != nil && slot.state != nil && slot.state.creation != nil {
+		return UserWriteRecord{}, false, ErrProfileRecoveryChanged
+	}
 	if slot == nil || slot.state == nil {
 		return UserWriteRecord{}, false, ErrProfileRecoveryChanged
 	}
@@ -707,6 +741,9 @@ func (ds *DataStore) TakeUsersRecovery(ctx context.Context, slot *ProfileRecover
 	return record, value.present, nil
 }
 func (ds *DataStore) TakeUserSettingsRecovery(ctx context.Context, slot *ProfileRecoverySlot, value *ProfileRecoverySnapshot) (UserSettingsRecord, bool, error) {
+	if slot != nil && slot.state != nil && slot.state.creation != nil {
+		return UserSettingsRecord{}, false, ErrProfileRecoveryChanged
+	}
 	if slot == nil || slot.state == nil {
 		return UserSettingsRecord{}, false, ErrProfileRecoveryChanged
 	}

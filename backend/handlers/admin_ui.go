@@ -7800,7 +7800,7 @@ func (h *AdminUIHandler) CreateProfile(w http.ResponseWriter, r *http.Request) {
 		originalBody := r.Body
 		var selected CreateProfileRequest
 		decodeErr := json.NewDecoder(io.TeeReader(originalBody, &prefix)).Decode(&selected)
-		if len(r.Header.Values(profileunlock.ParentModeIntentHeader)) != 0 || decodeErr == nil && selected.IsKidsProfile {
+		if len(r.Header.Values(profileunlock.ParentModeIntentHeader)) != 0 || len(r.Header.Values(datastore.ProfileCreationOperationHeader)) != 0 || decodeErr == nil && selected.IsKidsProfile {
 			body := prefix.Bytes()
 			if len(body) <= datastore.ParentProfileCreationBodyLimit {
 				rest, err := io.ReadAll(io.LimitReader(originalBody, int64(datastore.ParentProfileCreationBodyLimit+1-len(body))))

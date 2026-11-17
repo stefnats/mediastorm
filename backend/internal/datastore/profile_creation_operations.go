@@ -90,6 +90,7 @@ type creationOperationRecord struct {
 }
 
 type creationOperationReference struct {
+	qualified    bool
 	mu           sync.Mutex
 	self         *creationOperationReference
 	store        *DataStore
@@ -346,6 +347,10 @@ func creationOperationLockRow(ctx context.Context, tx pgx.Tx, id string) error {
 }
 
 func (ds *DataStore) reserveProfileCreationOperation(ctx context.Context, metadata creationOperationMetadata) (*creationOperationReference, error) {
+	return ds.reserveProfileCreationOperationQualified(ctx, metadata, false)
+}
+
+func (ds *DataStore) reserveProfileCreationOperationQualified(ctx context.Context, metadata creationOperationMetadata, qualified bool) (*creationOperationReference, error) {
 	if e := creationOperationContext(ds, ctx); e != nil {
 		return nil, e
 	}
@@ -429,6 +434,11 @@ func (ds *DataStore) reserveProfileCreationOperation(ctx context.Context, metada
 	if e != nil {
 		return nil, creationOperationError(run, errCreationOperationUnavailable)
 	}
+	if qualified {
+		if e = enrollProfileCreationResult(run, tx, record); e != nil {
+			return nil, e
+		}
+	}
 	if e = run.Err(); e != nil {
 		return nil, e
 	}
@@ -436,7 +446,7 @@ func (ds *DataStore) reserveProfileCreationOperation(ctx context.Context, metada
 		return nil, errCreationOperationUnknown
 	}
 	life, cancel := context.WithCancel(ctx)
-	reference := &creationOperationReference{store: ds, ctx: ctx, life: life, stop: cancel, raw: token, record: record}
+	reference := &creationOperationReference{qualified: qualified, store: ds, ctx: ctx, life: life, stop: cancel, raw: token, record: record}
 	reference.self = reference
 	return reference, nil
 }
@@ -484,6 +494,13 @@ func (ds *DataStore) claimProfileCreationAttempt(ctx context.Context, r *creatio
 	tag, e := tx.Exec(run, `UPDATE profile_creation_operations SET state='attempting',version=version+1 WHERE operation_id=$1 AND version=$2 AND state='reserved'`, current.id, current.version)
 	if e != nil || tag.RowsAffected() != 1 {
 		return nil, creationOperationError(run, errCreationOperationChanged)
+	}
+	if r.qualified {
+		// The attempt classification is durable in the same real claim transaction.
+		// Missing081 is an old storage-only operation, never qualified creation proof.
+		if _, e = tx.Exec(run, `UPDATE profile_creation_results SET attempted=true,result_version=result_version+1 WHERE operation_id=$1 AND protocol_version=1 AND outcome='prepared' AND NOT attempted`, current.id); e != nil {
+			return nil, creationOperationError(run, errCreationOperationUnavailable)
+		}
 	}
 	current, e = creationOperationRead(run, tx, current.id)
 	if e != nil {
@@ -759,14 +776,45 @@ func (ds *DataStore) pruneProfileCreationOperations(ctx context.Context, limit i
 	}
 	// Only this budget->operation path exists, and it NEVER waits for a held
 	// operation row. All unresolved rows remain charged regardless of expiry.
-	tag, e := tx.Exec(run, `WITH eligible AS (
-        SELECT operation_id FROM profile_creation_operations
+	rows, e := tx.Query(run, `SELECT operation_id::text FROM profile_creation_operations
         WHERE state IN ('terminal','retired_unattempted') AND settled_at IS NOT NULL
           AND write_until<=clock_timestamp() AND read_until<=clock_timestamp()
-        ORDER BY read_until,operation_id LIMIT $1 FOR UPDATE SKIP LOCKED)
-        DELETE FROM profile_creation_operations p USING eligible e WHERE p.operation_id=e.operation_id`, limit)
+        ORDER BY read_until,operation_id LIMIT $1 FOR UPDATE SKIP LOCKED`, limit)
 	if e != nil {
 		return 0, creationOperationError(run, errCreationOperationUnavailable)
+	}
+	ids := []string{}
+	for rows.Next() {
+		var id string
+		if e = rows.Scan(&id); e != nil {
+			rows.Close()
+			return 0, e
+		}
+		ids = append(ids, id)
+	}
+	e = rows.Err()
+	rows.Close()
+	if e != nil {
+		return 0, e
+	}
+	var removed int64
+	for _, id := range ids {
+		record, err := creationOperationRead(run, tx, id)
+		if err != nil {
+			return 0, err
+		}
+		safe, err := pruneUnattemptedCreationResult(run, tx, record)
+		if err != nil {
+			return 0, err
+		}
+		if !safe {
+			continue
+		}
+		tag, err := tx.Exec(run, `DELETE FROM profile_creation_operations WHERE operation_id=$1 AND version=$2 AND state IN ('terminal','retired_unattempted') AND write_until<=clock_timestamp() AND read_until<=clock_timestamp()`, id, record.version)
+		if err != nil {
+			return 0, creationOperationError(run, errCreationOperationUnavailable)
+		}
+		removed += tag.RowsAffected()
 	}
 	if e = run.Err(); e != nil {
 		return 0, e
@@ -774,5 +822,5 @@ func (ds *DataStore) pruneProfileCreationOperations(ctx context.Context, limit i
 	if e = tx.Commit(run); e != nil {
 		return 0, errCreationOperationUnknown
 	}
-	return tag.RowsAffected(), nil
+	return removed, nil
 }

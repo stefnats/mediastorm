@@ -30,6 +30,11 @@ func creationUsersIntent(t *testing.T, ds *datastore.DataStore, session models.S
 		t.Fatal(err)
 	}
 	t.Cleanup(i.Close)
+	locator, err := ds.ParentProfileCreationLocator(i)
+	if err != nil {
+		t.Fatal(err)
+	}
+	r.Header.Set(datastore.ProfileCreationOperationHeader, locator)
 	if err = ds.BindParentProfileCreationManagementRetry(r, i, body, nil); err != nil {
 		t.Fatal(err)
 	}
