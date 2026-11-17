@@ -47,6 +47,9 @@ func (s *Service) StripRedundantOverrides(globalSettings config.Settings, client
 	if profileChanged {
 		if err := s.saveLocked(); err != nil {
 			log.Printf("[strip-redundant] failed to save user settings: %v", err)
+			if s.useDB() {
+				return
+			}
 		} else {
 			log.Printf("[strip-redundant] saved user settings after stripping redundant overrides")
 		}

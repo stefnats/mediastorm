@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"strings"
 
+	"novastream/internal/datastore"
 	"novastream/models"
 )
 
@@ -22,8 +23,21 @@ func (s *Service) GetSportsPreferences(userID string) (models.SportsPreferenceSn
 	if userID == "" {
 		return models.SportsPreferenceSnapshot{}, ErrUserIDRequired
 	}
-	s.mu.RLock()
-	defer s.mu.RUnlock()
+	if s.useDB() {
+		s.mu.Lock()
+		defer s.mu.Unlock()
+		ctx, cancel := settingsStorageContext()
+		defer cancel()
+		if err := s.ensurePGTargetLocked(ctx, userID); err != nil && !errors.Is(err, datastore.ErrUserSettingsConflict) {
+			return models.SportsPreferenceSnapshot{}, err
+		}
+	} else {
+		s.mu.RLock()
+		defer s.mu.RUnlock()
+	}
+	if err := s.pgTargetErrorLocked(userID); err != nil {
+		return models.SportsPreferenceSnapshot{}, err
+	}
 	return sportsSnapshot(s.settings[userID].SportsPreferences)
 }
 
@@ -45,6 +59,13 @@ func (s *Service) UpdateSportsPreferences(userID string, expectedRevision uint64
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if s.useDB() {
+		ctx, cancel := settingsStorageContext()
+		defer cancel()
+		if err := s.ensurePGTargetLocked(ctx, userID); err != nil {
+			return empty, err
+		}
+	}
 	previous, existed := s.settings[userID]
 	current, err := sportsSnapshot(previous.SportsPreferences)
 	if err != nil {
@@ -65,9 +86,9 @@ func (s *Service) UpdateSportsPreferences(userID string, expectedRevision uint64
 	updated.SportsPreferences = encoded
 	s.settings[userID] = updated
 	if err := s.saveLocked(); err != nil {
-		if existed {
+		if !s.useDB() && existed {
 			s.settings[userID] = previous
-		} else {
+		} else if !s.useDB() {
 			delete(s.settings, userID)
 		}
 		return empty, err
