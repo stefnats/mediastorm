@@ -1918,3 +1918,66 @@ No real provider input, private playlist, production activation or new upstream
 submission occurred. The separate local native foreground-listener packet
 passed 2,116 tests and both APKs; its new branch remains local while publication
 approval for the previously named five branches is pending.
+
+## Fork-only targeted profile writes and observed Continue Watching
+
+[Versioned profile persistence](https://github.com/stefnats/mediastorm/tree/feature/users-cas-persistence)
+replaces whole-cache database synchronization with explicit changed-ID batches.
+Actual prior row revisions bind replacements/deletes; inserts never upsert.
+Unchanged stale profiles cannot overwrite another profile's external change,
+delete externally inserted rows or recreate externally deleted rows. A stale
+changed target or ABA rejects the entire batch. Bootstrap and last-profile
+checks use current SQL under consistent relation-before-row topology locking.
+Acknowledged canonical rows become the confirmed local cache. Known failures
+restore that projection; unknown commit outcomes quarantine even empty saves
+until explicit successful resync or restart, without replay. The actual lost-ack
+fixture proves a committed write, so no database rollback is claimed.
+
+Six sources/three production files passed 253 focused normal events with eight
+optional skips, a 33-event real two-service PostgreSQL subset with no skips,
+147 repeated all-users race events and both builds. The PG subset overlaps
+normal/race. Mutable reader/input/result aliases, JSON/PIN migrations, constraint
+rollback, disjoint/same-target edits, external insert/delete, bootstrap and last
+delete are covered. Existing setters keep signatures and their normalization.
+Their ten-second DB budget does not add request cancellation or fresh actor
+binding. Cached policy/PIN reads, raw writers, separate parent lock order, icon
+filesystem effects and multi-process JSON semantics remain explicit limits.
+No public fresh-parent route is installed.
+
+The separate [continue-watching-cached source](https://github.com/stefnats/mediastorm/tree/feature/continue-watching-cached)
+projects a complete observed normal service feed before the old display cap.
+The old normal CW/Next-Up producer, 500-item delegation and Recently Watched
+privacy window remain. Independent whitelist storage is bounded to 4,096 rows,
+4 MiB and 32 profile pools. Original observation, revision and expiry remain;
+normal TTL is at most ten minutes, estimated airtime at most thirty seconds.
+Missing/expired/retired pools return 409 and missing readers 503, without a cold
+builder, recording-store, metadata/identity-repair, Plex or receipt fallback.
+Current Hidden and Set Aside plus verified cached show/movie language facts are
+filtered before total and paging. Original episode/history/resume targets remain
+unchanged; provider numbering is not rebound to a selected show using display
+names or language facts. A descriptor is observation/correlation, not a frozen
+language view or media/history/age/file grant.
+
+Nine sources/five production files passed 5,426 normal events with 52 optional
+skips, 228 race events, 49 API cases, both builds and ten actual HTTP wire cases.
+The normal local producer observes 702 rows, then Hidden/Aside leave 700 visible;
+late matches beyond 500, Unknown/OR/rare/empty/random and identical episode targets
+are checked. Constructor-before-transport mistakes are prevented by default deny
+before every constructor, empty provider parameters and an exact literal-loopback
+dial guard. The ten response bodies and producer are pinned; separate actual
+registered synthetic account/session/PIN tests complement injected wire auth.
+No full login, real provider, SQL or Android execution is asserted by the wire.
+The earlier green V1 source/raw remains archived; its final test-only delta adds
+schema validation of missing 409 and separates seed/export times. No product RED
+is inferred from the preserved fixture/compile/sandbox failures.
+
+Both packets have independent/root source, archive, pin, raw-report and binary
+checks. The clean combined revision 486cdecfd5b3591186ae9c2a90cb303c21cd3aee passed
+10,882 events in 106 packages with 38
+optional skips and built at that same clean revision. Nine isolated synthetic PG
+optins and four immutable native query exports ran without source/runner/export
+changes. The native cached-CW consumer is a separate active packet using these
+exact ten wire bodies. Latest closed native source remains local at 2,116 tests
+and both APKs; previously requested five-branch publication approval is pending.
+No production activation, real provider query, private playlist or upstream
+submission occurred.
