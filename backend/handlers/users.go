@@ -1281,6 +1281,11 @@ func (h *UsersHandler) SetKidsMode(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if h.pgPins != nil {
+		h.currentParentMode(w, r, id)
+		return
+	}
+
 	// Verify caller can configure this profile
 	if !h.canConfigureKidsProfile(r, id) {
 		http.Error(w, "cannot configure kids settings for this profile", http.StatusForbidden)

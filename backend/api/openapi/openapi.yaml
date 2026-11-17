@@ -67,7 +67,10 @@ info:
       token and must never be stored, logged or placed in a URL. Missing or wrong
       proof returns 403 with `code: parent_authorization_required`; the normal
       session remains valid. Administrators retain their existing management
-      access. Wrong password attempts are rate-limited per account. Creating a
+      access except the explicitly current PostgreSQL kids-mode operation,
+      which also requires their fresh password and original one-shot intent.
+      Other parental mutations retain their existing policy. Wrong password
+      attempts are rate-limited per account. Creating a
       profile through `POST /api/users` still uses its existing `password` body
       field. A non-kids profile's own PIN needs no password when adding its
       first PIN, or when changing or removing a PIN proven by a valid
@@ -1320,6 +1323,192 @@ paths:
                   $ref: '#/components/schemas/Profile'
         '401':
           $ref: '#/components/responses/Error'
+
+  /api/users/{userId}/kids/mode:
+    put:
+      operationId: setKidsModeWithParentConfirmation
+      summary: Save only the existing kids restriction mode
+      description: |
+        The explicit mode is exactly empty, rating or content_list. This changes
+        neither isKidsProfile, account/source rights nor the existing default.
+        PostgreSQL mode requires a fresh current account password even for a
+        genuine master. Existing profile ownership and PIN gates still apply.
+
+        A first request without password receives 403 parent_authorization_required
+        with one opaque parentIntent. Retry the exact original method, path,
+        profile and JSON body with exactly one X-Parent-Intent header and the
+        existing X-Account-Password header. The server binds its original full
+        session/client, current actor, owner, target row/PIN and revocation epochs.
+        A cookie/session change cannot adopt the pending confirmation. The intent
+        is consumed once at claim, including wrong-password or failed retries.
+        Its lifetime is at most 30 seconds from original capture, further bounded
+        by the original request/session/actor/owner deadline. It is not renewed
+        when the first response arrives and cannot authorize a different action.
+
+        There is no automatic retry or replacement challenge. Expired, replayed
+        or changed confirmation returns 409 parent_confirmation_changed. An
+        uncertain commit returns 503 parent_confirmation_outcome_unknown: reload
+        settings before trying again; cancellation or response loss does not
+        prove that an already committed change was rolled back. No credentials,
+        private tuples or durable authorization permits are returned in the intent.
+        JSON mode without PostgreSQL retains its previous parent/master behavior
+        and does not return parentIntent. No regional age or playback grant follows.
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/UserID'
+        - $ref: '#/components/parameters/ParentModeIntent'
+        - $ref: '#/components/parameters/ParentAccountPassword'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/ParentModeRequest'}
+      responses:
+        '200':
+          description: The targeted stored profile after the confirmed mode change.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Profile'}
+        '400': {$ref: '#/components/responses/Error'}
+        '401': {$ref: '#/components/responses/Error'}
+        '403': {$ref: '#/components/responses/ParentModeForbidden'}
+        '404': {$ref: '#/components/responses/Error'}
+        '409':
+          description: Original confirmation expired, consumed or changed; an explicit new Save is required.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/ParentModeFailure'}
+        '429': {$ref: '#/components/responses/Error'}
+        '503':
+          description: Confirmation unavailable or commit outcome unknown; no automatic retry.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/ParentModeFailure'}
+
+  /admin/api/users/{userId}/kids/mode:
+    put:
+      operationId: setAdminKidsModeWithParentConfirmation
+      summary: Save only the existing kids restriction mode
+      description: |
+        The explicit mode is exactly empty, rating or content_list. This changes
+        neither isKidsProfile, account/source rights nor the existing default.
+        PostgreSQL mode requires a fresh current account password even for a
+        genuine master. Existing profile ownership and PIN gates still apply.
+
+        A first request without password receives 403 parent_authorization_required
+        with one opaque parentIntent. Retry the exact original method, path,
+        profile and JSON body with exactly one X-Parent-Intent header and the
+        existing X-Account-Password header. The server binds its original full
+        session/client, current actor, owner, target row/PIN and revocation epochs.
+        A cookie/session change cannot adopt the pending confirmation. The intent
+        is consumed once at claim, including wrong-password or failed retries.
+        Its lifetime is at most 30 seconds from original capture, further bounded
+        by the original request/session/actor/owner deadline. It is not renewed
+        when the first response arrives and cannot authorize a different action.
+
+        There is no automatic retry or replacement challenge. Expired, replayed
+        or changed confirmation returns 409 parent_confirmation_changed. An
+        uncertain commit returns 503 parent_confirmation_outcome_unknown: reload
+        settings before trying again; cancellation or response loss does not
+        prove that an already committed change was rolled back. No credentials,
+        private tuples or durable authorization permits are returned in the intent.
+        JSON mode without PostgreSQL retains its previous parent/master behavior
+        and does not return parentIntent. No regional age or playback grant follows.
+      security:
+        - accountSession: []
+      parameters:
+        - $ref: '#/components/parameters/UserID'
+        - $ref: '#/components/parameters/ParentModeIntent'
+        - $ref: '#/components/parameters/ParentAccountPassword'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/ParentModeRequest'}
+      responses:
+        '200':
+          description: The targeted stored profile after the confirmed mode change.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Profile'}
+        '400': {$ref: '#/components/responses/Error'}
+        '401': {$ref: '#/components/responses/Error'}
+        '403': {$ref: '#/components/responses/ParentModeForbidden'}
+        '404': {$ref: '#/components/responses/Error'}
+        '409':
+          description: Original confirmation expired, consumed or changed; an explicit new Save is required.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/ParentModeFailure'}
+        '429': {$ref: '#/components/responses/Error'}
+        '503':
+          description: Confirmation unavailable or commit outcome unknown; no automatic retry.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/ParentModeFailure'}
+
+  /account/api/users/{userId}/kids/mode:
+    put:
+      operationId: setAccountKidsModeWithParentConfirmation
+      summary: Save only the existing kids restriction mode
+      description: |
+        The explicit mode is exactly empty, rating or content_list. This changes
+        neither isKidsProfile, account/source rights nor the existing default.
+        PostgreSQL mode requires a fresh current account password even for a
+        genuine master. Existing profile ownership and PIN gates still apply.
+
+        A first request without password receives 403 parent_authorization_required
+        with one opaque parentIntent. Retry the exact original method, path,
+        profile and JSON body with exactly one X-Parent-Intent header and the
+        existing X-Account-Password header. The server binds its original full
+        session/client, current actor, owner, target row/PIN and revocation epochs.
+        A cookie/session change cannot adopt the pending confirmation. The intent
+        is consumed once at claim, including wrong-password or failed retries.
+        Its lifetime is at most 30 seconds from original capture, further bounded
+        by the original request/session/actor/owner deadline. It is not renewed
+        when the first response arrives and cannot authorize a different action.
+
+        There is no automatic retry or replacement challenge. Expired, replayed
+        or changed confirmation returns 409 parent_confirmation_changed. An
+        uncertain commit returns 503 parent_confirmation_outcome_unknown: reload
+        settings before trying again; cancellation or response loss does not
+        prove that an already committed change was rolled back. No credentials,
+        private tuples or durable authorization permits are returned in the intent.
+        JSON mode without PostgreSQL retains its previous parent/master behavior
+        and does not return parentIntent. No regional age or playback grant follows.
+      security:
+        - accountSession: []
+      parameters:
+        - $ref: '#/components/parameters/UserID'
+        - $ref: '#/components/parameters/ParentModeIntent'
+        - $ref: '#/components/parameters/ParentAccountPassword'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/ParentModeRequest'}
+      responses:
+        '200':
+          description: The targeted stored profile after the confirmed mode change.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Profile'}
+        '400': {$ref: '#/components/responses/Error'}
+        '401': {$ref: '#/components/responses/Error'}
+        '403': {$ref: '#/components/responses/ParentModeForbidden'}
+        '404': {$ref: '#/components/responses/Error'}
+        '409':
+          description: Original confirmation expired, consumed or changed; an explicit new Save is required.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/ParentModeFailure'}
+        '429': {$ref: '#/components/responses/Error'}
+        '503':
+          description: Confirmation unavailable or commit outcome unknown; no automatic retry.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/ParentModeFailure'}
 
   /api/users/{userId}/pin/verify:
     post:
@@ -3311,6 +3500,19 @@ components:
       description: Session token as a query parameter; only accepted on media URLs such as `/api/video/stream`.
 
   parameters:
+    ParentModeIntent:
+      name: X-Parent-Intent
+      in: header
+      description: Exactly one original opaque kids-mode confirmation from the first 403. Never a cookie, password or persistent permit.
+      schema:
+        type: string
+        pattern: '^pmi_[0-9a-f]{64}$'
+    ParentAccountPassword:
+      name: X-Account-Password
+      in: header
+      description: Original account password, optionally base64-prefixed UTF-8. Never persist, log or put in a URL. It authorizes only the bound original action.
+      schema:
+        type: string
     SABFallbackQueueID:
       name: queueID
       in: path
@@ -3472,6 +3674,23 @@ components:
         type: string
 
   responses:
+    ParentModeForbidden:
+      description: First PostgreSQL confirmation challenge, wrong password, or existing ownership/PIN denial. A retry never creates a replacement intent.
+      content:
+        application/json:
+          schema:
+            type: object
+            required: [error]
+            properties:
+              error: {type: string}
+              code: {type: string}
+              profileId: {type: string}
+              parentIntent:
+                type: string
+                pattern: '^pmi_[0-9a-f]{64}$'
+                description: Present only on the first fresh PostgreSQL parent-confirmation challenge.
+        text/plain:
+          schema: {type: string}
     Forbidden:
       description: |
         Forbidden. `code: profile_locked` (with `profileId`) when the request
@@ -4022,6 +4241,24 @@ components:
           type: integer
         atLimit:
           type: boolean
+
+    ParentModeRequest:
+      type: object
+      additionalProperties: false
+      required: [mode]
+      properties:
+        mode:
+          type: string
+          enum: ['', rating, content_list]
+    ParentModeFailure:
+      type: object
+      additionalProperties: false
+      required: [error, code]
+      properties:
+        error: {type: string}
+        code:
+          type: string
+          enum: [parent_confirmation_changed, parent_confirmation_unavailable, parent_confirmation_outcome_unknown]
 
     Profile:
       type: object

@@ -23,7 +23,7 @@
 
 <div class="grid" style="gap: 1.5rem;">
     <!-- Mode Selection -->
-    <div class="card">
+    <div class="card" id="kids-mode-form">
         <div class="card-header">
             <h2>
                 <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
@@ -54,7 +54,7 @@
                     </label>
                 </div>
             </div>
-            <button class="btn btn-primary" onclick="saveMode()" style="margin-top: 1rem;">
+            <button class="btn btn-primary" id="save-mode" onclick="saveMode()" style="margin-top: 1rem;">
                 <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="width: 16px; height: 16px;">
                     <path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z"/>
                     <polyline points="17 21 17 13 7 13 7 21"/><polyline points="7 3 7 8 15 8"/>
@@ -306,6 +306,43 @@
 <script>
 const profileId = new URLSearchParams(window.location.search).get('profileId');
 let profile = null;
+let modeAction = null;
+let modeGeneration = 0;
+let modePageGeneration = 0;
+let modePageRetired = false;
+let modeProfileLoading = true;
+let modeUncertain = false;
+
+function modeSelection() {
+    return document.querySelector('input[name="kidsMode"]:checked')?.value || '';
+}
+
+function modeControls() {
+    const button = document.getElementById('save-mode');
+    if (button) button.disabled = modePageRetired || modeProfileLoading || modeUncertain || modeAction !== null;
+}
+
+function retireModeAction() {
+    modeGeneration++;
+    const original = modeAction;
+    modeAction = null;
+    original?.controller.abort();
+    modeControls();
+}
+
+function currentModeAction(action) {
+    return modeAction === action && !modePageRetired && !action.controller.signal.aborted &&
+        action.generation === modeGeneration && action.page === modePageGeneration &&
+        document.getElementById('kids-mode-form') === action.form && action.form.isConnected &&
+        profile === action.profile && profile?.id === profileId &&
+        new URLSearchParams(window.location.search).get('profileId') === profileId && modeSelection() === action.mode;
+}
+
+window.addEventListener('pagehide', () => { modePageRetired = true; modePageGeneration++; retireModeAction(); });
+window.addEventListener('pageshow', event => {
+    if (event.persisted) { modePageRetired = false; modePageGeneration++; retireModeAction(); }
+});
+window.addEventListener('popstate', retireModeAction);
 
 // Rating mappings for sync
 const movieToTvRating = {
@@ -326,6 +363,10 @@ const tvToMovieRating = {
 };
 
 async function loadProfile() {
+    retireModeAction();
+    modeProfileLoading = true;
+    modeControls();
+    const page = modePageGeneration;
     if (!profileId) {
         showToast('No profile ID provided', 'error');
         return;
@@ -335,6 +376,8 @@ async function loadProfile() {
         const res = await fetch(basePath + '/api/profiles');
         if (!res.ok) throw new Error('Failed to load profiles');
         const profiles = await res.json();
+
+        if (modePageRetired || page !== modePageGeneration || new URLSearchParams(window.location.search).get('profileId') !== profileId) return;
 
         profile = profiles.find(p => p.id === profileId);
         if (!profile) {
@@ -367,6 +410,9 @@ async function loadProfile() {
         // Update visibility
         updateSectionVisibility();
         updateRatingPreview();
+        modeUncertain = false;
+        modeProfileLoading = false;
+        modeControls();
     } catch (err) {
         showToast('Error: ' + err.message, 'error');
     }
@@ -422,25 +468,63 @@ function renderLists() {
 }
 
 async function saveMode() {
-    const mode = document.querySelector('input[name="kidsMode"]:checked')?.value;
-    if (!mode) {
+    const mode = modeSelection();
+    if (!['rating', 'content_list'].includes(mode)) {
         showToast('Please select a mode', 'error');
         return;
     }
+    if (modeAction || modePageRetired || modeProfileLoading || modeUncertain) return;
+    const form = document.getElementById('kids-mode-form');
+    if (!form?.isConnected || profile?.id !== profileId || new URLSearchParams(window.location.search).get('profileId') !== profileId || typeof window.parentModeFetch !== 'function') {
+        showToast('Confirmation is unavailable. Reload settings before saving.', 'error');
+        return;
+    }
+    const action = {form, profile, mode, generation: ++modeGeneration, page: modePageGeneration, controller: new AbortController()};
+    modeAction = action;
+    modeControls();
 
     try {
-        const res = await fetch(basePath + '/api/users/' + profileId + '/kids/mode', {
+        const res = await window.parentModeFetch(basePath + '/api/users/' + encodeURIComponent(profileId) + '/kids/mode', {
             method: 'PUT',
             headers: {'Content-Type': 'application/json'},
-            body: JSON.stringify({ mode })
-        });
-        if (!res.ok) throw new Error(await res.text());
+            body: JSON.stringify({ mode }),
+            signal: action.controller.signal
+        }, () => currentModeAction(action));
+        if (!currentModeAction(action)) return;
+        if (!res.ok) {
+            const error = await res.json().catch(() => null);
+            if (!currentModeAction(action)) return;
+            if (error?.code === 'parent_confirmation_outcome_unknown') {
+                modeUncertain = true;
+                showToast('The result is not known. Reload settings before trying again.', 'error');
+            } else if (error?.code === 'parent_confirmation_changed') {
+                showToast('Confirmation expired or the request changed. Save again.', 'error');
+            } else if (res.status === 429) {
+                showToast('Too many confirmation attempts. Wait before saving again.', 'error');
+            } else {
+                showToast('Confirmation was not completed. Save again when ready.', 'error');
+            }
+            return;
+        }
+        const saved = await res.json();
+        if (!currentModeAction(action)) return;
+        if (!saved || saved.id !== profileId || saved.kidsMode !== mode) throw new Error('Unconfirmed mode response');
 
-        profile.kidsMode = mode;
+        action.profile.kidsMode = mode;
         updateSectionVisibility();
         showToast('Mode saved');
     } catch (err) {
-        showToast('Error: ' + err.message, 'error');
+        if (!currentModeAction(action) || err.name === 'AbortError') return;
+        // A lost reply can follow a committed change. Do not blindly retry or
+        // claim rollback; require a fresh settings read before another save.
+        modeUncertain = true;
+        showToast('The result could not be confirmed. Reload settings before trying again.', 'error');
+    } finally {
+        if (modeAction === action) {
+            const publish = currentModeAction(action);
+            modeAction = null;
+            if (publish) modeControls();
+        }
     }
 }
 
@@ -525,7 +609,7 @@ async function removeList(url) {
 
 // Listen for mode changes
 document.querySelectorAll('input[name="kidsMode"]').forEach(radio => {
-    radio.addEventListener('change', updateSectionVisibility);
+    radio.addEventListener('change', () => { retireModeAction(); updateSectionVisibility(); });
 });
 
 function escapeHtml(str) {

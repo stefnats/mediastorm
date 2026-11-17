@@ -232,3 +232,44 @@ func (s *Service) CommitPGPinChange(ctx context.Context, intent *datastore.PGPin
 	}
 	return cloneUser(record.User), nil
 }
+
+// CommitParentMode advances only the exact confirmed target projection. A known
+// server commit may remain after cancellation; unknown outcomes quarantine all
+// later local writes until the existing explicit storage resync.
+func (s *Service) CommitParentMode(ctx context.Context, targetID string, intent *datastore.ParentModeIntent) (models.User, error) {
+	if s == nil || !s.useDB() || ctx == nil || ctx.Err() != nil {
+		return models.User{}, datastore.ErrParentModeUnavailable
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.ensurePersistenceLocked()
+	if s.persistence.uncertain {
+		return models.User{}, ErrPersistenceUncertain
+	}
+	current, known := s.users[targetID]
+	confirmed, present := s.persistence.confirmed[targetID]
+	revision, exists := s.persistence.revisions[targetID]
+	if !known || !present || !exists || !reflect.DeepEqual(current, confirmed) {
+		return models.User{}, datastore.ErrUserWriteConflict
+	}
+	if selected, err := s.store.ParentModeTarget(intent, revision); err != nil || selected != targetID {
+		if err != nil {
+			return models.User{}, err
+		}
+		return models.User{}, datastore.ErrUserWriteConflict
+	}
+	record, err := s.store.CommitParentMode(intent)
+	if err != nil {
+		if errors.Is(err, datastore.ErrParentModeUnknown) {
+			s.persistence.uncertain = true
+		}
+		return models.User{}, err
+	}
+	s.users[targetID] = cloneUser(record.User)
+	s.persistence.confirmed[targetID] = cloneUser(record.User)
+	s.persistence.revisions[targetID] = record.Revision
+	if err = ctx.Err(); err != nil {
+		return models.User{}, err
+	}
+	return cloneUser(record.User), nil
+}
