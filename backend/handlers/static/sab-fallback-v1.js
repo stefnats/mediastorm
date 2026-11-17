@@ -93,6 +93,7 @@
     });
     card.append(refresh, status);
     if (panel.dataset.managedCopy === 'true') copyControls(item, card, stamp, refresh);
+    if (panel.dataset.importPreview === 'true' && item.state === 'download_completed') previewControls(item, card, stamp, refresh);
   }
   function copyTime(value) {
     if (typeof value !== 'string') return false;
@@ -127,7 +128,11 @@
     hideCopy(true);
     const url = new URL(endpoint.href.replace(/\/$/, '') + '/' + item.queueId + '/stage');
     function eligible() { return item.state === 'download_completed' && current && current.configured && (current.state === 'not_recorded' || current.state === 'unknown' && current.reason === 'namespace_unobserved'); }
-    function controls(waiting) { view.disabled = waiting; refresh.disabled = waiting; copy.disabled = waiting || !eligible(); }
+    function controls(waiting) {
+      view.disabled = waiting; refresh.disabled = waiting; copy.disabled = waiting || !eligible();
+      const preview = card.querySelector('[data-sab-import-preview]');
+      if (preview) preview.disabled = waiting;
+    }
     function show(value) {
       current = value;
       const labels = {unknown: 'Saved copy status is unknown.', not_recorded: 'No saved copy is recorded for this location.', copy_recorded: 'A saved copy was recorded. This does not mean ready to play.', reconciliation_required: 'This copy needs checking. It cannot be copied again here.'};
@@ -155,6 +160,46 @@
       }
     });
     card.append(view, copy, state);
+  }
+  function inventory(value, id) {
+    if (!keys(value, ['queueId', 'state', 'observedAt', 'entryCount', 'observedBytes', 'files']) || value.queueId !== id || value.state !== 'local_inventory' || !copyTime(value.observedAt) || !Number.isSafeInteger(value.entryCount) || value.entryCount < 1 || value.entryCount > 128 || !Number.isSafeInteger(value.observedBytes) || value.observedBytes < 0 || value.observedBytes > 1099511627776 || !Array.isArray(value.files) || value.files.length !== value.entryCount) throw Error('shape');
+    const kinds = {mkv: 'media_candidate', mp4: 'media_candidate', ts: 'media_candidate', m2ts: 'media_candidate', avi: 'media_candidate', nfo: 'other_regular', srt: 'other_regular', other: 'other_regular'};
+    let total = 0;
+    value.files.forEach((file, i) => {
+      if (!keys(file, ['ordinal', 'kind', 'extension', 'observedBytes']) || file.ordinal !== i + 1 || !Object.hasOwn(kinds, file.extension) || file.kind !== kinds[file.extension] || !Number.isSafeInteger(file.observedBytes) || file.observedBytes < 0 || file.observedBytes > 1099511627776 - total) throw Error('shape');
+      total += file.observedBytes;
+    });
+    if (total !== value.observedBytes) throw Error('shape');
+    return value;
+  }
+  function previewControls(item, card, stamp, refresh) {
+    const inspect = text('button', 'Inspect local files'); inspect.type = 'button'; inspect.className = 'btn btn-secondary'; inspect.dataset.sabImportPreview = 'true';
+    const result = document.createElement('div'); result.setAttribute('role', 'status'); result.setAttribute('aria-live', 'polite');
+    const url = new URL(endpoint.href.replace(/\/$/, '') + '/' + item.queueId + '/import-preview');
+    inspect.addEventListener('click', async () => {
+      if (inspect.disabled || refresh.disabled || !isCurrent(stamp) || !card.isConnected) return;
+      const intent = action(card);
+      const buttons = Array.from(card.querySelectorAll('button'), button => [button, button.disabled]);
+      for (const [button] of buttons) button.disabled = true;
+      result.replaceChildren(text('p', 'Inspecting file details…'));
+      try {
+        const value = inventory(await request(url, 'POST', stamp), item.queueId);
+        if (!owns(card, stamp, intent)) return;
+        result.replaceChildren(text('p', value.entryCount + ' regular file(s) observed; ' + value.observedBytes.toLocaleString() + ' bytes.'));
+        result.append(text('p', 'Checked: ' + new Date(value.observedAt).toLocaleString()));
+        const files = document.createElement('ul');
+        for (const file of value.files) {
+          const kind = file.kind === 'media_candidate' ? 'Possible media' : 'Other file';
+          files.append(text('li', 'File ' + file.ordinal + ': ' + kind + ' (' + file.extension.toUpperCase() + '), ' + file.observedBytes.toLocaleString() + ' bytes.'));
+        }
+        result.append(files, text('p', 'File details only. No files were copied or added to a library; playback is not confirmed.'));
+      } catch (_) {
+        if (owns(card, stamp, intent)) result.replaceChildren(text('p', 'File details could not be inspected. No copy was requested.'));
+      } finally {
+        if (owns(card, stamp, intent)) for (const [button, disabled] of buttons) button.disabled = disabled;
+      }
+    });
+    card.append(inspect, result);
   }
   async function load(target, targetHistory) {
     if (retired || busy) return;
