@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/gorilla/mux"
 
@@ -12,6 +13,7 @@ import (
 	"novastream/internal/auth"
 	"novastream/models"
 	"novastream/services/accounts"
+	"novastream/services/profileunlock"
 	"novastream/services/sessions"
 	"novastream/services/users"
 )
@@ -100,7 +102,11 @@ var (
 // AccountAuthMiddleware creates middleware that validates session tokens.
 // Tokens can be provided via Authorization header or ?token= query param.
 // If accountsSvc is provided, expired accounts will be rejected.
-func AccountAuthMiddleware(sessionsSvc *sessions.Service, accountsSvc *accounts.Service) mux.MiddlewareFunc {
+func AccountAuthMiddleware(sessionsSvc *sessions.Service, accountsSvc *accounts.Service, pg ...*profileunlock.PGProfilePins) mux.MiddlewareFunc {
+	var current *profileunlock.PGProfilePins
+	if len(pg) > 0 {
+		current = pg[0]
+	}
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			// Always allow OPTIONS for CORS
@@ -116,27 +122,43 @@ func AccountAuthMiddleware(sessionsSvc *sessions.Service, accountsSvc *accounts.
 				return
 			}
 
-			if sessionsSvc == nil {
+			if sessionsSvc == nil && current == nil {
 				w.Header().Set("Content-Type", "application/json")
 				w.WriteHeader(http.StatusInternalServerError)
 				json.NewEncoder(w).Encode(map[string]string{"error": "session service unavailable"})
 				return
 			}
 
-			session, err := sessionsSvc.Validate(token)
-			if err != nil {
-				apierror.Write(w, http.StatusUnauthorized, apierror.CodeSessionExpired, "invalid or expired session")
-				return
-			}
-			if session.ClientID == "" {
-				_ = sessionsSvc.BindClient(token, r.Header.Get("X-Client-ID"))
-			}
-
-			// Check if the account has expired
-			if accountsSvc != nil && accountsSvc.IsExpired(session.AccountID) {
-				sessionsSvc.RevokeAllForAccount(session.AccountID)
-				apierror.Write(w, http.StatusUnauthorized, apierror.CodeAccountExpired, "account has expired")
-				return
+			var session models.Session
+			if current != nil {
+				checked, release, err := current.Authenticate(r, token, r.Header.Get("X-Client-ID"))
+				if err != nil {
+					apierror.Write(w, http.StatusUnauthorized, apierror.CodeSessionExpired, "invalid or expired session")
+					return
+				}
+				defer release()
+				r = checked
+				if deadline, ok := r.Context().Deadline(); ok {
+					control := http.NewResponseController(w)
+					_ = control.SetReadDeadline(deadline)
+					defer control.SetReadDeadline(time.Time{})
+				}
+				session, _ = auth.GetSession(r)
+			} else {
+				var err error
+				session, err = sessionsSvc.Validate(token)
+				if err != nil {
+					apierror.Write(w, http.StatusUnauthorized, apierror.CodeSessionExpired, "invalid or expired session")
+					return
+				}
+				if session.ClientID == "" {
+					_ = sessionsSvc.BindClient(token, r.Header.Get("X-Client-ID"))
+				}
+				if accountsSvc != nil && accountsSvc.IsExpired(session.AccountID) {
+					sessionsSvc.RevokeAllForAccount(session.AccountID)
+					apierror.Write(w, http.StatusUnauthorized, apierror.CodeAccountExpired, "account has expired")
+					return
+				}
 			}
 
 			// Stream-scoped sessions (one-time share links) may only reach
@@ -184,7 +206,31 @@ func MasterOnlyMiddleware() mux.MiddlewareFunc {
 
 // ProfileOwnershipMiddleware creates middleware that verifies profile ownership.
 // Master accounts can access any profile; regular accounts can only access their own.
-func ProfileOwnershipMiddleware(usersSvc *users.Service) mux.MiddlewareFunc {
+func ProfileOwnershipMiddleware(usersSvc *users.Service, pg ...*profileunlock.PGProfilePins) mux.MiddlewareFunc {
+	if len(pg) > 0 && pg[0] != nil {
+		current := pg[0]
+		return func(next http.Handler) http.Handler {
+			return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.Method == http.MethodOptions {
+					next.ServeHTTP(w, r)
+					return
+				}
+				id := mux.Vars(r)["userID"]
+				if id != "" {
+					owned, err := current.Owns(r, id)
+					if err != nil {
+						apierror.Write(w, http.StatusServiceUnavailable, "profile_unavailable", "profile access unavailable")
+						return
+					}
+					if !owned {
+						apierror.Write(w, http.StatusNotFound, "profile_not_found", "profile not found")
+						return
+					}
+				}
+				next.ServeHTTP(w, r)
+			})
+		}
+	}
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			if r.Method == http.MethodOptions {

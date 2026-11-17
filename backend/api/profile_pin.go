@@ -100,7 +100,10 @@ func CachedSecuritySettings(manager *config.Manager, ttl time.Duration) Security
 // log uploads, stream-scoped share
 // sessions (bound to one resource by an already-authorised creator), and all
 // requests while enforcement is off.
-func ProfilePinMiddleware(usersSvc profilePinUsers, unlocks profileUnlockValidator, policy SecuritySettingsFunc) mux.MiddlewareFunc {
+func ProfilePinMiddleware(usersSvc profilePinUsers, unlocks profileUnlockValidator, policy SecuritySettingsFunc, pg ...*profileunlock.PGProfilePins) mux.MiddlewareFunc {
+	if len(pg) > 0 && pg[0] != nil {
+		return currentProfilePinMiddleware(pg[0], policy)
+	}
 	return func(next http.Handler) http.Handler {
 		if usersSvc == nil || unlocks == nil || policy == nil {
 			return next
@@ -254,4 +257,111 @@ func jsonBodyProfileIDs(r *http.Request) []string {
 type readCloser struct {
 	io.Reader
 	io.Closer
+}
+
+// The PG branch never interprets a missing cached PIN as current absence and
+// never falls back to the legacy validator after an unknown storage result.
+func currentProfilePinMiddleware(current *profileunlock.PGProfilePins, policy SecuritySettingsFunc) mux.MiddlewareFunc {
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if policy == nil {
+				apierror.Write(w, http.StatusServiceUnavailable, "profile_unavailable", "profile access unavailable")
+				return
+			}
+			if r.Method == http.MethodOptions || isProfilePinExemptPath(r) || !policy().EnforceProfilePins || auth.GetSessionScope(r) == models.SessionScopeStream {
+				next.ServeHTTP(w, r)
+				return
+			}
+			check := func(w http.ResponseWriter, request *http.Request, id string, resource bool) bool {
+				if id == "" {
+					apierror.Write(w, http.StatusNotFound, "resource_not_found", "resource not found")
+					return false
+				}
+				subject, err := current.Current(request, id)
+				if err != nil {
+					apierror.Write(w, http.StatusServiceUnavailable, "profile_unavailable", "profile access unavailable")
+					return false
+				}
+				switch subject.Outcome() {
+				case profileunlock.PGPinNoPin, profileunlock.PGPinUnlocked:
+					return true
+				case profileunlock.PGPinLocked:
+					apierror.Write(w, http.StatusForbidden, apierror.CodeProfileLocked, "profile is locked", map[string]string{"profileId": id})
+				case profileunlock.PGPinNotFound:
+					code, text := "profile_not_found", "profile not found"
+					if resource {
+						code, text = "resource_not_found", "resource not found"
+					}
+					apierror.Write(w, http.StatusNotFound, code, text)
+				default:
+					apierror.Write(w, http.StatusServiceUnavailable, "profile_unavailable", "profile access unavailable")
+				}
+				return false
+			}
+			r = profileaccess.WithResourceGuard(r, func(w http.ResponseWriter, request *http.Request, id string) bool { return check(w, request, id, true) })
+			ids, err := currentProfileIDs(r)
+			if err != nil {
+				apierror.Write(w, http.StatusBadRequest, "invalid_request", "invalid profile selector")
+				return
+			}
+			for _, id := range ids {
+				if !check(w, r, id, false) {
+					return
+				}
+			}
+			next.ServeHTTP(w, r)
+		})
+	}
+}
+func currentProfileIDs(r *http.Request) ([]string, error) {
+	ids := requestProfileIDs(r)
+	seen := map[string]bool{}
+	for _, id := range ids {
+		seen[id] = true
+	}
+	if r.Body == nil || r.Body == http.NoBody || r.Method != http.MethodPost && r.Method != http.MethodPut && r.Method != http.MethodPatch && r.Method != http.MethodDelete {
+		return ids, nil
+	}
+	// Path-bound imports need not be buffered a second time; their destination
+	// has already been checked. Diagnostic/binary uploads carry no target.
+	for _, key := range profileIDPathVars {
+		if strings.TrimSpace(mux.Vars(r)[key]) != "" {
+			return ids, nil
+		}
+	}
+	if strings.HasSuffix(r.URL.Path, "/api/debug/log") || strings.Contains(r.URL.Path, "/api/logs/") {
+		return ids, nil
+	}
+	original := r.Body
+	raw, err := io.ReadAll(io.LimitReader(original, maxProfileBodyPeekBytes+1))
+	r.Body = readCloser{Reader: io.MultiReader(bytes.NewReader(raw), original), Closer: original}
+	if err != nil {
+		return nil, err
+	}
+	trimmed := bytes.TrimSpace(raw)
+	if len(trimmed) == 0 || trimmed[0] != '{' {
+		return ids, nil
+	}
+	if len(raw) > maxProfileBodyPeekBytes {
+		return nil, io.ErrUnexpectedEOF
+	}
+	var fields map[string]json.RawMessage
+	if err = json.Unmarshal(raw, &fields); err != nil {
+		return nil, err
+	}
+	for key, value := range fields {
+		if !strings.EqualFold(key, "profileId") && !strings.EqualFold(key, "userId") {
+			continue
+		}
+		var id string
+		if err = json.Unmarshal(value, &id); err != nil {
+			return nil, err
+		}
+		id = strings.TrimSpace(id)
+		if id != "" && !seen[id] {
+			ids = append(ids, id)
+			seen[id] = true
+		}
+	}
+	return ids, nil
 }

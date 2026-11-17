@@ -1217,6 +1217,10 @@ func main() {
 	}
 	profileUnlockService := profileunlock.NewService(profileUnlockStore)
 	profileUnlockService.StartCleanup(context.Background(), time.Hour)
+	var currentProfilePins *profileunlock.PGProfilePins
+	if store != nil {
+		currentProfilePins = profileunlock.NewPGProfilePins(store, sessionsService)
+	}
 
 	// Recording aliases share the video pipeline; authorize repository ownership
 	// and the current stored-profile PIN before any media cache or file access.
@@ -1228,6 +1232,7 @@ func main() {
 			}
 			return current.Security, nil
 		})
+		recordingAccess.SetPGProfilePins(currentProfilePins)
 		videoHandler.SetRecordingStreamAccess(recordingAccess)
 		if recordingsHandler != nil {
 			recordingsHandler.SetRecordingStreamAccess(recordingAccess)
@@ -1278,6 +1283,7 @@ func main() {
 		settings.Server.HomepageAPIKey,
 		latencyAdmin,
 		api.WithProfileUnlocks(profileUnlockService, api.CachedSecuritySettings(cfgManager, 3*time.Second)),
+		api.WithPGProfilePins(currentProfilePins),
 	)
 	log.Printf("[startup] phase=primary-api-routes duration=%s", time.Since(startupPhaseStarted))
 	startupPhaseStarted = time.Now()
@@ -1335,6 +1341,7 @@ func main() {
 	adminUIHandler.SetInvitationsService(invitationsService)
 	adminUIHandler.SetRemoteAccessService(remoteAccessService)
 	adminUIHandler.SetSessionsService(sessionsService)
+	adminUIHandler.SetPGProfilePins(currentProfilePins)
 	adminUIHandler.SetClientsService(clientsService)
 	adminUIHandler.SetClientSettingsService(clientSettingsService)
 	adminUIHandler.SetCalendarService(calendarService)
@@ -1561,9 +1568,9 @@ func main() {
 	r.HandleFunc("/admin/api/live/recordings/time-block", adminUIHandler.RequireAuth(recordingsHandler.CreateTimeBlock)).Methods(http.MethodPost)
 	r.HandleFunc("/admin/api/live/recordings/{recordingID}", adminUIHandler.RequireAuth(recordingsHandler.Get)).Methods(http.MethodGet)
 	r.HandleFunc("/admin/api/live/recordings/{recordingID}", adminUIHandler.RequireAuth(recordingsHandler.Delete)).Methods(http.MethodDelete)
-	webRecordingPIN, webRecordingDownload := newRecordingWebPOSTHandlers(sessionsService, accountsService, userService, usersHandler.VerifyPin, recordingsHandler.ExportParts)
-	_, webRecordingTimingRead := newRecordingWebPOSTHandlers(sessionsService, accountsService, userService, usersHandler.VerifyPin, recordingsHandler.GetPartTiming)
-	_, webRecordingTimingInspect := newRecordingWebPOSTHandlers(sessionsService, accountsService, userService, usersHandler.VerifyPin, recordingsHandler.RefreshPartTiming)
+	webRecordingPIN, webRecordingDownload := newRecordingWebPOSTHandlers(sessionsService, accountsService, userService, usersHandler.VerifyPin, recordingsHandler.ExportParts, currentProfilePins)
+	_, webRecordingTimingRead := newRecordingWebPOSTHandlers(sessionsService, accountsService, userService, usersHandler.VerifyPin, recordingsHandler.GetPartTiming, currentProfilePins)
+	_, webRecordingTimingInspect := newRecordingWebPOSTHandlers(sessionsService, accountsService, userService, usersHandler.VerifyPin, recordingsHandler.RefreshPartTiming, currentProfilePins)
 	webRecordingPINLimiter := api.NewIPRateLimiter(rate.Every(6*time.Second), 10)
 	r.HandleFunc("/admin/api/users/{userID}/pin/verify", recordingWebOrigin(adminUIHandler.RequireAuth(api.RateLimitHandlerFunc(webRecordingPINLimiter, webRecordingPIN)))).Methods(http.MethodPost)
 	r.HandleFunc("/admin/api/live/recordings/{recordingID}/export", recordingWebOrigin(adminUIHandler.RequireAuth(webRecordingDownload))).Methods(http.MethodPost)
@@ -1819,7 +1826,7 @@ func main() {
 	// Account login/logout routes (no auth required)
 	r.HandleFunc("/account/login", accountUIHandler.LoginPage).Methods(http.MethodGet)
 	r.HandleFunc("/account/login", api.RateLimitHandlerFunc(adminLoginLimiter, accountUIHandler.LoginSubmit)).Methods(http.MethodPost)
-	r.HandleFunc("/account/logout", accountUIHandler.Logout).Methods(http.MethodGet, http.MethodPost)
+	registerAccountLogoutRoute(r, accountUIHandler, adminUIHandler, currentProfilePins)
 
 	log.Printf("[startup] phase=admin-routes duration=%s", time.Since(startupPhaseStarted))
 	startupPhaseStarted = time.Now()
@@ -1886,7 +1893,7 @@ func main() {
 	r.HandleFunc("/account/api/indexers/search", adminUIHandler.RequireAuth(indexerHandler.Search)).Methods(http.MethodGet)
 	r.HandleFunc("/account/api/playback/resolve", adminUIHandler.RequireAuth(playbackHandler.Resolve)).Methods(http.MethodPost)
 	releaseCookieHandler := func(next http.HandlerFunc) http.HandlerFunc {
-		guarded := api.ProfilePinMiddleware(userService, profileUnlockService, api.CachedSecuritySettings(cfgManager, 3*time.Second))(http.HandlerFunc(next))
+		guarded := api.ProfilePinMiddleware(userService, profileUnlockService, api.CachedSecuritySettings(cfgManager, 3*time.Second), currentProfilePins)(http.HandlerFunc(next))
 		return adminUIHandler.RequireAuth(guarded.ServeHTTP)
 	}
 	r.HandleFunc("/account/api/playback/prequeue/{prequeueID}", releaseCookieHandler(prequeueHandler.GetStatus)).Methods(http.MethodGet)
@@ -2722,11 +2729,65 @@ func recordingWebOrigin(next http.HandlerFunc) http.HandlerFunc {
 	}
 }
 
+// registerAccountLogoutRoute keeps JSON logout on its existing handler while
+// PG captures the original cookie frame before any body/read or refresh wait.
+func registerAccountLogoutRoute(r *mux.Router, accountUI *handlers.AccountUIHandler, adminUI *handlers.AdminUIHandler, currentPins *profileunlock.PGProfilePins) {
+	logout := accountUI.Logout
+	if currentPins != nil {
+		logout = adminUI.RequireAuth(adminUI.Logout)
+	}
+	r.HandleFunc("/account/logout", logout).Methods(http.MethodGet, http.MethodPost)
+}
+
 // newRecordingWebPOSTHandlers bridges only an already authenticated full cookie
 // session. It never turns a scoped token, caller role or profile into authority.
-func newRecordingWebPOSTHandlers(sessionStore *sessions.Service, accountStore *accounts.Service, profiles *users.Service, verifyPIN, export http.HandlerFunc) (http.HandlerFunc, http.HandlerFunc) {
+func newRecordingWebPOSTHandlers(sessionStore *sessions.Service, accountStore *accounts.Service, profiles *users.Service, verifyPIN, export http.HandlerFunc, pg ...*profileunlock.PGProfilePins) (http.HandlerFunc, http.HandlerFunc) {
+	var currentPins *profileunlock.PGProfilePins
+	if len(pg) > 0 {
+		currentPins = pg[0]
+	}
+	withCurrentFrame := func(next http.HandlerFunc) http.HandlerFunc {
+		return func(w http.ResponseWriter, r *http.Request) {
+			if currentPins == nil {
+				next(w, r)
+				return
+			}
+			claimed, ok := auth.GetSession(r)
+			if !ok || claimed.Token == "" || claimed.Scope != "" {
+				http.Error(w, "recording access unavailable", http.StatusNotFound)
+				return
+			}
+			checked, release, err := currentPins.Authenticate(r, claimed.Token, r.Header.Get("X-Client-ID"))
+			if err != nil {
+				http.Error(w, "recording access unavailable", http.StatusNotFound)
+				return
+			}
+			defer release()
+			next(w, checked)
+		}
+	}
 	snapshot := func(r *http.Request, profileID string) (*http.Request, [32]byte, bool) {
 		var empty [32]byte
+		if currentPins != nil {
+			claimed, ok := auth.GetSession(r)
+			if !ok || claimed.Scope != "" || currentPins.CheckOriginal(r) != nil {
+				return nil, empty, false
+			}
+			current, err := currentPins.Current(r, profileID)
+			if err != nil {
+				return nil, empty, false
+			}
+			switch current.Outcome() {
+			case profileunlock.PGPinNoPin, profileunlock.PGPinLocked, profileunlock.PGPinUnlocked:
+			default:
+				return nil, empty, false
+			}
+			correlation, err := current.Correlation()
+			if err != nil {
+				return nil, empty, false
+			}
+			return r, sha256.Sum256([]byte(correlation)), r.Context().Err() == nil
+		}
 		claimed, ok := auth.GetSession(r)
 		if !ok || claimed.Token == "" || claimed.Scope != "" || sessionStore == nil || accountStore == nil || profiles == nil || r.Context().Err() != nil {
 			return nil, empty, false
@@ -2786,7 +2847,7 @@ func newRecordingWebPOSTHandlers(sessionStore *sessions.Service, accountStore *a
 		return body, true
 	}
 	deny := func(w http.ResponseWriter) { http.Error(w, "recording access unavailable", http.StatusNotFound) }
-	verify := recordingWebOrigin(func(w http.ResponseWriter, r *http.Request) {
+	verify := recordingWebOrigin(withCurrentFrame(func(w http.ResponseWriter, r *http.Request) {
 		raw, ok := readBody(w, r, "application/json")
 		if !ok {
 			return
@@ -2826,9 +2887,21 @@ func newRecordingWebPOSTHandlers(sessionStore *sessions.Service, accountStore *a
 		checked = checked.Clone(checked.Context())
 		checked.Body = io.NopCloser(bytes.NewReader(raw))
 		reply := &recordingWebPINReply{header: make(http.Header)}
-		api.ProfileOwnershipMiddleware(profiles)(verifyPIN).ServeHTTP(reply, checked)
-		_, after, valid := snapshot(checked, id)
-		if !valid || after != before || reply.overflow {
+		api.ProfileOwnershipMiddleware(profiles, currentPins)(verifyPIN).ServeHTTP(reply, checked)
+		valid := false
+		if currentPins != nil && !reply.overflow && (reply.status == 0 || reply.status == http.StatusOK) {
+			// A successful verification may migrate only its own PinLength row.
+			// Consume the original verifier's exact known post-commit tuple instead
+			// of a token-only check or a replacement request's current observation.
+			var response handlers.VerifyPinResponse
+			if json.Unmarshal(reply.body.Bytes(), &response) == nil && response.Valid {
+				valid = currentPins.CheckVerified(checked, id) == nil && currentPins.CheckOriginal(checked) == nil
+			}
+		} else {
+			_, after, ok := snapshot(checked, id)
+			valid = ok && after == before
+		}
+		if !valid || reply.overflow || checked.Context().Err() != nil {
 			deny(w)
 			return
 		}
@@ -2840,8 +2913,8 @@ func newRecordingWebPOSTHandlers(sessionStore *sessions.Service, accountStore *a
 		}
 		w.WriteHeader(status)
 		_, _ = w.Write(reply.body.Bytes())
-	})
-	download := recordingWebOrigin(func(w http.ResponseWriter, r *http.Request) {
+	}))
+	download := recordingWebOrigin(withCurrentFrame(func(w http.ResponseWriter, r *http.Request) {
 		raw, ok := readBody(w, r, "application/x-www-form-urlencoded")
 		if !ok {
 			return
@@ -2889,7 +2962,7 @@ func newRecordingWebPOSTHandlers(sessionStore *sessions.Service, accountStore *a
 		checked.Header.Del("Content-Type")
 		checked.Header.Set("X-Profile-Unlock", unlock)
 		export(w, checked)
-	})
+	}))
 	return verify, download
 }
 

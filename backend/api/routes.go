@@ -102,6 +102,7 @@ func masterOnlySportsMutation(handler http.HandlerFunc) http.Handler {
 type RegisterOption func(*registerOptions)
 
 type registerOptions struct {
+	pgPins   *profileunlock.PGProfilePins
 	unlocks  *profileunlock.Service
 	security SecuritySettingsFunc
 }
@@ -113,6 +114,13 @@ func WithProfileUnlocks(unlocks *profileunlock.Service, security SecuritySetting
 		o.unlocks = unlocks
 		o.security = security
 	}
+}
+
+// WithPGProfilePins selects the current-storage PG implementation explicitly.
+// The existing security setting remains the PIN policy switch. Nil-store/JSON
+// registrations omit this option; a selected PG failure never falls back.
+func WithPGProfilePins(current *profileunlock.PGProfilePins) RegisterOption {
+	return func(options *registerOptions) { options.pgPins = current }
 }
 
 // Register mounts API endpoints onto the provided router.
@@ -191,6 +199,17 @@ func Register(
 
 	// Auth routes (no authentication required)
 	authHandler := handlers.NewAuthHandler(accountsSvc, sessionsSvc)
+	if options.pgPins != nil {
+		authHandler.SetPGProfilePins(options.pgPins)
+		if usersHandler != nil {
+			usersHandler.SetPGProfilePins(options.pgPins, func() time.Duration {
+				if options.security == nil {
+					return time.Duration(config.DefaultProfileUnlockTTLHours) * time.Hour
+				}
+				return options.security().ProfileUnlockTTL()
+			})
+		}
+	}
 	if options.unlocks != nil {
 		authHandler.SetProfileUnlocks(options.unlocks)
 		if usersHandler != nil {
@@ -238,15 +257,20 @@ func Register(
 
 	// Protected routes - require authentication
 	protected := api.PathPrefix("").Subrouter()
-	protected.Use(AccountAuthMiddleware(sessionsSvc, accountsSvc))
-	if usersSvc != nil {
+	protected.Use(AccountAuthMiddleware(sessionsSvc, accountsSvc, options.pgPins))
+	if options.pgPins != nil {
+		protected.Use(profileaccess.CurrentMiddleware(options.pgPins.Owns))
+		protected.Use(profileaccess.CurrentKidsLiveTV(options.pgPins.IsKids))
+	} else if usersSvc != nil {
 		protected.Use(profileaccess.Middleware(usersSvc.BelongsToAccount))
 		protected.Use(profileaccess.BlockKidsFromLiveTV(func(profileID string) bool {
 			profile, ok := usersSvc.Get(profileID)
 			return ok && profile.IsKidsProfile
 		}))
 	}
-	if options.unlocks != nil && usersSvc != nil && options.security != nil {
+	if options.pgPins != nil {
+		protected.Use(ProfilePinMiddleware(usersSvc, options.unlocks, options.security, options.pgPins))
+	} else if options.unlocks != nil && usersSvc != nil && options.security != nil {
 		protected.Use(ProfilePinMiddleware(usersSvc, options.unlocks, options.security))
 	}
 
@@ -301,7 +325,7 @@ func Register(
 
 	// Profile ownership middleware for user routes
 	profileProtected := protected.PathPrefix("/users").Subrouter()
-	profileProtected.Use(ProfileOwnershipMiddleware(usersSvc))
+	profileProtected.Use(ProfileOwnershipMiddleware(usersSvc, options.pgPins))
 	if watchRoomsHandler != nil {
 		profileProtected.HandleFunc("/{userID}/watch-rooms", watchRoomsHandler.Create).Methods(http.MethodPost)
 		profileProtected.HandleFunc("/{userID}/watch-rooms/{roomID}/account-invites", RateLimitHandlerFunc(watchRoomInviteLimiter, watchRoomsHandler.InviteAccount)).Methods(http.MethodPost)

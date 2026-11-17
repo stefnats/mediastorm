@@ -118,16 +118,10 @@ func (h *RecordingsHandler) partTimingAuthority(w http.ResponseWriter, r *http.R
 	cloned.RawQuery = query.Encode()
 	checked = checked.Clone(checked.Context())
 	checked.URL = &cloned
-	expiry := before.session.ExpiresAt
-	for _, accountID := range []string{before.session.AccountID, before.profile.AccountID} {
-		account, exists := access.accounts.Get(accountID)
-		if !exists {
-			http.Error(w, "recording export unavailable", http.StatusNotFound)
-			return nil, nil, nil, false
-		}
-		if account.ExpiresAt != nil && account.ExpiresAt.Before(expiry) {
-			expiry = *account.ExpiresAt
-		}
+	expiry, exists := access.originalExpiry(before)
+	if !exists {
+		http.Error(w, "recording export unavailable", http.StatusNotFound)
+		return nil, nil, nil, false
 	}
 	if deadline, exists := checked.Context().Deadline(); exists && deadline.Before(expiry) {
 		expiry = deadline

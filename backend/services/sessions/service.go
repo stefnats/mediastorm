@@ -7,12 +7,14 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
 	"sync"
 	"time"
 
+	"novastream/internal/auth"
 	"novastream/internal/datastore"
 	"novastream/models"
 )
@@ -690,4 +692,74 @@ func NewServiceWithLookup(lookup SessionLookupFunc, sessionDuration time.Duratio
 		sessions:        make(map[string]models.Session),
 		sessionDuration: sessionDuration,
 	}
+}
+
+// RefreshProfilePinSession rotates the confirmed original PG session and only
+// eligible current grants atomically. The legacy Rebind/cache is never used.
+func (s *Service) RefreshProfilePinSession(r *http.Request) (models.Session, error) {
+	if s == nil || s.store == nil {
+		return models.Session{}, ErrInvalidToken
+	}
+	token, err := generateToken()
+	if err != nil {
+		return models.Session{}, err
+	}
+	next, err := s.store.RefreshProfilePinSession(r, token, s.sessionDuration)
+	if err != nil {
+		return models.Session{}, err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	// This local map is only a projection; PG validation remains authoritative.
+	original, _ := auth.GetSession(r)
+	delete(s.sessions, original.Token)
+	s.sessions[next.Token] = next
+	return next, nil
+}
+func (s *Service) LogoutProfilePinSession(r *http.Request) error {
+	if s == nil || s.store == nil {
+		return ErrInvalidToken
+	}
+	if err := s.store.LogoutProfilePinSession(r); err != nil {
+		return err
+	}
+	original, _ := auth.GetSession(r)
+	s.mu.Lock()
+	delete(s.sessions, original.Token)
+	s.mu.Unlock()
+	return nil
+}
+
+// ResolveProfilePinStreamResource preserves the existing party playback check
+// under the original PG request lifetime. It returns only the already bound
+// resource, never a replacement actor/session or a new scope.
+func (s *Service) ResolveProfilePinStreamResource(ctx context.Context, envelope string) (string, error) {
+	if s == nil {
+		return "", ErrSessionNotFound
+	}
+	if err := ctx.Err(); err != nil {
+		return "", err
+	}
+	if !strings.HasPrefix(envelope, watchPartyPlaybackResourcePrefix) {
+		return "", ErrSessionNotFound
+	}
+	var binding watchPartyPlaybackBinding
+	if json.Unmarshal([]byte(strings.TrimPrefix(envelope, watchPartyPlaybackResourcePrefix)), &binding) != nil || binding.RoomID == "" || binding.GuestID == "" || binding.Resource == "" {
+		return "", ErrSessionNotFound
+	}
+	s.mu.RLock()
+	validator := s.watchPartyPlaybackValidator
+	s.mu.RUnlock()
+	if validator == nil {
+		return "", ErrSessionNotFound
+	}
+	bounded, cancel := context.WithTimeout(ctx, 3*time.Second)
+	defer cancel()
+	if err := validator(bounded, binding.RoomID, binding.GuestID, binding.Resource); err != nil {
+		return "", ErrSessionNotFound
+	}
+	if err := bounded.Err(); err != nil {
+		return "", err
+	}
+	return binding.Resource, nil
 }

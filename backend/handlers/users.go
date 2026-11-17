@@ -12,6 +12,7 @@ import (
 	"novastream/config"
 	"novastream/internal/apierror"
 	"novastream/internal/auth"
+	"novastream/internal/datastore"
 	"novastream/internal/parentauth"
 	"novastream/models"
 	"novastream/services/profileunlock"
@@ -62,6 +63,7 @@ type usersService interface {
 var _ usersService = (*users.Service)(nil)
 
 type UsersHandler struct {
+	pgPins              *profileunlock.PGProfilePins
 	Service             usersService
 	accounts            accountPasswordVerifier
 	parentAuthorization *parentauth.Guard
@@ -86,6 +88,13 @@ type pinFingerprinter interface {
 func (h *UsersHandler) SetProfileUnlocks(unlocks profileUnlockIssuer, ttl func() time.Duration) {
 	h.unlocks = unlocks
 	h.unlockTTL = ttl
+}
+
+func (h *UsersHandler) SetPGProfilePins(current *profileunlock.PGProfilePins, ttl ...func() time.Duration) {
+	h.pgPins = current
+	if len(ttl) > 0 {
+		h.unlockTTL = ttl[0]
+	}
 }
 
 // VerifyPinResponse is returned by POST /api/users/{id}/pin/verify.
@@ -544,6 +553,20 @@ func (h *UsersHandler) SetPin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if h.pgPins != nil {
+		r.Body = http.MaxBytesReader(w, r.Body, 64<<10)
+		var body struct {
+			Pin string `json:"pin"`
+		}
+		decoder := json.NewDecoder(r.Body)
+		decoder.DisallowUnknownFields()
+		if err := decoder.Decode(&body); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		h.currentPinChange(w, r, id, body.Pin, false)
+		return
+	}
 	// Verify profile belongs to the logged-in account
 	accountID := auth.GetAccountID(r)
 	if !h.Service.BelongsToAccount(id, accountID) {
@@ -606,6 +629,10 @@ func (h *UsersHandler) requirePinChangeAuthorization(w http.ResponseWriter, r *h
 // currentPinProven reports whether the request carries a valid unlock token,
 // issued by PIN verification in this session, for the profile's current PIN.
 func (h *UsersHandler) currentPinProven(r *http.Request, id string) bool {
+	if h.pgPins != nil {
+		current, err := h.pgPins.Current(r, id)
+		return err == nil && current.Outcome() == profileunlock.PGPinUnlocked
+	}
 	fingerprinter, ok := h.Service.(pinFingerprinter)
 	session, hasSession := auth.GetSession(r)
 	if h.unlocks == nil || !ok || !hasSession {
@@ -623,6 +650,10 @@ func (h *UsersHandler) ClearPin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if h.pgPins != nil {
+		h.currentPinChange(w, r, id, "", true)
+		return
+	}
 	// Verify profile belongs to the logged-in account
 	accountID := auth.GetAccountID(r)
 	if !h.Service.BelongsToAccount(id, accountID) {
@@ -653,6 +684,9 @@ func (h *UsersHandler) ClearPin(w http.ResponseWriter, r *http.Request) {
 
 // VerifyPin verifies a user's PIN.
 func (h *UsersHandler) VerifyPin(w http.ResponseWriter, r *http.Request) {
+	if h.pgPins != nil {
+		r.Body = http.MaxBytesReader(w, r.Body, 64<<10)
+	}
 	vars := mux.Vars(r)
 	id := strings.TrimSpace(vars["userID"])
 	if id == "" {
@@ -670,6 +704,46 @@ func (h *UsersHandler) VerifyPin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if h.pgPins != nil {
+		ack, ok := h.Service.(profileunlock.PinIssuanceAcknowledger)
+		if !ok {
+			apierror.Write(w, http.StatusServiceUnavailable, "profile_unavailable", "profile access unavailable")
+			return
+		}
+		var ttl time.Duration
+		if h.unlockTTL != nil {
+			ttl = h.unlockTTL()
+		}
+		token, expiry, err := h.pgPins.Verify(r, id, body.Pin, ttl, ack)
+		if r.Context().Err() != nil {
+			return
+		}
+		if err != nil {
+			switch {
+			case errors.Is(err, datastore.ErrPGPinCredential):
+				code := apierror.CodePinInvalid
+				if strings.TrimSpace(body.Pin) == "" {
+					code = apierror.CodePinRequired
+				}
+				apierror.Write(w, http.StatusUnauthorized, code, users.ErrPinInvalid.Error())
+			case errors.Is(err, profileunlock.ErrPGProfileNotFound):
+				apierror.Write(w, http.StatusNotFound, "profile_not_found", "profile not found")
+			case errors.Is(err, datastore.ErrPGPinChanged), errors.Is(err, datastore.ErrUserWriteConflict):
+				apierror.Write(w, http.StatusConflict, "profile_context_changed", "profile changed; try again")
+			default:
+				apierror.Write(w, http.StatusServiceUnavailable, "profile_unavailable", "profile access unavailable")
+			}
+			return
+		}
+		response := VerifyPinResponse{Valid: true, UnlockToken: token}
+		if token != "" {
+			response.ExpiresAt = expiry.UTC().Format(time.RFC3339)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("Cache-Control", "private, no-store")
+		_ = json.NewEncoder(w).Encode(response)
+		return
+	}
 	err := h.Service.VerifyPin(id, body.Pin)
 	if err != nil {
 		switch {
@@ -1506,4 +1580,57 @@ func (h *UsersHandler) RemoveKidsAllowedList(w http.ResponseWriter, r *http.Requ
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(user)
+}
+
+func (h *UsersHandler) currentPinChange(w http.ResponseWriter, r *http.Request, id, pin string, clearing bool) {
+	intent, err := h.pgPins.PrepareOwnedPinChange(r, id, pin, clearing)
+	if err != nil {
+		writeCurrentPinChangeError(w, r, err)
+		return
+	}
+	defer intent.Close()
+	needsParent, err := intent.NeedsParent()
+	if err != nil {
+		writeCurrentPinChangeError(w, r, err)
+		return
+	}
+	if needsParent && !h.parentAuthorization.Require(w, r) {
+		return
+	}
+	if err = intent.Verify(); err != nil {
+		writeCurrentPinChangeError(w, r, err)
+		return
+	}
+	persistence, ok := h.Service.(profileunlock.PinChangePersistence)
+	if !ok {
+		writeCurrentPinChangeError(w, r, datastore.ErrPGPinUnavailable)
+		return
+	}
+	user, err := persistence.CommitPGPinChange(r.Context(), intent)
+	if r.Context().Err() != nil {
+		return
+	}
+	if err != nil {
+		writeCurrentPinChangeError(w, r, err)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(user)
+}
+func writeCurrentPinChangeError(w http.ResponseWriter, r *http.Request, err error) {
+	if r.Context().Err() != nil {
+		return
+	}
+	switch {
+	case errors.Is(err, datastore.ErrProfilePinAccessNotFound), errors.Is(err, profileunlock.ErrPGProfileNotFound):
+		apierror.Write(w, http.StatusNotFound, "profile_not_found", "profile not found")
+	case errors.Is(err, datastore.ErrPGPinRequired), errors.Is(err, datastore.ErrPGPinTooShort):
+		http.Error(w, err.Error(), http.StatusBadRequest)
+	case errors.Is(err, datastore.ErrPGPinParentRequired):
+		apierror.Write(w, http.StatusForbidden, parentauth.RequiredCode, datastore.ErrPGPinParentRequired.Error())
+	case errors.Is(err, datastore.ErrPGPinChanged):
+		apierror.Write(w, http.StatusConflict, "profile_context_changed", "profile changed; try again")
+	default:
+		apierror.Write(w, http.StatusServiceUnavailable, "profile_unavailable", "profile access unavailable")
+	}
 }
