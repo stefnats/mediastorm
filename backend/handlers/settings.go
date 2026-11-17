@@ -569,6 +569,9 @@ func staticAssetVersion(defaultStatic string) string {
 // redactSABImportPreviewRoots works on a detached Settings value. The private
 // server mapping is write-only in both JSON and template settings projections.
 func redactSABImportPreviewRoots(s config.Settings) config.Settings {
+	if s.SABnzbd.ImportStageTargetRoot != "" {
+		s.SABnzbd.ImportStageTargetRoot = redactedPlaceholder
+	}
 	if s.SABnzbd.ImportPreviewRemoteRoot != "" {
 		s.SABnzbd.ImportPreviewRemoteRoot = redactedPlaceholder
 	}
@@ -818,6 +821,7 @@ func preserveRedactedFields(incoming *config.Settings, existing *config.Settings
 
 	// SABnzbd
 	restore(&incoming.SABnzbd.FallbackAPIKey, existing.SABnzbd.FallbackAPIKey)
+	restore(&incoming.SABnzbd.ImportStageTargetRoot, existing.SABnzbd.ImportStageTargetRoot)
 	restore(&incoming.SABnzbd.ImportPreviewRemoteRoot, existing.SABnzbd.ImportPreviewRemoteRoot)
 	restore(&incoming.SABnzbd.ImportPreviewLocalRoot, existing.SABnzbd.ImportPreviewLocalRoot)
 

@@ -1134,6 +1134,7 @@ func TestOpenAPIContract(t *testing.T) {
 	t.Run("usenet_fallback_status", func(t *testing.T) { sabFallbackOpenAPIContract(t, v) })
 	t.Run("usenet_fallback_list", func(t *testing.T) { sabFallbackListOpenAPIContract(t, v) })
 	t.Run("sab_import_preview", func(t *testing.T) { sabImportPreviewOpenAPIContract(t, v) })
+	t.Run("sab_managed_copy", func(t *testing.T) { managedCopyOpenAPIContract(t, v) })
 
 	t.Run("loved_stored_language", func(t *testing.T) { lovedStoredLanguageOpenAPIContract(t, v) })
 	t.Run("collection_cached", func(t *testing.T) { collectionCachedOpenAPIContract(t, v) })
