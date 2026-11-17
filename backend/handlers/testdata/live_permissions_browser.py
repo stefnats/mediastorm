@@ -20,6 +20,19 @@ with sync_playwright() as p:
         response=context.request.get(options.base_url+'/account/api/profiles');assert response.status==200
         return response.json()
     def current():return next(profile for profile in profiles()if profile['id']==info['adult'])
+    def confirm_account_password(page, prompt, route):
+        prompt.locator('input[type=password]').fill(password)
+        confirm=prompt.get_by_role('button',name='Confirm',exact=True)
+        if route=='/account':
+            # The dashboard reloads itself after closing the saved dialog.
+            # Observe that real navigation before the test requests another one.
+            with page.expect_navigation(wait_until='load') as navigation:
+                confirm.click()
+            response=navigation.value
+            assert response is not None and response.status==200
+            assert urlsplit(response.url).path==route
+        else:
+            confirm.click()
     assert all(profile['id']!=info['foreign']for profile in profiles())
     denied=context.request.put(options.base_url+'/account/api/profiles/live-permissions?profileId='+info['foreign'],headers={'X-Account-Password':password},data={'allowLiveTakeover':True,'allowRecordingInterruption':True})
     assert denied.status==404
@@ -50,7 +63,7 @@ with sync_playwright() as p:
             dialog.get_by_role('status').filter(has_text='could not be saved').wait_for()
             assert current()['allowLiveTakeover'] is False
             dialog.get_by_role('button',name='Save IPTV rights').click();prompt.wait_for()
-            prompt.locator('input[type=password]').fill(password);prompt.get_by_role('button',name='Confirm',exact=True).click()
+            confirm_account_password(page,prompt,route)
             dialog.wait_for(state='detached')
             page.wait_for_function('''id=>Array.from(document.querySelectorAll('[data-profile-id]')).some(el=>el.dataset.profileId===id)''',arg=info['adult'])
             assert current()['allowLiveTakeover'] is True and current()['allowRecordingInterruption'] is False
@@ -67,7 +80,7 @@ with sync_playwright() as p:
             assert dialog.locator('[name=allowRecordingInterruption]').is_checked()
             page.unroute(pattern)
             dialog.get_by_role('button',name='Save IPTV rights').click();prompt=page.get_by_role('dialog',name='Confirm account password');prompt.wait_for()
-            prompt.locator('input[type=password]').fill(password);prompt.get_by_role('button',name='Confirm',exact=True).click();dialog.wait_for(state='detached')
+            confirm_account_password(page,prompt,route);dialog.wait_for(state='detached')
             assert current()['allowLiveTakeover'] is False and current()['allowRecordingInterruption'] is True
             page.reload();open_rights(info['child'])
             dialog=page.get_by_role('dialog',name='IPTV takeover rights')
