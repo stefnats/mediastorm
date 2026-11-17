@@ -304,3 +304,321 @@ func readProfileUnlockTuple(ctx context.Context, q parentMutationQuerier, origin
 	deadline := parentMutationMin(original.ExpiresAt, &session.Expiry, actor.Expiry, owner.Expiry, &grant.Expiry)
 	return v, deadline, nil
 }
+
+// ProfilePinAccessOutcome describes one checked storage observation. These are
+// not wire statuses or lasting permissions; unknown/zero never means allowed.
+type ProfilePinAccessOutcome uint8
+
+const (
+	ProfilePinUnavailable ProfilePinAccessOutcome = iota
+	ProfilePinNotFound
+	ProfilePinLocked
+	ProfilePinNoPin
+	ProfilePinUnlocked
+)
+
+var (
+	ErrProfilePinAccessUnavailable = errors.New("current profile PIN access unavailable")
+	ErrProfilePinAccessChanged     = errors.New("current profile PIN access changed")
+	ErrProfilePinAccessUsed        = errors.New("current profile PIN access already retired")
+)
+
+const maxProfilePinAccessTokens = 32
+const profilePinAccessTokenBytes = 46
+const maxProfilePinAccessCredentialBytes = maxProfilePinAccessTokens * profilePinAccessTokenBytes
+
+// ProfilePinAccessReader is separate from the existing token-only reader. It
+// also observes a currently owned profile with no PIN, without trusting cached
+// HasPin=false. It is not installed in public middleware or mutation handlers.
+type ProfilePinAccessReader struct {
+	self  *ProfilePinAccessReader
+	store *DataStore
+}
+
+func NewProfilePinAccessReader(store *DataStore) *ProfilePinAccessReader {
+	reader := &ProfilePinAccessReader{store: store}
+	reader.self = reader
+	return reader
+}
+func (r *ProfilePinAccessReader) available() bool {
+	return r != nil && r.self == r && r.store != nil && r.store.pool != nil
+}
+
+type profilePinAccessTuple struct {
+	frameCurrent                         bool
+	session, actor, profile, owner       parentMutationRow
+	grants                               json.RawMessage
+	profileGeneration, sessionGeneration int64
+}
+type profilePinAccessRead struct {
+	mu          sync.Mutex
+	reader      *ProfilePinAccessReader
+	self        *ProfilePinAccessState
+	ctx         context.Context
+	cancel      context.CancelFunc
+	original    models.Session
+	targetID    string
+	tokenHashes []string
+	tuple       profilePinAccessTuple
+	outcome     ProfilePinAccessOutcome
+	used        bool
+}
+
+// ProfilePinAccessState carries private current rows and generations. It has no
+// raw credential, owner, PIN hash, child-policy fact or usable grant accessor.
+type ProfilePinAccessState struct{ state *profilePinAccessRead }
+
+func (*ProfilePinAccessReader) MarshalJSON() ([]byte, error) { return []byte("null"), nil }
+func (*ProfilePinAccessState) MarshalJSON() ([]byte, error)  { return []byte("null"), nil }
+func (*ProfilePinAccessReader) Format(f fmt.State, _ rune) {
+	_, _ = f.Write([]byte("ProfilePinAccessReader(opaque)"))
+}
+func (*ProfilePinAccessState) Format(f fmt.State, _ rune) {
+	_, _ = f.Write([]byte("ProfilePinAccessState(opaque)"))
+}
+func (v *ProfilePinAccessState) Close() {
+	if v == nil || v.state == nil {
+		return
+	}
+	s := v.state
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.self == v {
+		s.used = true
+		s.cancel()
+	}
+}
+
+// Read binds the original full authenticated frame before any deferred work.
+// Caller input is only the target and presented credentials, never a role,
+// fingerprint, verified boolean or policy. Client/role mismatches are not fixed.
+func (r *ProfilePinAccessReader) Read(request *http.Request, targetID string, rawTokens []string) (*ProfilePinAccessState, error) {
+	if !r.available() || request == nil || !parentMutationID(targetID) || len(rawTokens) > maxProfilePinAccessTokens {
+		return nil, ErrProfilePinAccessUnavailable
+	}
+	if err := request.Context().Err(); err != nil {
+		return nil, err
+	}
+	original, ok := auth.GetSession(request)
+	if !ok || !parentMutationID(original.Token) || !parentMutationID(original.AccountID) || auth.GetAccountID(request) != original.AccountID || auth.IsMaster(request) != original.IsMaster || original.Scope != "" || original.ScopeResource != "" || !original.ExpiresAt.After(time.Now()) {
+		return nil, ErrProfilePinAccessChanged
+	}
+	hashes := make([]string, 0, len(rawTokens))
+	seen := map[string]bool{}
+	credentialBytes := 0
+	for _, raw := range rawTokens {
+		if len(raw) > maxProfilePinAccessCredentialBytes-credentialBytes {
+			return nil, ErrProfilePinAccessUnavailable
+		}
+		credentialBytes += len(raw)
+		if len(raw) != profilePinAccessTokenBytes || !profileUnlockCredential(raw) {
+			continue
+		}
+		hash := profileUnlockDigest(raw)
+		if !seen[hash] {
+			hashes = append(hashes, hash)
+			seen[hash] = true
+		}
+	}
+	ctx, cancel := context.WithDeadline(request.Context(), parentMutationMin(time.Now().Add(profileUnlockStateBudget), &original.ExpiresAt))
+	tuple, outcome, deadline, err := readProfilePinAccess(ctx, r.store.pool, original, targetID, hashes)
+	if err != nil {
+		cancel()
+		return nil, err
+	}
+	bounded, stop := context.WithDeadline(ctx, deadline)
+	if err = bounded.Err(); err != nil {
+		stop()
+		cancel()
+		return nil, err
+	}
+	state := &profilePinAccessRead{reader: r, ctx: bounded, cancel: func() { stop(); cancel() }, original: original, targetID: targetID, tokenHashes: hashes, tuple: tuple, outcome: outcome}
+	value := &ProfilePinAccessState{state: state}
+	state.self = value
+	return value, nil
+}
+
+// Check consumes exactly one snapshot before IO. An originally unowned/missing
+// target remains the same NotFound denial even if it is later reassigned; no
+// changed target can turn an earlier denial into an allowance. Owned snapshots
+// require unchanged rows, generations and classification at the final query.
+func (r *ProfilePinAccessReader) Check(value *ProfilePinAccessState) (ProfilePinAccessOutcome, error) {
+	if !r.available() || value == nil || value.state == nil {
+		return ProfilePinUnavailable, ErrProfilePinAccessUsed
+	}
+	s := value.state
+	s.mu.Lock()
+	if s.reader != r || s.self != value || s.used {
+		s.mu.Unlock()
+		return ProfilePinUnavailable, ErrProfilePinAccessUsed
+	}
+	s.used = true
+	s.mu.Unlock()
+	defer s.cancel()
+	if err := s.ctx.Err(); err != nil {
+		return ProfilePinUnavailable, err
+	}
+	current, outcome, _, err := readProfilePinAccess(s.ctx, r.store.pool, s.original, s.targetID, s.tokenHashes)
+	if cancelled := s.ctx.Err(); cancelled != nil {
+		return ProfilePinUnavailable, cancelled
+	}
+	// A successful current auth frame is distinct from target-local errors.
+	// No new target/PIN/owner state may disclose or promote an original denial.
+	if s.outcome == ProfilePinNotFound && current.frameCurrent {
+		if !sameParentMutationRow(s.tuple.session, current.session) || !sameParentMutationRow(s.tuple.actor, current.actor) {
+			return ProfilePinUnavailable, ErrProfilePinAccessChanged
+		}
+		return ProfilePinNotFound, nil
+	}
+	if err != nil {
+		return ProfilePinUnavailable, err
+	}
+	if !sameParentMutationRow(s.tuple.session, current.session) || !sameParentMutationRow(s.tuple.actor, current.actor) {
+		return ProfilePinUnavailable, ErrProfilePinAccessChanged
+	}
+	if s.outcome != outcome || !sameParentMutationRow(s.tuple.profile, current.profile) || !sameParentMutationRow(s.tuple.owner, current.owner) || string(s.tuple.grants) != string(current.grants) || s.tuple.profileGeneration != current.profileGeneration || s.tuple.sessionGeneration != current.sessionGeneration {
+		return ProfilePinUnavailable, ErrProfilePinAccessChanged
+	}
+	return outcome, nil
+}
+
+// A single query includes even a missing target and its absence of a PIN.
+// Candidate grants are bounded and limited to this exact account/session/target;
+// unrelated credential rows never determine profile ownership or PIN presence.
+func readProfilePinAccess(ctx context.Context, q parentMutationQuerier, original models.Session, targetID string, hashes []string) (profilePinAccessTuple, ProfilePinAccessOutcome, time.Time, error) {
+	var v profilePinAccessTuple
+	var now time.Time
+	fail := func(err error) (profilePinAccessTuple, ProfilePinAccessOutcome, time.Time, error) {
+		return v, ProfilePinUnavailable, now, err
+	}
+	if err := ctx.Err(); err != nil {
+		return fail(err)
+	}
+	err := q.QueryRow(ctx, `SELECT
+        to_jsonb(s),concat(s.tableoid::oid,':',s.xmin::text,':',s.ctid::text),
+        to_jsonb(a),concat(a.tableoid::oid,':',a.xmin::text,':',a.ctid::text),
+        COALESCE(to_jsonb(u),'null'::jsonb),CASE WHEN u.id IS NULL THEN '' ELSE concat(u.tableoid::oid,':',u.xmin::text,':',u.ctid::text) END,
+        COALESCE(to_jsonb(o),'null'::jsonb),CASE WHEN o.id IS NULL THEN '' ELSE concat(o.tableoid::oid,':',o.xmin::text,':',o.ctid::text) END,
+        COALESCE((SELECT jsonb_agg(jsonb_build_object('row',to_jsonb(g),'version',concat(g.tableoid::oid,':',g.xmin::text,':',g.ctid::text)) ORDER BY g.token_hash)
+            FROM profile_unlocks g WHERE g.token_hash=ANY($3::text[]) AND g.profile_id=$2 AND g.account_id=s.account_id AND g.session_hash=$4),'[]'::jsonb),
+        COALESCE(p.generation,0),COALESCE(x.generation,0),clock_timestamp()
+        FROM sessions s JOIN accounts a ON a.id=s.account_id
+        LEFT JOIN users u ON u.id=$2 LEFT JOIN accounts o ON o.id=u.account_id
+        LEFT JOIN profile_unlock_revocations p ON p.scope='profile' AND p.scope_key=$2
+        LEFT JOIN profile_unlock_revocations x ON x.scope='session' AND x.scope_key=$4
+        WHERE s.token=$1`, original.Token, targetID, hashes, profileUnlockDigest(original.Token)).Scan(
+		&v.session.raw, &v.session.version, &v.actor.raw, &v.actor.version,
+		&v.profile.raw, &v.profile.version, &v.owner.raw, &v.owner.version, &v.grants,
+		&v.profileGeneration, &v.sessionGeneration, &now)
+	if err := ctx.Err(); err != nil {
+		return fail(err)
+	}
+	if err != nil {
+		return fail(ErrProfilePinAccessUnavailable)
+	}
+	var session struct {
+		Token     string    `json:"token"`
+		AccountID string    `json:"account_id"`
+		ClientID  string    `json:"client_id"`
+		Scope     string    `json:"scope"`
+		Resource  string    `json:"scope_resource"`
+		Created   time.Time `json:"created_at"`
+		Expiry    time.Time `json:"expires_at"`
+	}
+	var actor struct {
+		ID     string     `json:"id"`
+		Master bool       `json:"is_master"`
+		Expiry *time.Time `json:"expires_at"`
+	}
+	var profile *struct {
+		ID        string `json:"id"`
+		AccountID string `json:"account_id"`
+		PinHash   string `json:"pin_hash"`
+	}
+	var owner *struct {
+		ID     string     `json:"id"`
+		Expiry *time.Time `json:"expires_at"`
+	}
+	if !profilePinRequiredFields(v.session.raw, []string{"token", "account_id", "client_id", "scope", "scope_resource", "created_at", "expires_at"}, false) ||
+		!profilePinRequiredFields(v.actor.raw, []string{"id", "is_master", "expires_at"}, true) ||
+		json.Unmarshal(v.session.raw, &session) != nil || json.Unmarshal(v.actor.raw, &actor) != nil {
+		return fail(ErrProfilePinAccessUnavailable)
+	}
+	if session.Token != original.Token || session.AccountID != original.AccountID || actor.ID != original.AccountID || session.ClientID != original.ClientID || actor.Master != original.IsMaster || session.Scope != "" || session.Resource != "" || !session.Created.Equal(original.CreatedAt) || !session.Expiry.Equal(original.ExpiresAt) || !session.Expiry.After(now) || actor.Expiry != nil && !actor.Expiry.After(now) || v.profileGeneration < 0 || v.sessionGeneration < 0 {
+		return fail(ErrProfilePinAccessChanged)
+	}
+	v.frameCurrent = true
+	deadline := parentMutationMin(original.ExpiresAt, &session.Expiry, actor.Expiry)
+	if json.Unmarshal(v.profile.raw, &profile) != nil || json.Unmarshal(v.owner.raw, &owner) != nil {
+		return fail(ErrProfilePinAccessUnavailable)
+	}
+	if profile == nil || profile.ID != targetID || (profile.AccountID != actor.ID && !actor.Master) {
+		return v, ProfilePinNotFound, deadline, nil
+	}
+	if !profilePinRequiredFields(v.profile.raw, []string{"id", "account_id", "pin_hash"}, false) ||
+		!profilePinRequiredFields(v.owner.raw, []string{"id", "expires_at"}, true) ||
+		profile.AccountID == "" || owner == nil || owner.ID != profile.AccountID || owner.Expiry != nil && !owner.Expiry.After(now) {
+		return fail(ErrProfilePinAccessUnavailable)
+	}
+	deadline = parentMutationMin(deadline, owner.Expiry)
+	if profile.PinHash == "" {
+		return v, ProfilePinNoPin, deadline, nil
+	}
+	if _, err = bcrypt.Cost([]byte(profile.PinHash)); err != nil {
+		return fail(ErrProfilePinAccessUnavailable)
+	}
+	var grants []struct {
+		Row     json.RawMessage `json:"row"`
+		Version string          `json:"version"`
+	}
+	if json.Unmarshal(v.grants, &grants) != nil {
+		return fail(ErrProfilePinAccessUnavailable)
+	}
+	digest := sha256.Sum256([]byte(profile.PinHash))
+	fingerprint := hex.EncodeToString(digest[:8])
+	var latestValid time.Time
+	for _, entry := range grants {
+		var grant struct {
+			TokenHash   string    `json:"token_hash"`
+			SessionHash string    `json:"session_hash"`
+			AccountID   string    `json:"account_id"`
+			ProfileID   string    `json:"profile_id"`
+			Fingerprint string    `json:"pin_fingerprint"`
+			Created     time.Time `json:"created_at"`
+			Expiry      time.Time `json:"expires_at"`
+		}
+		if !profilePinRequiredFields(entry.Row, []string{"token_hash", "session_hash", "account_id", "profile_id", "pin_fingerprint", "created_at", "expires_at"}, false) ||
+			json.Unmarshal(entry.Row, &grant) != nil || entry.Version == "" {
+			return fail(ErrProfilePinAccessUnavailable)
+		}
+		if grant.AccountID != actor.ID || grant.ProfileID != targetID || grant.SessionHash != profileUnlockDigest(original.Token) || !profileUnlockHash(grant.TokenHash) {
+			return fail(ErrProfilePinAccessUnavailable)
+		}
+		if grant.Created.After(now) || !grant.Expiry.After(grant.Created) || !grant.Expiry.After(now) || subtle.ConstantTimeCompare([]byte(grant.Fingerprint), []byte(fingerprint)) != 1 {
+			continue
+		}
+		if grant.Expiry.After(latestValid) {
+			latestValid = grant.Expiry
+		}
+	}
+	if latestValid.IsZero() {
+		return v, ProfilePinLocked, deadline, nil
+	}
+	return v, ProfilePinUnlocked, parentMutationMin(deadline, &latestValid), nil
+}
+
+// Missing fields must never turn into empty-PIN/full-scope/unlimited-expiry
+// defaults. Only account expires_at may be explicitly null in a current row.
+func profilePinRequiredFields(raw []byte, required []string, nullableAccountExpiry bool) bool {
+	var fields map[string]json.RawMessage
+	if json.Unmarshal(raw, &fields) != nil || fields == nil {
+		return false
+	}
+	for _, name := range required {
+		value, present := fields[name]
+		if !present || string(value) == "null" && !(nullableAccountExpiry && name == "expires_at") {
+			return false
+		}
+	}
+	return true
+}
