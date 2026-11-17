@@ -1140,6 +1140,7 @@ func TestOpenAPIContract(t *testing.T) {
 	t.Run("collection_cached", func(t *testing.T) { collectionCachedOpenAPIContract(t, v) })
 
 	t.Run("hls_zero_restart", func(t *testing.T) { hlsZeroRestartOpenAPIContract(t, v) })
+	t.Run("parent_mode_confirmation", func(t *testing.T) { parentModeOpenAPIContract(t, v) })
 
 	t.Run("coverage", func(t *testing.T) {
 		covered := v.Covered()

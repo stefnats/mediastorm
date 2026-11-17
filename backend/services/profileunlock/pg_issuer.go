@@ -2,9 +2,14 @@ package profileunlock
 
 import (
 	"context"
+	"crypto/rand"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"net/http"
+	"strings"
+	"sync"
 	"time"
 
 	"novastream/internal/datastore"
@@ -96,24 +101,29 @@ func (v *PGPinAccess) Check(state *PGPinAccessState) (PGPinAccessOutcome, error)
 // it does not enable PIN policy; callers retain the existing security setting.
 // Once selected, storage errors never delegate to the legacy JSON/cache path.
 type PGProfilePins struct {
-	self          *PGProfilePins
-	store         *datastore.DataStore
-	issuer        *PGPinIssuer
-	access        *PGPinAccess
-	scopeSessions *sessions.Service
+	self            *PGProfilePins
+	store           *datastore.DataStore
+	issuer          *PGPinIssuer
+	access          *PGPinAccess
+	scopeSessions   *sessions.Service
+	parentModeMu    *sync.Mutex
+	parentModes     map[string]*parentModeEntry
+	parentModeBytes int
 }
 
 func NewPGProfilePins(store *datastore.DataStore, scoped ...*sessions.Service) *PGProfilePins {
 	reader := &PGPinAccess{core: datastore.NewBoundProfilePinAccessReader(store)}
 	reader.self = reader
-	value := &PGProfilePins{store: store, issuer: NewPGPinIssuer(store), access: reader}
+	value := &PGProfilePins{store: store, issuer: NewPGPinIssuer(store), access: reader, parentModeMu: &sync.Mutex{}}
 	value.self = value
 	if len(scoped) > 0 {
 		value.scopeSessions = scoped[0]
 	}
 	return value
 }
-func (v *PGProfilePins) valid() bool                { return v != nil && v.self == v && v.store != nil }
+func (v *PGProfilePins) valid() bool {
+	return v != nil && v.self == v && v.store != nil && v.parentModeMu != nil
+}
 func (*PGProfilePins) MarshalJSON() ([]byte, error) { return []byte("null"), nil }
 func (*PGProfilePins) Format(f fmt.State, _ rune)   { _, _ = f.Write([]byte("PGProfilePins(opaque)")) }
 func (v *PGProfilePins) Authenticate(r *http.Request, token, clientID string) (*http.Request, context.CancelFunc, error) {
@@ -315,4 +325,142 @@ func (v *PGPinObservation) Owner() (models.Account, error) {
 		result.ExpiresAt = &copy
 	}
 	return result, nil
+}
+
+const ParentModeIntentHeader = datastore.ParentModeIntentHeader
+const parentModeMaximumEntries = 512
+const parentModeMaximumActorEntries = 8
+const parentModeMaximumBytes = 4 << 20
+
+type ParentModeIntent = datastore.ParentModeIntent
+type parentModeEntry struct {
+	intent   *ParentModeIntent
+	actor    string
+	bytes    int
+	deadline time.Time
+	timer    *time.Timer
+}
+
+func parentModeTokenKey(token string) (string, bool) {
+	if len(token) != 68 || !strings.HasPrefix(token, "pmi_") {
+		return "", false
+	}
+	raw, err := hex.DecodeString(token[4:])
+	if err != nil || len(raw) != 32 || hex.EncodeToString(raw) != token[4:] {
+		return "", false
+	}
+	hash := sha256.Sum256([]byte(token))
+	return hex.EncodeToString(hash[:]), true
+}
+func (v *PGProfilePins) ParentModeChallenge(r *http.Request, target, mode string) (string, error) {
+	if !v.valid() || r == nil || r.URL == nil {
+		return "", datastore.ErrParentModeUnavailable
+	}
+	intent, err := v.store.PrepareParentMode(r, target, mode, RequestTokens(r))
+	if err != nil {
+		return "", err
+	}
+	actor, size, deadline, err := v.store.ParentModeBudget(intent)
+	if err != nil {
+		intent.Close()
+		return "", err
+	}
+	var random [32]byte
+	if _, err = rand.Read(random[:]); err != nil {
+		intent.Close()
+		return "", datastore.ErrParentModeUnavailable
+	}
+	token := "pmi_" + hex.EncodeToString(random[:])
+	key, _ := parentModeTokenKey(token)
+	v.parentModeMu.Lock()
+	defer v.parentModeMu.Unlock()
+	if v.parentModes == nil {
+		v.parentModes = map[string]*parentModeEntry{}
+	}
+	count := 0
+	for existingKey, entry := range v.parentModes {
+		if !entry.deadline.After(time.Now()) {
+			delete(v.parentModes, existingKey)
+			v.parentModeBytes -= entry.bytes
+			entry.timer.Stop()
+			entry.intent.Close()
+			continue
+		}
+		if entry.actor == actor {
+			count++
+		}
+	}
+	if len(v.parentModes) >= parentModeMaximumEntries || count >= parentModeMaximumActorEntries || size > parentModeMaximumBytes-v.parentModeBytes || v.parentModes[key] != nil || r.Context().Err() != nil || !deadline.After(time.Now()) {
+		intent.Close()
+		return "", datastore.ErrParentModeUnavailable
+	}
+	entry := &parentModeEntry{intent: intent, actor: actor, bytes: size, deadline: deadline}
+	v.parentModes[key] = entry
+	v.parentModeBytes += size
+	entry.timer = time.AfterFunc(time.Until(deadline), func() {
+		v.parentModeMu.Lock()
+		defer v.parentModeMu.Unlock()
+		if v.parentModes[key] == entry {
+			delete(v.parentModes, key)
+			v.parentModeBytes -= entry.bytes
+			entry.intent.Close()
+		}
+	})
+	return token, nil
+}
+func (v *PGProfilePins) ClaimParentMode(r *http.Request, target, mode, token string) (*ParentModeIntent, error) {
+	if !v.valid() || r == nil || r.URL == nil {
+		return nil, datastore.ErrParentModeUnavailable
+	}
+	key, valid := parentModeTokenKey(token)
+	if !valid {
+		return nil, datastore.ErrParentModeChanged
+	}
+	v.parentModeMu.Lock()
+	entry := v.parentModes[key]
+	if entry != nil {
+		delete(v.parentModes, key)
+		v.parentModeBytes -= entry.bytes
+		entry.timer.Stop()
+	}
+	v.parentModeMu.Unlock()
+	if entry == nil {
+		return nil, datastore.ErrParentModeChanged
+	}
+	if !entry.deadline.After(time.Now()) {
+		entry.intent.Close()
+		return nil, datastore.ErrParentModeChanged
+	}
+	if err := v.store.BindParentModeRetry(r, entry.intent, target, mode, RequestTokens(r)); err != nil {
+		entry.intent.Close()
+		return nil, err
+	}
+	return entry.intent, nil
+}
+func (v *PGProfilePins) ImmediateParentMode(r *http.Request, target, mode string) (*ParentModeIntent, error) {
+	if !v.valid() || r == nil || r.URL == nil {
+		return nil, datastore.ErrParentModeUnavailable
+	}
+	intent, err := v.store.PrepareParentMode(r, target, mode, RequestTokens(r))
+	if err != nil {
+		return nil, err
+	}
+	if err = v.store.BindParentModeRetry(r, intent, target, mode, RequestTokens(r)); err != nil {
+		intent.Close()
+		return nil, err
+	}
+	return intent, nil
+}
+func (v *PGProfilePins) VerifyParentMode(r *http.Request, intent *ParentModeIntent) error {
+	if !v.valid() {
+		return datastore.ErrParentModeUnavailable
+	}
+	return v.store.VerifyParentModePassword(r, intent)
+}
+
+func (v *PGProfilePins) BoundParentModeRequest(r *http.Request, intent *ParentModeIntent) (*http.Request, error) {
+	if !v.valid() {
+		return nil, datastore.ErrParentModeUnavailable
+	}
+	return v.store.BoundParentModeRequest(r, intent)
 }
