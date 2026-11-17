@@ -1402,6 +1402,19 @@ func main() {
 		fallbackAccounts = store.Accounts()
 	}
 	usenetFallbackHandler := handlers.NewUsenetFallbackHandler(nzbSystem.ImporterService(), sessionsService, fallbackAccounts)
+	usenetFallbackHandler.SetImportPreviewSettings(func(ctx context.Context) (config.SABnzbdSettings, error) {
+		if ctx.Err() != nil {
+			return config.SABnzbdSettings{}, ctx.Err()
+		}
+		current, err := cfgManager.Load()
+		if err != nil {
+			return config.SABnzbdSettings{}, err
+		}
+		if ctx.Err() != nil {
+			return config.SABnzbdSettings{}, ctx.Err()
+		}
+		return current.SABnzbd, nil
+	})
 	registerUsenetFallbackRoutes(r, adminUIHandler, usenetFallbackHandler)
 
 	r.HandleFunc("/admin/api/hardware-acceleration/status", adminUIHandler.RequireMasterAuth(adminUIHandler.GetHardwareAccelerationStatus)).Methods(http.MethodGet)
@@ -2923,4 +2936,5 @@ func registerUsenetFallbackRoutes(r *mux.Router, admin *handlers.AdminUIHandler,
 	r.HandleFunc("/admin/api/usenet/fallback", admin.RequireAuth(fallback.List)).Methods(http.MethodGet)
 	r.HandleFunc("/admin/api/usenet/fallback/{queueID}", admin.RequireAuth(fallback.Get)).Methods(http.MethodGet)
 	r.HandleFunc("/admin/api/usenet/fallback/{queueID}/refresh", admin.RequireAuth(recordingWebOrigin(fallback.Refresh))).Methods(http.MethodPost)
+	r.HandleFunc("/admin/api/usenet/fallback/{queueID}/import-preview", admin.RequireAuth(recordingWebOrigin(fallback.Preview))).Methods(http.MethodPost)
 }

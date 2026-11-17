@@ -566,9 +566,22 @@ func staticAssetVersion(defaultStatic string) string {
 	return fmt.Sprintf("%x", sum)[:12]
 }
 
+// redactSABImportPreviewRoots works on a detached Settings value. The private
+// server mapping is write-only in both JSON and template settings projections.
+func redactSABImportPreviewRoots(s config.Settings) config.Settings {
+	if s.SABnzbd.ImportPreviewRemoteRoot != "" {
+		s.SABnzbd.ImportPreviewRemoteRoot = redactedPlaceholder
+	}
+	if s.SABnzbd.ImportPreviewLocalRoot != "" {
+		s.SABnzbd.ImportPreviewLocalRoot = redactedPlaceholder
+	}
+	return s
+}
+
 // redactSettings replaces sensitive credentials with a placeholder so
 // non-master users cannot read API keys, passwords, or tokens.
 func redactSettings(s *config.Settings) {
+	*s = redactSABImportPreviewRoots(*s)
 	const redacted = "••••••••"
 	mask := func(v *string) {
 		if *v != "" {
@@ -805,6 +818,8 @@ func preserveRedactedFields(incoming *config.Settings, existing *config.Settings
 
 	// SABnzbd
 	restore(&incoming.SABnzbd.FallbackAPIKey, existing.SABnzbd.FallbackAPIKey)
+	restore(&incoming.SABnzbd.ImportPreviewRemoteRoot, existing.SABnzbd.ImportPreviewRemoteRoot)
+	restore(&incoming.SABnzbd.ImportPreviewLocalRoot, existing.SABnzbd.ImportPreviewLocalRoot)
 
 	// Subtitles
 	restore(&incoming.Subtitles.OpenSubtitlesPassword, existing.Subtitles.OpenSubtitlesPassword)

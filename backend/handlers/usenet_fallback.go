@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/gorilla/mux"
+	"novastream/config"
 	"novastream/internal/auth"
 	"novastream/internal/importer"
 	"novastream/models"
@@ -27,9 +28,10 @@ type fallbackAccountReader interface {
 	Get(context.Context, string) (*models.Account, error)
 }
 type UsenetFallbackHandler struct {
-	service  usenetFallbackService
-	sessions fallbackSessionReader
-	accounts fallbackAccountReader
+	service         usenetFallbackService
+	sessions        fallbackSessionReader
+	accounts        fallbackAccountReader
+	previewSettings importer.SABImportPreviewSettings
 }
 
 func NewUsenetFallbackHandler(service usenetFallbackService, sessions fallbackSessionReader, accounts fallbackAccountReader) *UsenetFallbackHandler {
@@ -211,6 +213,94 @@ func (h *UsenetFallbackHandler) serve(w http.ResponseWriter, r *http.Request, re
 	}
 	if result.QueueID != id {
 		fallbackHTTPError(w, 503, "fallback_unavailable")
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Cache-Control", "private, no-store")
+	_ = json.NewEncoder(w).Encode(result)
+}
+
+// SetImportPreviewSettings installs only the server's private current settings
+// reader. No route body or persisted receipt can supply a root mapping.
+func (h *UsenetFallbackHandler) SetImportPreviewSettings(reader importer.SABImportPreviewSettings) {
+	h.previewSettings = reader
+}
+
+// Preview performs an explicit metadata-only local completed-directory inventory.
+func (h *UsenetFallbackHandler) Preview(w http.ResponseWriter, r *http.Request) {
+	deadline := time.Now().Add(5 * time.Second)
+	if claim, ok := auth.GetSession(r); ok && claim.ExpiresAt.Before(deadline) {
+		deadline = claim.ExpiresAt
+	}
+	ctx, stop := context.WithDeadline(r.Context(), deadline)
+	defer stop()
+	r = r.WithContext(ctx)
+	original, ok := h.current(r)
+	if !ok {
+		fallbackHTTPError(w, 403, "master_required")
+		return
+	}
+	raw := mux.Vars(r)["queueID"]
+	id, err := strconv.ParseInt(raw, 10, 64)
+	if err != nil || id <= 0 || strconv.FormatInt(id, 10) != raw || r.URL.RawQuery != "" || r.ContentLength != 0 || len(r.TransferEncoding) != 0 || r.Body != nil && r.Body != http.NoBody {
+		fallbackHTTPError(w, 400, "invalid_fallback_request")
+		return
+	}
+	if original.session.ExpiresAt.Before(deadline) {
+		deadline = original.session.ExpiresAt
+	}
+	if original.accountExpiry != nil && original.accountExpiry.Before(deadline) {
+		deadline = *original.accountExpiry
+	}
+	ctx, stopWork := context.WithDeadline(ctx, deadline)
+	defer stopWork()
+	r = r.WithContext(ctx)
+	service, ok := h.service.(interface {
+		PreviewSABImport(context.Context, int64, importer.SABImportPreviewSettings, func(context.Context) error) (importer.SABImportPreview, error)
+	})
+	if !ok || h.previewSettings == nil {
+		fallbackHTTPError(w, 503, "import_preview_unavailable")
+		return
+	}
+	check := func(work context.Context) error {
+		current, valid := h.current(r.WithContext(work))
+		if !valid || !reflect.DeepEqual(original, current) {
+			return importer.ErrSABImportPreviewUnavailable
+		}
+		return work.Err()
+	}
+	// Bound settings reads by the same original authority before/after the file
+	// configuration read; the returned value never appears in a response.
+	settings := func(work context.Context) (config.SABnzbdSettings, error) {
+		if check(work) != nil {
+			return config.SABnzbdSettings{}, importer.ErrSABImportPreviewUnavailable
+		}
+		cfg, e := h.previewSettings(work)
+		if e != nil || check(work) != nil {
+			return config.SABnzbdSettings{}, importer.ErrSABImportPreviewUnavailable
+		}
+		return cfg, nil
+	}
+	result, err := service.PreviewSABImport(ctx, id, settings, check)
+	if check(ctx) != nil {
+		fallbackHTTPError(w, 403, "master_required")
+		return
+	}
+	if err != nil {
+		status, code := 503, "import_preview_unavailable"
+		switch {
+		case errors.Is(err, importer.ErrSABFallbackNotFound):
+			status, code = 404, "fallback_not_found"
+		case errors.Is(err, importer.ErrSABFallbackSourceChanged):
+			status, code = 409, "fallback_source_changed"
+		case errors.Is(err, importer.ErrSABFallbackBusy):
+			status, code = 429, "fallback_busy"
+		}
+		fallbackHTTPError(w, status, code)
+		return
+	}
+	if result.QueueID != id || result.State != "local_inventory" {
+		fallbackHTTPError(w, 503, "import_preview_unavailable")
 		return
 	}
 	w.Header().Set("Content-Type", "application/json")

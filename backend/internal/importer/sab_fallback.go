@@ -366,44 +366,56 @@ func (s *Service) GetSABFallbackStatus(ctx context.Context, id int64) (SABFallba
 	}
 	return r.Status, nil
 }
+
+type sabFallbackObservation struct {
+	status                 SABFallbackStatus
+	raw                    *usenetengine.JobStatus
+	attempt, source, jobID string
+}
+
 func (s *Service) RefreshSABFallbackStatus(ctx context.Context, id int64) (SABFallbackStatus, error) {
+	observed, err := s.observeSABFallback(ctx, id, false, nil)
+	return observed.status, err
+}
+
+func (s *Service) observeSABFallback(ctx context.Context, id int64, force bool, check func(context.Context) error) (sabFallbackObservation, error) {
 	ctx, stop := context.WithTimeout(ctx, 5*time.Second)
 	defer stop()
 	release := s.fallbackSlot()
 	if release == nil {
-		return SABFallbackStatus{}, ErrSABFallbackBusy
+		return sabFallbackObservation{}, ErrSABFallbackBusy
 	}
 	defer release()
 	item, fields, r, err := s.fallbackItem(ctx, id)
 	if err != nil {
-		return SABFallbackStatus{}, err
+		return sabFallbackObservation{}, err
 	}
 	if r == nil {
-		return SABFallbackStatus{QueueID: id, State: "not_submitted"}, nil
+		return sabFallbackObservation{status: SABFallbackStatus{QueueID: id, State: "not_submitted"}}, nil
 	}
 	engine, source, ok := s.fallbackEngine()
 	if !ok || source != r.Source {
-		return SABFallbackStatus{}, ErrSABFallbackSourceChanged
+		return sabFallbackObservation{}, ErrSABFallbackSourceChanged
 	}
-	if r.JobID == "" || r.Status.State == "failed" || r.Status.State == "download_completed" {
-		return r.Status, nil
+	if r.JobID == "" || !force && (r.Status.State == "failed" || r.Status.State == "download_completed") {
+		return sabFallbackObservation{status: r.Status}, nil
 	}
 	if r.Refresh != "" && r.RefreshUntil != nil && r.RefreshUntil.After(time.Now()) {
-		return SABFallbackStatus{}, ErrSABFallbackBusy
+		return sabFallbackObservation{}, ErrSABFallbackBusy
 	}
 	nonce := sabNonce()
 	if nonce == "" {
-		return SABFallbackStatus{}, ErrSABFallbackUnavailable
+		return sabFallbackObservation{}, ErrSABFallbackUnavailable
 	}
 	until, _ := ctx.Deadline()
 	r.Refresh = nonce
 	r.RefreshUntil = &until
 	changed, err := s.saveFallback(ctx, item, fields, r, false)
 	if err != nil {
-		return SABFallbackStatus{}, err
+		return sabFallbackObservation{}, err
 	}
 	if !changed {
-		return SABFallbackStatus{}, ErrSABFallbackBusy
+		return sabFallbackObservation{}, ErrSABFallbackBusy
 	}
 	defer func() {
 		cleanup, stop := context.WithTimeout(context.Background(), 250*time.Millisecond)
@@ -419,18 +431,28 @@ func (s *Service) RefreshSABFallbackStatus(ctx context.Context, id int64) (SABFa
 	}()
 	_, beforeHTTP, enabled := s.fallbackEngine()
 	if ctx.Err() != nil {
-		return SABFallbackStatus{}, ctx.Err()
+		return sabFallbackObservation{}, ctx.Err()
 	}
 	if !enabled || beforeHTTP != source {
-		return SABFallbackStatus{}, ErrSABFallbackSourceChanged
+		return sabFallbackObservation{}, ErrSABFallbackSourceChanged
+	}
+	if check != nil {
+		if err := check(ctx); err != nil {
+			return sabFallbackObservation{}, err
+		}
 	}
 	result, statusErr := engine.Status(ctx, r.JobID)
 	_, latest, stillEnabled := s.fallbackEngine()
 	if !stillEnabled || latest != source {
-		return SABFallbackStatus{}, ErrSABFallbackSourceChanged
+		return sabFallbackObservation{}, ErrSABFallbackSourceChanged
 	}
 	if ctx.Err() != nil {
-		return SABFallbackStatus{}, ctx.Err()
+		return sabFallbackObservation{}, ctx.Err()
+	}
+	if check != nil {
+		if err := check(ctx); err != nil {
+			return sabFallbackObservation{}, err
+		}
 	}
 	checked := time.Now().UTC()
 	status := r.Status
@@ -464,7 +486,7 @@ func (s *Service) RefreshSABFallbackStatus(ctx context.Context, id int64) (SABFa
 		return nil
 	})
 	if err != nil {
-		return SABFallbackStatus{}, err
+		return sabFallbackObservation{}, err
 	}
-	return status, nil
+	return sabFallbackObservation{status: status, raw: result, attempt: r.Attempt, source: r.Source, jobID: r.JobID}, nil
 }
