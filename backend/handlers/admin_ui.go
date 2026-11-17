@@ -57,6 +57,7 @@ import (
 	"novastream/services/metadata"
 	"novastream/services/notifications"
 	"novastream/services/plex"
+	"novastream/services/profileunlock"
 	"novastream/services/remoteaccess"
 	"novastream/services/remotemedia"
 	"novastream/services/sessions"
@@ -1702,6 +1703,7 @@ type AdminUIHandler struct {
 	hiddenItemsService    hiddenItemsService
 	accountsService       *accounts.Service
 	parentAuthorization   *parentauth.Guard
+	pgPins                *profileunlock.PGProfilePins
 	invitationsService    *invitations.Service
 	remoteAccessService   *remoteaccess.Service
 	sessionsService       *sessions.Service
@@ -1834,6 +1836,12 @@ func (h *AdminUIHandler) SetRemoteAccessService(rs *remoteaccess.Service) {
 // SetSessionsService sets the sessions service for session management
 func (h *AdminUIHandler) SetSessionsService(ss *sessions.Service) {
 	h.sessionsService = ss
+}
+
+// SetPGProfilePins selects the current original-request PG path. A selected PG
+// implementation never falls back to cached session roles or profile ownership.
+func (h *AdminUIHandler) SetPGProfilePins(current *profileunlock.PGProfilePins) {
+	h.pgPins = current
 }
 
 // SetClientsService sets the clients service for propagation
@@ -4492,6 +4500,11 @@ type LoginPageData struct {
 
 // IsAuthenticated checks if the request has a valid session (any account)
 func (h *AdminUIHandler) IsAuthenticated(r *http.Request) bool {
+	if h.pgPins != nil {
+		_, session, release := h.authenticateCookie(r)
+		defer release()
+		return session != nil
+	}
 	if h.sessionsService == nil {
 		return false
 	}
@@ -4507,6 +4520,11 @@ func (h *AdminUIHandler) IsAuthenticated(r *http.Request) bool {
 
 // IsMasterAuthenticated checks if the request has a valid master (admin) session
 func (h *AdminUIHandler) IsMasterAuthenticated(r *http.Request) bool {
+	if h.pgPins != nil {
+		_, session, release := h.authenticateCookie(r)
+		defer release()
+		return session != nil && session.Scope == "" && session.IsMaster
+	}
 	if h.sessionsService == nil {
 		return false
 	}
@@ -4526,6 +4544,11 @@ func (h *AdminUIHandler) IsMasterAuthenticated(r *http.Request) bool {
 
 // getSession retrieves the session from the request cookie
 func (h *AdminUIHandler) getSession(r *http.Request) *models.Session {
+	if h.pgPins != nil {
+		_, session, release := h.authenticateCookie(r)
+		defer release()
+		return session
+	}
 	if h.sessionsService == nil {
 		return nil
 	}
@@ -4541,6 +4564,27 @@ func (h *AdminUIHandler) getSession(r *http.Request) *models.Session {
 	}
 
 	return &session
+}
+
+func (h *AdminUIHandler) authenticateCookie(r *http.Request) (*http.Request, *models.Session, context.CancelFunc) {
+	noop := func() {}
+	if h.pgPins == nil {
+		return r, h.getSession(r), noop
+	}
+	cookie, err := r.Cookie(adminSessionCookieName)
+	if err != nil {
+		return r, nil, noop
+	}
+	checked, release, err := h.pgPins.Authenticate(r, cookie.Value, r.Header.Get("X-Client-ID"))
+	if err != nil {
+		return r, nil, noop
+	}
+	session, _, err := h.pgPins.Identity(checked)
+	if err != nil || checked.Context().Err() != nil {
+		release()
+		return r, nil, noop
+	}
+	return checked, &session, release
 }
 
 func (h *AdminUIHandler) shouldGateOnboarding(r *http.Request, session *models.Session) bool {
@@ -4657,6 +4701,18 @@ func (h *AdminUIHandler) requireAdminScope(w http.ResponseWriter, r *http.Reques
 }
 
 func (h *AdminUIHandler) requireProfileScope(w http.ResponseWriter, r *http.Request, profileID string) (bool, string) {
+	if h.pgPins != nil {
+		owned, err := h.pgPins.Owns(r, profileID)
+		if err != nil {
+			http.Error(w, "Profile access unavailable", http.StatusServiceUnavailable)
+			return false, auth.GetAccountID(r)
+		}
+		if !owned {
+			http.Error(w, "Profile not found", http.StatusNotFound)
+			return false, auth.GetAccountID(r)
+		}
+		return true, auth.GetAccountID(r)
+	}
 	isAdmin, accountID, _, _ := h.getPageRoleInfo(r)
 	if isAdmin {
 		return true, accountID
@@ -4671,11 +4727,23 @@ func (h *AdminUIHandler) requireProfileScope(w http.ResponseWriter, r *http.Requ
 // RequireAuth is middleware that allows any authenticated account and passes session to context
 func (h *AdminUIHandler) RequireAuth(next http.HandlerFunc) http.HandlerFunc {
 	owned := profileaccess.Middleware(h.profileBelongsToAccount)(http.HandlerFunc(next))
+	if h.pgPins != nil {
+		owned = profileaccess.CurrentMiddleware(h.pgPins.Owns)(http.HandlerFunc(next))
+	}
 	return func(w http.ResponseWriter, r *http.Request) {
-		session := h.getSession(r)
+		checked, session, release := h.authenticateCookie(r)
+		defer release()
+		r = checked
 		if session == nil {
 			http.Redirect(w, r, h.serverBasePath+"/admin/login", http.StatusSeeOther)
 			return
+		}
+		if h.pgPins != nil {
+			if deadline, ok := r.Context().Deadline(); ok {
+				control := http.NewResponseController(w)
+				_ = control.SetReadDeadline(deadline)
+				defer control.SetReadDeadline(time.Time{})
+			}
 		}
 		if session.Scope != "" {
 			http.Error(w, "session not permitted for this endpoint", http.StatusForbidden)
@@ -4703,15 +4771,25 @@ func (h *AdminUIHandler) CaptureDebugLog(w http.ResponseWriter, r *http.Request)
 // RequireMasterAuth is middleware that only allows master (admin) accounts
 func (h *AdminUIHandler) RequireMasterAuth(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		session := h.getSession(r)
-		if session == nil || !session.IsMaster {
+		checked, session, release := h.authenticateCookie(r)
+		defer release()
+		r = checked
+		if session == nil || !session.IsMaster || h.pgPins != nil && session.Scope != "" {
 			http.Error(w, "Admin access required", http.StatusForbidden)
 			return
+		}
+		if h.pgPins != nil {
+			if deadline, ok := r.Context().Deadline(); ok {
+				control := http.NewResponseController(w)
+				_ = control.SetReadDeadline(deadline)
+				defer control.SetReadDeadline(time.Time{})
+			}
 		}
 		ctx := context.WithValue(r.Context(), adminSessionContextKey{}, session)
 		// Also set auth context keys so shared handlers can access account info
 		ctx = context.WithValue(ctx, auth.ContextKeyAccountID, session.AccountID)
 		ctx = context.WithValue(ctx, auth.ContextKeyIsMaster, session.IsMaster)
+		ctx = context.WithValue(ctx, auth.ContextKeySession, *session)
 		next(w, r.WithContext(ctx))
 	}
 }
@@ -4875,8 +4953,32 @@ func (h *AdminUIHandler) LoginSubmit(w http.ResponseWriter, r *http.Request) {
 // Logout handles logout requests
 func (h *AdminUIHandler) Logout(w http.ResponseWriter, r *http.Request) {
 	cookie, err := r.Cookie(adminSessionCookieName)
-	if err == nil && h.sessionsService != nil {
-		h.sessionsService.Revoke(cookie.Value)
+	if err == nil {
+		if h.pgPins != nil {
+			checked := r
+			// A request already authenticated before refresh must retain that
+			// original frame. Reauthenticating the deleted A token would discard
+			// its proven lineage and leave the freshly rotated B session alive.
+			original, bound := auth.GetSession(r)
+			if !bound || original.Token != cookie.Value {
+				var release context.CancelFunc
+				checked, release, err = h.pgPins.Authenticate(r, cookie.Value, r.Header.Get("X-Client-ID"))
+				if err != nil {
+					http.Error(w, "Logout could not be confirmed", http.StatusUnauthorized)
+					return
+				}
+				defer release()
+			}
+			if h.sessionsService == nil || h.sessionsService.LogoutProfilePinSession(checked) != nil {
+				http.Error(w, "Logout could not be confirmed", http.StatusUnauthorized)
+				return
+			}
+			if checked.Context().Err() != nil {
+				return
+			}
+		} else if h.sessionsService != nil {
+			h.sessionsService.Revoke(cookie.Value)
+		}
 	}
 
 	// Clear the cookie
@@ -7537,6 +7639,10 @@ func (h *AdminUIHandler) SetProfilePin(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Invalid request body: "+err.Error(), http.StatusBadRequest)
 		return
 	}
+	if h.pgPins != nil {
+		h.currentAdministrativePinChange(w, r, profileID, req.Pin, false)
+		return
+	}
 
 	if !h.requireParentAuthorization(w, r) {
 		return
@@ -7590,6 +7696,10 @@ func (h *AdminUIHandler) ClearProfilePin(w http.ResponseWriter, r *http.Request)
 	if ok, _ := h.requireProfileScope(w, r, profileID); !ok {
 		return
 	}
+	if h.pgPins != nil {
+		h.currentAdministrativePinChange(w, r, profileID, "", true)
+		return
+	}
 
 	if !h.requireParentAuthorization(w, r) {
 		return
@@ -7622,6 +7732,41 @@ func (h *AdminUIHandler) ClearProfilePin(w http.ResponseWriter, r *http.Request)
 		KidsAllowedLists:   user.KidsAllowedLists,
 		CreatedAt:          user.CreatedAt,
 		UpdatedAt:          user.UpdatedAt,
+	})
+}
+
+func (h *AdminUIHandler) currentAdministrativePinChange(w http.ResponseWriter, r *http.Request, profileID, pin string, clearing bool) {
+	intent, err := h.pgPins.PrepareAdministrativePinChange(r, profileID, pin, clearing)
+	if err != nil {
+		writeCurrentPinChangeError(w, r, err)
+		return
+	}
+	defer intent.Close()
+	// Preserve the existing administrative parent predicate and budget. The
+	// intent independently verifies the credential against the original tuple.
+	if !h.requireParentAuthorization(w, r) {
+		return
+	}
+	if err = intent.Verify(); err != nil {
+		writeCurrentPinChangeError(w, r, err)
+		return
+	}
+	user, err := h.usersService.CommitPGPinChange(r.Context(), intent)
+	if r.Context().Err() != nil {
+		return
+	}
+	if err != nil {
+		writeCurrentPinChangeError(w, r, err)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(ProfileWithPinStatus{
+		ID: user.ID, Name: user.Name, Color: user.Color, IconURL: user.IconURL,
+		HasPin: user.HasPin(), HasIcon: user.HasIcon(), IsKidsProfile: user.IsKidsProfile,
+		ActivityPrivacy: models.NormalizeActivityPrivacy(user.ActivityPrivacy), KidsMode: user.KidsMode,
+		KidsMaxRating: user.KidsMaxRating, KidsMaxMovieRating: user.KidsMaxMovieRating,
+		KidsMaxTVRating: user.KidsMaxTVRating, KidsAllowedLists: user.KidsAllowedLists,
+		CreatedAt: user.CreatedAt, UpdatedAt: user.UpdatedAt,
 	})
 }
 

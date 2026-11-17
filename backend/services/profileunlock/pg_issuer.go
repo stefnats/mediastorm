@@ -1,14 +1,18 @@
 package profileunlock
 
 import (
+	"context"
+	"errors"
 	"fmt"
 	"net/http"
 	"time"
 
 	"novastream/internal/datastore"
+	"novastream/models"
+	"novastream/services/sessions"
 )
 
-// PGPinIssuer is an uninstalled facade over the generation-bound datastore
+// PGPinIssuer is a low-level facade over the generation-bound datastore
 // protocol. It does not call Service.Issue, Validate, Rebind or its grant cache.
 // Prepared requests cannot move between facade instances, even on one store.
 type PGPinIssuer struct {
@@ -46,7 +50,7 @@ func (v *PGPinIssuer) Commit(intent *PGPinIntent, proof *PGPinProof) (*PGPinComm
 	return v.core.Commit(intent, proof)
 }
 
-// PGPinAccess is a separate, uninstalled typed access adapter. It observes the
+// PGPinAccess is a separate storage-observation adapter. It observes the
 // current absence of a PIN as well as current grants and never asks cached
 // users.HasPin/PinFingerprint or Service.Validate to decide the result.
 type PGPinAccess struct {
@@ -86,4 +90,229 @@ func (v *PGPinAccess) Check(state *PGPinAccessState) (PGPinAccessOutcome, error)
 		return PGPinUnavailable, datastore.ErrProfilePinAccessUsed
 	}
 	return v.core.Check(state)
+}
+
+// PGProfilePins is the explicit public PostgreSQL implementation. Constructing
+// it does not enable PIN policy; callers retain the existing security setting.
+// Once selected, storage errors never delegate to the legacy JSON/cache path.
+type PGProfilePins struct {
+	self          *PGProfilePins
+	store         *datastore.DataStore
+	issuer        *PGPinIssuer
+	access        *PGPinAccess
+	scopeSessions *sessions.Service
+}
+
+func NewPGProfilePins(store *datastore.DataStore, scoped ...*sessions.Service) *PGProfilePins {
+	reader := &PGPinAccess{core: datastore.NewBoundProfilePinAccessReader(store)}
+	reader.self = reader
+	value := &PGProfilePins{store: store, issuer: NewPGPinIssuer(store), access: reader}
+	value.self = value
+	if len(scoped) > 0 {
+		value.scopeSessions = scoped[0]
+	}
+	return value
+}
+func (v *PGProfilePins) valid() bool                { return v != nil && v.self == v && v.store != nil }
+func (*PGProfilePins) MarshalJSON() ([]byte, error) { return []byte("null"), nil }
+func (*PGProfilePins) Format(f fmt.State, _ rune)   { _, _ = f.Write([]byte("PGProfilePins(opaque)")) }
+func (v *PGProfilePins) Authenticate(r *http.Request, token, clientID string) (*http.Request, context.CancelFunc, error) {
+	if !v.valid() {
+		return nil, nil, datastore.ErrProfilePinAccessUnavailable
+	}
+	checked, release, err := v.store.AuthenticateProfilePinRequest(r, token, clientID)
+	if err != nil {
+		return nil, nil, err
+	}
+	var resolver func(context.Context, string) (string, error)
+	if v.scopeSessions != nil {
+		resolver = v.scopeSessions.ResolveProfilePinStreamResource
+	}
+	checked, err = v.store.ResolveProfilePinStreamRequest(checked, resolver)
+	if err != nil {
+		release()
+		return nil, nil, err
+	}
+	return checked, release, nil
+}
+func (v *PGProfilePins) Identity(r *http.Request) (models.Session, models.Account, error) {
+	if !v.valid() {
+		return models.Session{}, models.Account{}, datastore.ErrProfilePinAccessUnavailable
+	}
+	return v.store.ProfilePinFrameIdentity(r)
+}
+func (v *PGProfilePins) CheckOriginal(r *http.Request) error {
+	if !v.valid() {
+		return datastore.ErrProfilePinAccessUnavailable
+	}
+	return v.store.CheckProfilePinRequestFrame(r)
+}
+
+type PGPinObservation struct {
+	ctx         context.Context
+	outcome     PGPinAccessOutcome
+	kids        bool
+	correlation string
+	owner       models.Account
+}
+
+func (*PGPinObservation) MarshalJSON() ([]byte, error) { return []byte("null"), nil }
+func (*PGPinObservation) Format(f fmt.State, _ rune) {
+	_, _ = f.Write([]byte("PGPinObservation(opaque)"))
+}
+func (v *PGPinObservation) Outcome() PGPinAccessOutcome {
+	if v == nil || v.ctx == nil || v.ctx.Err() != nil {
+		return PGPinUnavailable
+	}
+	return v.outcome
+}
+func (v *PGPinObservation) IsKids() (bool, error) {
+	if v == nil || v.Outcome() == PGPinUnavailable || v.outcome == PGPinNotFound {
+		return false, datastore.ErrProfilePinAccessUnavailable
+	}
+	return v.kids, nil
+}
+func (v *PGPinObservation) Correlation() (string, error) {
+	if v == nil || v.Outcome() == PGPinUnavailable || v.outcome == PGPinNotFound {
+		return "", datastore.ErrProfilePinAccessUnavailable
+	}
+	return v.correlation, nil
+}
+func (v *PGProfilePins) Current(r *http.Request, targetID string) (*PGPinObservation, error) {
+	if !v.valid() {
+		return nil, datastore.ErrProfilePinAccessUnavailable
+	}
+	state, err := v.access.Read(r, targetID)
+	if err != nil {
+		return nil, err
+	}
+	defer state.Close()
+	outcome, err := v.access.Check(state)
+	if err != nil {
+		return nil, err
+	}
+	value := &PGPinObservation{ctx: r.Context(), outcome: outcome}
+	if outcome != PGPinNotFound && outcome != PGPinUnavailable {
+		value.owner, err = v.access.core.ProfilePinAccessOwner(state)
+		if err != nil {
+			return nil, err
+		}
+		value.kids, value.correlation, err = v.access.core.ProfilePinAccessFacts(state)
+		if err != nil {
+			return nil, err
+		}
+	}
+	return value, nil
+}
+
+var ErrPGProfileNotFound = errors.New("profile not found")
+
+type PinIssuanceAcknowledger interface {
+	AcknowledgePinIssuance(context.Context, string, *datastore.PGPinCommitReceipt) error
+}
+
+// Verify performs the actual original request workflow, including a targeted
+// users-revision acknowledgement before one-shot token release. No receipt or
+// raw token is admitted to Service.grants. A known remote commit may remain
+// after a later acknowledgement/release failure; it is never rolled back using
+// replacement credentials or silently replayed.
+func (v *PGProfilePins) Verify(r *http.Request, targetID, rawPIN string, ttl time.Duration, ack PinIssuanceAcknowledger) (string, time.Time, error) {
+	if !v.valid() || ack == nil {
+		return "", time.Time{}, datastore.ErrPGPinUnavailable
+	}
+	current, err := v.Current(r, targetID)
+	if err != nil {
+		return "", time.Time{}, err
+	}
+	switch current.Outcome() {
+	case PGPinNotFound:
+		return "", time.Time{}, ErrPGProfileNotFound
+	case PGPinNoPin:
+		return "", time.Time{}, v.issuer.core.RecordNoPinVerification(r, targetID)
+	case PGPinLocked, PGPinUnlocked:
+	default:
+		return "", time.Time{}, datastore.ErrPGPinChanged
+	}
+	intent, err := v.issuer.Prepare(r, targetID, ttl)
+	if err != nil {
+		return "", time.Time{}, err
+	}
+	defer intent.Close()
+	proof, err := v.issuer.Verify(intent, rawPIN)
+	if err != nil {
+		return "", time.Time{}, err
+	}
+	receipt, err := v.issuer.Commit(intent, proof)
+	if err != nil {
+		return "", time.Time{}, err
+	}
+	defer receipt.Close()
+	if err = ack.AcknowledgePinIssuance(r.Context(), targetID, receipt); err != nil {
+		return "", time.Time{}, err
+	}
+	return v.issuer.core.Release(r, receipt)
+}
+
+func (v *PGProfilePins) Owns(r *http.Request, targetID string) (bool, error) {
+	current, err := v.Current(r, targetID)
+	if err != nil {
+		return false, err
+	}
+	switch current.Outcome() {
+	case PGPinNotFound:
+		return false, nil
+	case PGPinNoPin, PGPinLocked, PGPinUnlocked:
+		return true, nil
+	default:
+		return false, datastore.ErrProfilePinAccessUnavailable
+	}
+}
+func (v *PGProfilePins) IsKids(r *http.Request, targetID string) (bool, error) {
+	current, err := v.Current(r, targetID)
+	if err != nil {
+		return false, err
+	}
+	if current.Outcome() == PGPinNotFound {
+		return false, ErrPGProfileNotFound
+	}
+	return current.IsKids()
+}
+
+type PGPinChangeIntent = datastore.PGPinChangeIntent
+type PinChangePersistence interface {
+	CommitPGPinChange(context.Context, *datastore.PGPinChangeIntent) (models.User, error)
+}
+
+func (v *PGProfilePins) PrepareOwnedPinChange(r *http.Request, targetID, pin string, clearing bool) (*PGPinChangeIntent, error) {
+	if !v.valid() {
+		return nil, datastore.ErrPGPinUnavailable
+	}
+	return v.store.PrepareOwnedPinChange(r, targetID, pin, clearing, RequestTokens(r))
+}
+func (v *PGProfilePins) PrepareAdministrativePinChange(r *http.Request, targetID, pin string, clearing bool) (*PGPinChangeIntent, error) {
+	if !v.valid() {
+		return nil, datastore.ErrPGPinUnavailable
+	}
+	return v.store.PrepareAdministrativePinChange(r, targetID, pin, clearing, RequestTokens(r))
+}
+
+// CheckVerified is one-shot and checks only this facade's exact original
+// verification post-state. It is for the existing cookie response bridge.
+func (v *PGProfilePins) CheckVerified(r *http.Request, targetID string) error {
+	if !v.valid() {
+		return datastore.ErrPGPinUnavailable
+	}
+	return v.issuer.core.CheckVerifiedProfilePinRequest(r, targetID)
+}
+
+func (v *PGPinObservation) Owner() (models.Account, error) {
+	if v == nil || v.Outcome() == PGPinUnavailable || v.outcome == PGPinNotFound || v.owner.ID == "" {
+		return models.Account{}, datastore.ErrProfilePinAccessUnavailable
+	}
+	result := models.Account{ID: v.owner.ID}
+	if v.owner.ExpiresAt != nil {
+		copy := *v.owner.ExpiresAt
+		result.ExpiresAt = &copy
+	}
+	return result, nil
 }

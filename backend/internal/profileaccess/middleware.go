@@ -20,6 +20,8 @@ const maxProfileBodyBytes = 1 << 20
 
 type ownershipKey struct{}
 type resourceGuardKey struct{}
+type currentOwnershipKey struct{}
+type currentOwnerCheck func(*http.Request, string) (bool, error)
 
 // WithResourceGuard adds entrypoint-specific checks for a resource's stored
 // profile, including requests that omit client-supplied profile selectors.
@@ -81,7 +83,8 @@ func Middleware(owns func(profileID, accountID string) bool) mux.MiddlewareFunc 
 // authorization layer. Share sessions remain restricted to their bound source.
 func CheckResource(w http.ResponseWriter, r *http.Request, profileID, resource string) bool {
 	check, installed := r.Context().Value(ownershipKey{}).(ownerCheck)
-	if !installed {
+	current, currentInstalled := r.Context().Value(currentOwnershipKey{}).(currentOwnerCheck)
+	if !installed && !currentInstalled {
 		return true
 	}
 	allowed := false
@@ -98,7 +101,20 @@ func CheckResource(w http.ResponseWriter, r *http.Request, profileID, resource s
 		}
 		allowed = normalize(resource) != "" && normalize(resource) == normalize(session.ScopeResource)
 	} else {
-		allowed = auth.IsMaster(r) || (profileID != "" && check != nil && check(profileID, auth.GetAccountID(r)))
+		if currentInstalled {
+			if profileID == "" {
+				allowed = auth.IsMaster(r)
+			} else {
+				var err error
+				allowed, err = current(r, profileID)
+				if err != nil {
+					apierror.Write(w, http.StatusServiceUnavailable, "profile_unavailable", "profile access unavailable")
+					return false
+				}
+			}
+		} else {
+			allowed = auth.IsMaster(r) || (profileID != "" && check != nil && check(profileID, auth.GetAccountID(r)))
+		}
 	}
 	if !allowed {
 		apierror.Write(w, http.StatusNotFound, "resource_not_found", "resource not found")
@@ -157,4 +173,108 @@ func checkBody(w http.ResponseWriter, r *http.Request, check func(string) bool) 
 type restoredBody struct {
 	io.Reader
 	io.Closer
+}
+
+// CurrentMiddleware is selected explicitly for PG requests. Ownership facts
+// come from the original request-bound reader; failure never calls the legacy
+// bool cache. Stream-scoped resource matching remains in CheckResource.
+func CurrentMiddleware(owns func(*http.Request, string) (bool, error)) mux.MiddlewareFunc {
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			r = r.WithContext(context.WithValue(r.Context(), currentOwnershipKey{}, currentOwnerCheck(owns)))
+			if r.Method == http.MethodOptions || auth.IsShareLinkRequest(r) {
+				next.ServeHTTP(w, r)
+				return
+			}
+			check := func(id string) bool {
+				id = strings.TrimSpace(id)
+				if id == "" {
+					return true
+				}
+				if owns == nil {
+					apierror.Write(w, http.StatusServiceUnavailable, "profile_unavailable", "profile access unavailable")
+					return false
+				}
+				owned, err := owns(r, id)
+				if err != nil {
+					apierror.Write(w, http.StatusServiceUnavailable, "profile_unavailable", "profile access unavailable")
+					return false
+				}
+				if !owned {
+					apierror.Write(w, http.StatusNotFound, "profile_not_found", "profile not found")
+					return false
+				}
+				return true
+			}
+			pathTarget := false
+			for _, key := range []string{"userID", "profileID"} {
+				id := mux.Vars(r)[key]
+				pathTarget = pathTarget || strings.TrimSpace(id) != ""
+				if !check(id) {
+					return
+				}
+			}
+			for _, key := range []string{"profileId", "userId"} {
+				for _, id := range r.URL.Query()[key] {
+					if !check(id) {
+						return
+					}
+				}
+			}
+			diagnostics := strings.HasSuffix(r.URL.Path, "/api/debug/log") || strings.Contains(r.URL.Path, "/api/logs/")
+			if !pathTarget && !diagnostics && !checkBody(w, r, check) {
+				return
+			}
+			next.ServeHTTP(w, r)
+		})
+	}
+}
+
+// CurrentKidsLiveTV preserves the existing Live TV rule but obtains its flag
+// only from a current owned PG snapshot. Unknown is not coerced into adult.
+func CurrentKidsLiveTV(isKids func(*http.Request, string) (bool, error)) mux.MiddlewareFunc {
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.Method == http.MethodOptions || auth.IsShareLinkRequest(r) || !KidsLiveTVPath(r.URL.Path) {
+				next.ServeHTTP(w, r)
+				return
+			}
+			check := func(id string) bool {
+				id = strings.TrimSpace(id)
+				if id == "" {
+					return true
+				}
+				if isKids == nil {
+					apierror.Write(w, http.StatusServiceUnavailable, "profile_unavailable", "profile access unavailable")
+					return false
+				}
+				kids, err := isKids(r, id)
+				if err != nil {
+					apierror.Write(w, http.StatusServiceUnavailable, "profile_unavailable", "profile access unavailable")
+					return false
+				}
+				if kids {
+					apierror.Write(w, http.StatusForbidden, "kids_live_tv_unavailable", "Live TV is not available on kids profiles")
+					return false
+				}
+				return true
+			}
+			for _, key := range []string{"userID", "profileID"} {
+				if !check(mux.Vars(r)[key]) {
+					return
+				}
+			}
+			for _, key := range []string{"profileId", "userId"} {
+				for _, id := range r.URL.Query()[key] {
+					if !check(id) {
+						return
+					}
+				}
+			}
+			if !checkBody(w, r, check) {
+				return
+			}
+			next.ServeHTTP(w, r)
+		})
+	}
 }

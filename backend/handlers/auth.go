@@ -13,6 +13,7 @@ import (
 	"novastream/internal/requestsecurity"
 	"novastream/models"
 	"novastream/services/accounts"
+	"novastream/services/profileunlock"
 	"novastream/services/sessions"
 )
 
@@ -21,6 +22,7 @@ type AuthHandler struct {
 	accounts *accounts.Service
 	sessions *sessions.Service
 	unlocks  profileUnlockSessionHooks
+	pgPins   *profileunlock.PGProfilePins
 }
 
 // profileUnlockSessionHooks keeps profile unlock grants in step with the
@@ -34,6 +36,8 @@ type profileUnlockSessionHooks interface {
 func (h *AuthHandler) SetProfileUnlocks(unlocks profileUnlockSessionHooks) {
 	h.unlocks = unlocks
 }
+
+func (h *AuthHandler) SetPGProfilePins(current *profileunlock.PGProfilePins) { h.pgPins = current }
 
 // NewAuthHandler creates a new auth handler.
 func NewAuthHandler(accountsSvc *accounts.Service, sessionsSvc *sessions.Service) *AuthHandler {
@@ -164,6 +168,18 @@ func (h *AuthHandler) Login(w http.ResponseWriter, r *http.Request) {
 
 // Logout invalidates the current session.
 func (h *AuthHandler) Logout(w http.ResponseWriter, r *http.Request) {
+	if h.pgPins != nil {
+		if err := h.sessions.LogoutProfilePinSession(r); err != nil {
+			apierror.Write(w, http.StatusUnauthorized, apierror.CodeSessionExpired, "invalid or expired session")
+			return
+		}
+		if r.Context().Err() != nil {
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]string{"status": "logged out"})
+		return
+	}
 	token := extractBearerToken(r)
 	if token == "" {
 		http.Error(w, `{"error": "no session token"}`, http.StatusBadRequest)
@@ -187,6 +203,31 @@ func (h *AuthHandler) Logout(w http.ResponseWriter, r *http.Request) {
 
 // Me returns the current authenticated account info.
 func (h *AuthHandler) Me(w http.ResponseWriter, r *http.Request) {
+	if h.pgPins != nil {
+		checked, release, err := h.pgPins.Authenticate(r, extractBearerToken(r), r.Header.Get("X-Client-ID"))
+		if err != nil {
+			apierror.Write(w, http.StatusUnauthorized, apierror.CodeSessionExpired, "invalid or expired session")
+			return
+		}
+		defer release()
+		r = checked
+		if auth.GetSessionScope(r) == models.SessionScopeJellyfin {
+			apierror.Write(w, http.StatusUnauthorized, apierror.CodeSessionExpired, "invalid or expired session")
+			return
+		}
+
+		_, account, err := h.pgPins.Identity(r)
+		if err != nil {
+			apierror.Write(w, http.StatusUnauthorized, apierror.CodeSessionExpired, "invalid or expired session")
+			return
+		}
+		if r.Context().Err() != nil {
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(AccountResponse{ID: account.ID, Username: account.Username, IsMaster: account.IsMaster})
+		return
+	}
 	token := extractBearerToken(r)
 	if token == "" {
 		apierror.Write(w, http.StatusUnauthorized, apierror.CodeUnauthorized, "not authenticated")
@@ -246,6 +287,33 @@ func (h *AuthHandler) VerifyPassword(w http.ResponseWriter, r *http.Request) {
 
 // Refresh extends the session expiration.
 func (h *AuthHandler) Refresh(w http.ResponseWriter, r *http.Request) {
+	if h.pgPins != nil {
+		checked, release, err := h.pgPins.Authenticate(r, extractBearerToken(r), r.Header.Get("X-Client-ID"))
+		if err != nil {
+			apierror.Write(w, http.StatusUnauthorized, apierror.CodeSessionExpired, "invalid or expired session")
+			return
+		}
+		defer release()
+		r = checked
+		_, account, err := h.pgPins.Identity(r)
+		if err != nil {
+			apierror.Write(w, http.StatusUnauthorized, apierror.CodeSessionExpired, "invalid or expired session")
+			return
+		}
+		session, err := h.sessions.RefreshProfilePinSession(r)
+		if err != nil {
+			apierror.Write(w, http.StatusUnauthorized, apierror.CodeSessionExpired, "invalid or expired session")
+			return
+		}
+		if r.Context().Err() != nil {
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("Cache-Control", "no-store")
+		json.NewEncoder(w).Encode(LoginResponse{Token: session.Token, ExpiresAt: session.ExpiresAt.Format("2006-01-02T15:04:05Z"), AccountID: account.ID, Username: account.Username, IsMaster: session.IsMaster})
+		return
+	}
+
 	r.Body = http.MaxBytesReader(w, r.Body, 64<<10)
 	token := extractBearerToken(r)
 	if token == "" {

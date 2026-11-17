@@ -43,7 +43,15 @@ type RecordingStreamAccess struct {
 	profiles recordingAccessProfiles
 	unlocks  recordingUnlockValidator
 	policy   func() (config.SecuritySettings, error)
+	pgPins   *profileunlock.PGProfilePins
 	now      func() time.Time
+}
+
+// SetPGProfilePins selects current storage authorization without consulting the
+// legacy profile or unlock caches. Request authentication still belongs to the
+// outer API or cookie wrapper, which owns the original frame cancellation.
+func (a *RecordingStreamAccess) SetPGProfilePins(current *profileunlock.PGProfilePins) {
+	a.pgPins = current
 }
 
 func NewRecordingStreamAccess(owners recordingOwnerSnapshot, sessions recordingSessionSnapshot, accounts recordingAccessAccounts, profiles recordingAccessProfiles, unlocks recordingUnlockValidator, policy func() (config.SecuritySettings, error)) *RecordingStreamAccess {
@@ -56,10 +64,34 @@ type recordingAccessState struct {
 	session     models.Session
 	fingerprint string
 	master      bool
+	pinOutcome  profileunlock.PGPinAccessOutcome
+	pgExpiry    time.Time
+}
+
+// originalExpiry returns the captured PG authority deadline without reading a
+// legacy account cache. JSON mode retains its existing account-expiry behavior.
+func (a *RecordingStreamAccess) originalExpiry(state recordingAccessState) (time.Time, bool) {
+	if a.pgPins != nil {
+		return state.pgExpiry, !state.pgExpiry.IsZero()
+	}
+	expiry := state.session.ExpiresAt
+	for _, accountID := range []string{state.session.AccountID, state.profile.AccountID} {
+		account, exists := a.accounts.Get(accountID)
+		if !exists {
+			return time.Time{}, false
+		}
+		if account.ExpiresAt != nil && account.ExpiresAt.Before(expiry) {
+			expiry = *account.ExpiresAt
+		}
+	}
+	return expiry, true
 }
 
 func (a *RecordingStreamAccess) current(r *http.Request, path string) (recordingAccessState, bool) {
 	var state recordingAccessState
+	if a != nil && a.pgPins != nil {
+		return a.currentPG(r, path)
+	}
 	if a == nil || a.owners == nil || a.sessions == nil || a.accounts == nil || a.profiles == nil || a.unlocks == nil || a.policy == nil || a.now == nil || r.Context().Err() != nil {
 		return state, false
 	}
@@ -110,6 +142,66 @@ func (a *RecordingStreamAccess) current(r *http.Request, path string) (recording
 	return state, r.Context().Err() == nil
 }
 
+func (a *RecordingStreamAccess) currentPG(r *http.Request, path string) (recordingAccessState, bool) {
+	var state recordingAccessState
+	if a.owners == nil || a.policy == nil || a.now == nil || r == nil || r.Context().Err() != nil || a.pgPins.CheckOriginal(r) != nil {
+		return state, false
+	}
+	session, ok := auth.GetSession(r)
+	if !ok || session.Scope != "" || session.Token == "" {
+		return state, false
+	}
+	owner, err := a.owners.SnapshotStreamOwner(r.Context(), path)
+	if err != nil || owner.RecordingID == "" || owner.ProfileID == "" {
+		return state, false
+	}
+	current, err := a.pgPins.Current(r, owner.ProfileID)
+	if err != nil {
+		return state, false
+	}
+	switch current.Outcome() {
+	case profileunlock.PGPinNoPin, profileunlock.PGPinLocked, profileunlock.PGPinUnlocked:
+	default:
+		return state, false
+	}
+	kids, err := current.IsKids()
+	if err != nil {
+		return state, false
+	}
+	correlation, err := current.Correlation()
+	if err != nil {
+		return state, false
+	}
+	account, err := current.Owner()
+	if err != nil || account.ID == "" {
+		return state, false
+	}
+	expiry := session.ExpiresAt
+	if account.ExpiresAt != nil && account.ExpiresAt.Before(expiry) {
+		expiry = *account.ExpiresAt
+	}
+	if deadline, ok := r.Context().Deadline(); ok && deadline.Before(expiry) {
+		expiry = deadline
+	}
+	for key, values := range r.URL.Query() {
+		if strings.EqualFold(key, "profileId") || strings.EqualFold(key, "userId") {
+			for _, value := range values {
+				if value != "" && value != owner.ProfileID {
+					return state, false
+				}
+			}
+		}
+	}
+	for key, value := range mux.Vars(r) {
+		if (strings.EqualFold(key, "profileId") || strings.EqualFold(key, "userId")) && value != "" && value != owner.ProfileID {
+			return state, false
+		}
+	}
+	state = recordingAccessState{owner: owner, profile: models.User{ID: owner.ProfileID, AccountID: account.ID, IsKidsProfile: kids}, session: session, master: session.IsMaster, pinOutcome: current.Outcome(), pgExpiry: expiry}
+	state.fingerprint = kidsVODHash([]any{owner, correlation})
+	return state, r.Context().Err() == nil && a.pgPins.CheckOriginal(r) == nil
+}
+
 func (a *RecordingStreamAccess) Authorize(w http.ResponseWriter, r *http.Request, path string) (*http.Request, bool) {
 	deny := func() (*http.Request, bool) {
 		apierror.Write(w, http.StatusNotFound, "resource_not_found", "resource not found")
@@ -127,7 +219,11 @@ func (a *RecordingStreamAccess) Authorize(w http.ResponseWriter, r *http.Request
 	if err != nil {
 		return deny()
 	}
-	if policy.EnforceProfilePins && before.profile.HasPin() {
+	if a.pgPins != nil && policy.EnforceProfilePins && before.pinOutcome == profileunlock.PGPinLocked {
+		apierror.Write(w, http.StatusForbidden, apierror.CodeProfileLocked, "profile is locked", map[string]string{"profileId": before.profile.ID})
+		return nil, false
+	}
+	if a.pgPins == nil && policy.EnforceProfilePins && before.profile.HasPin() {
 		fingerprint := a.profiles.PinFingerprint(before.profile.ID)
 		if fingerprint == "" || !a.unlocks.Validate(profileunlock.RequestTokens(r), before.session.Token, before.profile.ID, fingerprint) {
 			apierror.Write(w, http.StatusForbidden, apierror.CodeProfileLocked, "profile is locked", map[string]string{"profileId": before.profile.ID})

@@ -60,6 +60,12 @@ func pinFixture(t *testing.T) *pinPGFixture {
 	// This opt-in is local to this nonparallel test and restored by t.Cleanup.
 	t.Setenv("PROFILE_UNLOCK_STATE_TEST_DATABASE_URL", raw)
 	base := unlockFixture(t)
+	bindingMigration, err := embedMigrations.ReadFile("migrations/078_profile_unlock_bindings.sql")
+	if err != nil {
+		t.Fatal(err)
+	}
+	base.exec(t, strings.Split(string(bindingMigration), "-- +goose Down")[0])
+
 	base.exec(t, `ALTER TABLE users ADD COLUMN pin_length INT NOT NULL DEFAULT 0, ADD COLUMN updated_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp();DELETE FROM profile_unlocks`)
 	hash, err := bcrypt.GenerateFromPassword([]byte(pinTestCredential), bcrypt.MinCost)
 	if err != nil {
