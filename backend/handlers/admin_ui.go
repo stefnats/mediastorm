@@ -33,6 +33,7 @@ import (
 	"novastream/config"
 	"novastream/internal/apiusage"
 	"novastream/internal/auth"
+	"novastream/internal/datastore"
 	"novastream/internal/httpheaders"
 	"novastream/internal/importer"
 	"novastream/internal/netproxy"
@@ -1704,6 +1705,7 @@ type AdminUIHandler struct {
 	accountsService       *accounts.Service
 	parentAuthorization   *parentauth.Guard
 	pgPins                *profileunlock.PGProfilePins
+	parentKidsHandler     *UsersHandler
 	invitationsService    *invitations.Service
 	remoteAccessService   *remoteaccess.Service
 	sessionsService       *sessions.Service
@@ -1842,6 +1844,12 @@ func (h *AdminUIHandler) SetSessionsService(ss *sessions.Service) {
 // implementation never falls back to cached session roles or profile ownership.
 func (h *AdminUIHandler) SetPGProfilePins(current *profileunlock.PGProfilePins) {
 	h.pgPins = current
+}
+
+// SetParentKidsHandler shares the actual UsersHandler password-attempt budget
+// for PG flag actions. The JSON management path keeps its existing guard.
+func (h *AdminUIHandler) SetParentKidsHandler(shared *UsersHandler) {
+	h.parentKidsHandler = shared
 }
 
 // SetClientsService sets the clients service for propagation
@@ -8032,6 +8040,14 @@ func (h *AdminUIHandler) SetKidsProfile(w http.ResponseWriter, r *http.Request) 
 	profileID := r.URL.Query().Get("profileId")
 	if profileID == "" {
 		http.Error(w, "profileId parameter required", http.StatusBadRequest)
+		return
+	}
+	if h.pgPins != nil {
+		if h.parentKidsHandler == nil {
+			writeParentKidsFlagError(w, r, datastore.ErrParentKidsFlagUnavailable)
+			return
+		}
+		h.parentKidsHandler.SetKidsProfileManagement(w, r, profileID, h.userSettingsService)
 		return
 	}
 

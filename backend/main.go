@@ -1347,6 +1347,7 @@ func main() {
 	adminUIHandler.SetRemoteAccessService(remoteAccessService)
 	adminUIHandler.SetSessionsService(sessionsService)
 	adminUIHandler.SetPGProfilePins(currentProfilePins)
+	wireParentKidsFlagHandler(adminUIHandler, usersHandler)
 	registerProfileRecoveryCookieRoutes(r, adminUIHandler, profileRecoveryHandler)
 	adminUIHandler.SetClientsService(clientsService)
 	adminUIHandler.SetClientSettingsService(clientSettingsService)
@@ -1536,7 +1537,7 @@ func main() {
 	r.HandleFunc("/admin/api/profiles/pin", adminUIHandler.RequireAuth(adminUIHandler.SetProfilePin)).Methods(http.MethodPut)
 	r.HandleFunc("/admin/api/profiles/pin", adminUIHandler.RequireAuth(adminUIHandler.ClearProfilePin)).Methods(http.MethodDelete)
 	r.HandleFunc("/admin/api/profiles/color", adminUIHandler.RequireAuth(adminUIHandler.SetProfileColor)).Methods(http.MethodPut)
-	r.HandleFunc("/admin/api/profiles/kids", adminUIHandler.RequireAuth(adminUIHandler.SetKidsProfile)).Methods(http.MethodPut)
+	registerParentKidsFlagCookieRoutes(r, adminUIHandler)
 	r.HandleFunc("/admin/api/notifications", adminUIHandler.RequireAuth(adminUIHandler.ListNotificationChannels)).Methods(http.MethodGet)
 	r.HandleFunc("/admin/api/notifications", adminUIHandler.RequireAuth(adminUIHandler.SaveNotificationChannel)).Methods(http.MethodPost)
 	r.HandleFunc("/admin/api/notifications", adminUIHandler.RequireAuth(adminUIHandler.DeleteNotificationChannel)).Methods(http.MethodDelete)
@@ -1958,7 +1959,7 @@ func main() {
 	r.HandleFunc("/account/api/profiles/icon/upload", adminUIHandler.RequireAuth(adminUIHandler.UploadProfileIcon)).Methods(http.MethodPost)
 	r.HandleFunc("/account/api/profiles/pin", adminUIHandler.RequireAuth(adminUIHandler.SetProfilePin)).Methods(http.MethodPut)
 	r.HandleFunc("/account/api/profiles/pin", adminUIHandler.RequireAuth(adminUIHandler.ClearProfilePin)).Methods(http.MethodDelete)
-	r.HandleFunc("/account/api/profiles/kids", adminUIHandler.RequireAuth(adminUIHandler.SetKidsProfile)).Methods(http.MethodPut)
+	// The account flag alias is installed by registerParentKidsFlagCookieRoutes.
 	r.HandleFunc("/account/api/profiles/live-permissions", adminUIHandler.RequireAuth(adminUIHandler.SetProfileLivePermissions)).Methods(http.MethodPut)
 	r.HandleFunc("/account/api/profiles/activity-privacy", adminUIHandler.RequireAuth(adminUIHandler.SetProfileActivityPrivacy)).Methods(http.MethodPut)
 	r.HandleFunc("/account/api/accounts", adminUIHandler.RequireAuth(adminUIHandler.GetUserAccounts)).Methods(http.MethodGet)
@@ -3031,4 +3032,14 @@ func registerProfileRecoveryCookieRoutes(r *mux.Router, admin *handlers.AdminUIH
 	for _, prefix := range []string{"/admin/api", "/account/api"} {
 		r.HandleFunc(prefix+"/users/{userID}/state/reload", recordingWebOrigin(admin.RequireAuth(handler.Cookie))).Methods(http.MethodPost)
 	}
+}
+
+// wireParentKidsFlagHandler shares the actual credential budget across API and
+// management flag changes instead of allocating a second guessing allowance.
+func wireParentKidsFlagHandler(admin *handlers.AdminUIHandler, shared *handlers.UsersHandler) {
+	admin.SetParentKidsHandler(shared)
+}
+func registerParentKidsFlagCookieRoutes(r *mux.Router, admin *handlers.AdminUIHandler) {
+	r.HandleFunc("/admin/api/profiles/kids", admin.RequireAuth(admin.SetKidsProfile)).Methods(http.MethodPut)
+	r.HandleFunc("/account/api/profiles/kids", admin.RequireAuth(admin.SetKidsProfile)).Methods(http.MethodPut)
 }

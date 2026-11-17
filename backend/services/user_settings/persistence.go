@@ -561,3 +561,132 @@ func (l *UserSettingsRecoveryLease) Close() {
 	st.closed = true
 	st.service.mu.Unlock()
 }
+
+// ParentKidsFlagDefaultsLease participates only for management enable. It holds
+// this service's selected clean projection after the matching Users lease.
+type ParentKidsFlagDefaultsLease struct {
+	state *parentKidsFlagDefaultsLeaseState
+}
+type parentKidsFlagDefaultsLeaseState struct {
+	mu                                 sync.Mutex
+	self                               *ParentKidsFlagDefaultsLease
+	service                            *Service
+	proof                              *datastore.ParentKidsFlagCacheLease
+	target                             string
+	record                             datastore.UserSettingsRecord
+	current, confirmed                 models.UserSettings
+	present, staged, installed, closed bool
+}
+
+func (*ParentKidsFlagDefaultsLease) MarshalJSON() ([]byte, error) { return []byte("null"), nil }
+func (*ParentKidsFlagDefaultsLease) Format(f fmt.State, _ rune) {
+	_, _ = f.Write([]byte("ParentKidsFlagDefaultsLease(opaque)"))
+}
+func (s *Service) AcquireParentKidsFlagDefaultsLease(ctx context.Context, target string, intent *datastore.ParentKidsFlagIntent, users *datastore.ParentKidsFlagCacheLease) (*ParentKidsFlagDefaultsLease, error) {
+	if s == nil || !s.useDB() || ctx == nil {
+		return nil, datastore.ErrParentKidsFlagUnavailable
+	}
+	s.mu.Lock()
+	fail := func(err error) (*ParentKidsFlagDefaultsLease, error) { s.mu.Unlock(); return nil, err }
+	if err := ctx.Err(); err != nil {
+		return fail(err)
+	}
+	if err := s.ensurePGTargetLocked(ctx, target); err != nil {
+		return fail(err)
+	}
+	before, known := s.pg.confirmed[target]
+	current, present := s.settings[target]
+	record, exists := s.pg.records[target]
+	if !exists || known != present || !reflect.DeepEqual(before, current) {
+		return fail(datastore.ErrUserSettingsConflict)
+	}
+	proof, err := s.store.BeginParentKidsFlagSettingsLease(ctx, intent, users, record.Revision)
+	if err != nil {
+		return fail(err)
+	}
+	value := &ParentKidsFlagDefaultsLease{}
+	value.state = &parentKidsFlagDefaultsLeaseState{self: value, service: s, proof: proof, target: target}
+	return value, nil
+}
+func (l *ParentKidsFlagDefaultsLease) ReceiptLease() *datastore.ParentKidsFlagCacheLease {
+	if l == nil || l.state == nil || l.state.self != l {
+		return nil
+	}
+	return l.state.proof
+}
+func (l *ParentKidsFlagDefaultsLease) Stage(r *datastore.ParentKidsFlagReceipt) error {
+	if l == nil || l.state == nil {
+		return datastore.ErrParentKidsFlagChanged
+	}
+	st := l.state
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	if st.self != l || st.closed || st.staged {
+		return datastore.ErrParentKidsFlagChanged
+	}
+	record, err := st.service.store.StageParentKidsFlagSettings(st.proof, r)
+	if err != nil {
+		return err
+	}
+	st.record = record
+	st.present = record.Settings != nil
+	if st.present {
+		st.current = cloneSettingsValue(*record.Settings)
+		st.confirmed = cloneSettingsValue(*record.Settings)
+	}
+	st.staged = true
+	return nil
+}
+func (st *parentKidsFlagDefaultsLeaseState) completeLocked() {
+	if st.installed || !st.staged || !st.proof.Taken() {
+		return
+	}
+	s := st.service
+	s.pg.records[st.target] = st.record
+	if st.present {
+		s.settings[st.target] = st.current
+		s.pg.confirmed[st.target] = st.confirmed
+	} else {
+		delete(s.settings, st.target)
+		delete(s.pg.confirmed, st.target)
+	}
+	st.installed = true
+}
+func (l *ParentKidsFlagDefaultsLease) Complete() {
+	if l == nil || l.state == nil {
+		return
+	}
+	st := l.state
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	if st.self == l && !st.closed {
+		st.completeLocked()
+	}
+}
+func (l *ParentKidsFlagDefaultsLease) Quarantine() {
+	if l == nil || l.state == nil {
+		return
+	}
+	st := l.state
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	if st.self == l && !st.closed && !st.proof.Taken() {
+		st.service.markUserSettingsUnknownLocked([]string{st.target})
+	}
+}
+func (l *ParentKidsFlagDefaultsLease) Close() {
+	if l == nil || l.state == nil {
+		return
+	}
+	st := l.state
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	if st.self != l || st.closed {
+		return
+	}
+	if st.proof.Retire() {
+		st.completeLocked()
+	}
+	st.closed = true
+	st.service.mu.Unlock()
+}

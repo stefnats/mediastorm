@@ -344,6 +344,7 @@ const (
 	parentConfirmationRatingMovie
 	parentConfirmationRatingTV
 	parentConfirmationRatingPair
+	parentConfirmationKidsFlag
 )
 
 type parentModeEntry struct {
@@ -352,6 +353,7 @@ type parentModeEntry struct {
 	removal  *ParentListRemovalIntent
 	write    *ParentListWriteIntent
 	rating   *ParentRatingIntent
+	kids     *ParentKidsFlagIntent
 	actor    string
 	bytes    int
 	deadline time.Time
@@ -359,6 +361,9 @@ type parentModeEntry struct {
 }
 
 func (entry *parentModeEntry) close() {
+	if entry.kids != nil {
+		entry.kids.Close()
+	}
 	if entry.intent != nil {
 		entry.intent.Close()
 	}
@@ -937,4 +942,120 @@ func (v *PGProfilePins) BoundParentRatingRequest(r *http.Request, intent *Parent
 		return nil, datastore.ErrParentRatingUnavailable
 	}
 	return v.store.BoundParentRatingRequest(r, intent)
+}
+
+// ParentKidsFlagIntent is distinct from the older uninstalled flag-only port.
+type ParentKidsFlagIntent = datastore.ParentKidsFlagIntent
+
+func (v *PGProfilePins) parentKidsFlagChallenge(r *http.Request, target string, body []byte, management bool) (string, error) {
+	if v == nil || v.self != v || v.store == nil {
+		return "", datastore.ErrParentKidsFlagUnavailable
+	}
+	var i *ParentKidsFlagIntent
+	var err error
+	if management {
+		i, err = v.store.PrepareParentKidsFlagManagement(r, target, body, RequestTokens(r))
+	} else {
+		i, err = v.store.PrepareParentKidsFlagAPI(r, target, body, RequestTokens(r))
+	}
+	if err != nil {
+		return "", err
+	}
+	actor, size, deadline, err := v.store.ParentKidsFlagBudget(i)
+	if err != nil {
+		i.Close()
+		return "", err
+	}
+	return v.registerParentConfirmation(r, "pkf_", &parentModeEntry{action: parentConfirmationKidsFlag, kids: i, actor: actor, bytes: size, deadline: deadline})
+}
+func (v *PGProfilePins) ParentKidsFlagAPIChallenge(r *http.Request, target string, body []byte) (string, error) {
+	return v.parentKidsFlagChallenge(r, target, body, false)
+}
+func (v *PGProfilePins) ParentKidsFlagManagementChallenge(r *http.Request, target string, body []byte) (string, error) {
+	return v.parentKidsFlagChallenge(r, target, body, true)
+}
+func (v *PGProfilePins) claimParentKidsFlag(r *http.Request, target string, body []byte, token string, management bool) (*ParentKidsFlagIntent, error) {
+	if v == nil || v.self != v || v.store == nil {
+		return nil, datastore.ErrParentKidsFlagUnavailable
+	}
+	key, ok := parentConfirmationTokenKey(token, "pkf_")
+	if !ok {
+		return nil, datastore.ErrParentKidsFlagChanged
+	}
+	entry := v.claimParentConfirmation(key, parentConfirmationKidsFlag)
+	if entry == nil || entry.kids == nil {
+		return nil, datastore.ErrParentKidsFlagChanged
+	}
+	var err error
+	if management {
+		err = v.store.BindParentKidsFlagManagementRetry(r, entry.kids, target, body, RequestTokens(r))
+	} else {
+		err = v.store.BindParentKidsFlagAPIRetry(r, entry.kids, target, body, RequestTokens(r))
+	}
+	if err != nil {
+		entry.close()
+		return nil, err
+	}
+	return entry.kids, nil
+}
+func (v *PGProfilePins) ClaimParentKidsFlagAPI(r *http.Request, target string, body []byte, token string) (*ParentKidsFlagIntent, error) {
+	return v.claimParentKidsFlag(r, target, body, token, false)
+}
+func (v *PGProfilePins) ClaimParentKidsFlagManagement(r *http.Request, target string, body []byte, token string) (*ParentKidsFlagIntent, error) {
+	return v.claimParentKidsFlag(r, target, body, token, true)
+}
+func (v *PGProfilePins) immediateParentKidsFlag(r *http.Request, target string, body []byte, management bool) (*ParentKidsFlagIntent, error) {
+	if v == nil || v.self != v || v.store == nil {
+		return nil, datastore.ErrParentKidsFlagUnavailable
+	}
+	var i *ParentKidsFlagIntent
+	var err error
+	if management {
+		i, err = v.store.PrepareParentKidsFlagManagement(r, target, body, RequestTokens(r))
+	} else {
+		i, err = v.store.PrepareParentKidsFlagAPI(r, target, body, RequestTokens(r))
+	}
+	if err != nil {
+		return nil, err
+	}
+	if management {
+		err = v.store.BindParentKidsFlagManagementRetry(r, i, target, body, RequestTokens(r))
+	} else {
+		err = v.store.BindParentKidsFlagAPIRetry(r, i, target, body, RequestTokens(r))
+	}
+	if err != nil {
+		i.Close()
+		return nil, err
+	}
+	return i, nil
+}
+func (v *PGProfilePins) ImmediateParentKidsFlagAPI(r *http.Request, target string, body []byte) (*ParentKidsFlagIntent, error) {
+	return v.immediateParentKidsFlag(r, target, body, false)
+}
+func (v *PGProfilePins) ImmediateParentKidsFlagManagement(r *http.Request, target string, body []byte) (*ParentKidsFlagIntent, error) {
+	return v.immediateParentKidsFlag(r, target, body, true)
+}
+func (v *PGProfilePins) BoundParentKidsFlagRequest(r *http.Request, i *ParentKidsFlagIntent) (*http.Request, error) {
+	if v == nil || v.self != v || v.store == nil {
+		return nil, datastore.ErrParentKidsFlagUnavailable
+	}
+	return v.store.BoundParentKidsFlagRequest(r, i)
+}
+func (v *PGProfilePins) VerifyParentKidsFlag(r *http.Request, i *ParentKidsFlagIntent) error {
+	if v == nil || v.self != v || v.store == nil {
+		return datastore.ErrParentKidsFlagUnavailable
+	}
+	return v.store.VerifyParentKidsFlagPassword(r, i)
+}
+func (v *PGProfilePins) ParentKidsFlagSettingsRequired(i *ParentKidsFlagIntent) (bool, error) {
+	if v == nil || v.self != v || v.store == nil {
+		return false, datastore.ErrParentKidsFlagUnavailable
+	}
+	return v.store.ParentKidsFlagSettingsRequired(i)
+}
+func (v *PGProfilePins) TakeParentKidsFlagReceipt(i *ParentKidsFlagIntent, r *datastore.ParentKidsFlagReceipt, u, s *datastore.ParentKidsFlagCacheLease) error {
+	if v == nil || v.self != v || v.store == nil {
+		return datastore.ErrParentKidsFlagUnavailable
+	}
+	return v.store.TakeParentKidsFlagReceipt(i, r, u, s)
 }
