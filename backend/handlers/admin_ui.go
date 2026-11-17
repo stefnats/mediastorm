@@ -2164,6 +2164,8 @@ func (h *AdminUIHandler) SettingsPage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	settings = redactSABImportPreviewRoots(settings)
+
 	usersList := h.getScopedUsers(isAdmin, accountID)
 
 	// Check if non-admin user has no profiles

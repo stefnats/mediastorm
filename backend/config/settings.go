@@ -588,9 +588,12 @@ type ImportSettings struct {
 
 // SABnzbdSettings defines SABnzbd fallback configuration
 type SABnzbdSettings struct {
-	Enabled        *bool  `json:"enabled"`
-	FallbackHost   string `json:"fallbackHost"`
-	FallbackAPIKey string `json:"fallbackApiKey"`
+	// Explicit private remote-to-local completed-directory mapping. Empty disables preview.
+	ImportPreviewRemoteRoot string `json:"importPreviewRemoteRoot,omitempty"`
+	ImportPreviewLocalRoot  string `json:"importPreviewLocalRoot,omitempty"`
+	Enabled                 *bool  `json:"enabled"`
+	FallbackHost            string `json:"fallbackHost"`
+	FallbackAPIKey          string `json:"fallbackApiKey"`
 }
 
 // AltMountSettings captures legacy AltMount configuration and is ignored by the
