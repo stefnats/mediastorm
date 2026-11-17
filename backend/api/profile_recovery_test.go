@@ -111,7 +111,9 @@ func TestProfileRecoveryRegisteredReadsAndAdoptsWithoutWriting(t *testing.T) {
 			if !ok {
 				t.Fatal("missing original cached profile")
 			}
-			f.exec(`UPDATE users SET name='Persisted recovery name',is_kids_profile=true,kids_mode='content_list',kids_max_rating='generic-value',kids_max_movie_rating='movie-value',kids_max_tv_rating='tv-value',kids_allowed_lists='null'::jsonb,updated_at=clock_timestamp() WHERE id=$1`, f.open)
+			// Recovery reports stored facts, including values changed by another
+			// writer. These booleans do not grant effective Kids-profile rights.
+			f.exec(`UPDATE users SET name='Persisted recovery name',is_kids_profile=true,kids_mode='content_list',kids_max_rating='generic-value',kids_max_movie_rating='movie-value',kids_max_tv_rating='tv-value',kids_allowed_lists='null'::jsonb,allow_live_takeover=$2,allow_recording_interruption=$3,updated_at=clock_timestamp() WHERE id=$1`, f.open, !master, master)
 			f.exec(`INSERT INTO user_settings(user_id,settings) VALUES($1,'{"metadata":{"primaryLanguage":"fra"},"display":{"simpleMode":false},"future":{"precise":9007199254740993}}'::jsonb)`, f.open)
 			before := recoveryAPIFingerprint(t, f)
 			response := recoveryAPIRequest(f, f.open, token, "", nil)
@@ -122,7 +124,7 @@ func TestProfileRecoveryRegisteredReadsAndAdoptsWithoutWriting(t *testing.T) {
 			if json.Unmarshal(response.Body.Bytes(), &root) != nil || json.Unmarshal(root["profile"], &profile) != nil || json.Unmarshal(root["recovery"], &status) != nil {
 				t.Fatal("invalid recovery DTO")
 			}
-			wanted := []string{"id", "isKidsProfile", "kidsAllowedLists", "kidsMaxMovieRating", "kidsMaxRating", "kidsMaxTVRating", "kidsMode", "name"}
+			wanted := []string{"allowLiveTakeover", "allowRecordingInterruption", "id", "isKidsProfile", "kidsAllowedLists", "kidsMaxMovieRating", "kidsMaxRating", "kidsMaxTVRating", "kidsMode", "name"}
 			sort.Strings(wanted)
 			if !reflect.DeepEqual(recoveryAPIKeys(root), []string{"profile", "recovery"}) || !reflect.DeepEqual(recoveryAPIKeys(profile), wanted) || !reflect.DeepEqual(recoveryAPIKeys(status), []string{"settingsPendingUncertainty", "usersWriteBlocked"}) {
 				t.Fatal("recovery exposed fields outside its safe DTO")
@@ -136,12 +138,18 @@ func TestProfileRecoveryRegisteredReadsAndAdoptsWithoutWriting(t *testing.T) {
 			if string(profile["isKidsProfile"]) != "true" || string(status["usersWriteBlocked"]) != "false" || string(status["settingsPendingUncertainty"]) != "false" {
 				t.Fatal("response changed recovery status or saved profile type")
 			}
+			for key, want := range map[string]bool{"allowLiveTakeover": !master, "allowRecordingInterruption": master} {
+				expected, err := json.Marshal(want)
+				if err != nil || !bytes.Equal(profile[key], expected) {
+					t.Fatal("recovery did not report the exact stored permission boolean")
+				}
+			}
 			var lists []string
 			if json.Unmarshal(profile["kidsAllowedLists"], &lists) != nil || lists == nil || len(lists) != 0 {
 				t.Fatal("DTO did not project a nil stored list as an empty array")
 			}
 			actual, ok := f.users.Get(f.open)
-			if !ok || actual.Name == old.Name || actual.Name != "Persisted recovery name" || !actual.IsKidsProfile || actual.KidsMode != "content_list" || actual.KidsMaxRating != "generic-value" || actual.KidsMaxMovieRating != "movie-value" || actual.KidsMaxTVRating != "tv-value" || actual.KidsAllowedLists != nil {
+			if !ok || actual.Name == old.Name || actual.Name != "Persisted recovery name" || !actual.IsKidsProfile || actual.KidsMode != "content_list" || actual.KidsMaxRating != "generic-value" || actual.KidsMaxMovieRating != "movie-value" || actual.KidsMaxTVRating != "tv-value" || actual.KidsAllowedLists != nil || actual.AllowLiveTakeover != !master || actual.AllowRecordingInterruption != master {
 				t.Fatal("registered recovery failed to adopt only actual saved values")
 			}
 			saved, err := pair.settings.Get(f.open)

@@ -312,6 +312,9 @@ function switchTab(tab) {
 }
 
 async function loadData() {
+    retireProfileEditorAction();
+    const load = ++profileDataGeneration;
+    const currentLoad = () => load === profileDataGeneration && !profilePageRetired;
     try {
         if (isAdmin) {
             const [accountsRes, profilesRes, clientsRes, versionRes, defaultPwdRes, invitationsRes, connectionInvitesRes, remoteAccessStatusRes, scheduledTasksRes] = await Promise.all([
@@ -325,6 +328,7 @@ async function loadData() {
                 fetch(basePath + '/api/remote-access/status').then(r => r.ok ? r.json() : null),
                 fetch(basePath + '/api/scheduled-tasks').then(r => r.ok ? r.json() : { tasks: [] })
             ]);
+            if (!currentLoad()) return;
             accounts = accountsRes.accounts || [];
             profiles = profilesRes || [];
             clients = Array.isArray(clientsRes) ? clientsRes : [];
@@ -341,7 +345,7 @@ async function loadData() {
                     const sRes = await fetch(basePath + '/api/user-settings?userId=' + p.id);
                     if (sRes.ok) {
                         const s = await sRes.json();
-                        p._maxStreams = s?.playback?.maxConcurrentStreams || 0;
+                        if (currentLoad()) p._maxStreams = s?.playback?.maxConcurrentStreams || 0;
                     }
                 } catch (e) { p._maxStreams = 0; }
             }));
@@ -350,9 +354,10 @@ async function loadData() {
             try {
                 const settingsRes = await fetch(basePath + '/api/settings').then(r => r.json());
                 const el = document.getElementById('globalMaxStreams');
-                if (el) el.value = settingsRes?.playback?.maxConcurrentStreams || 0;
+                if (el && currentLoad()) el.value = settingsRes?.playback?.maxConcurrentStreams || 0;
             } catch (e) { /* ignore */ }
 
+            if (!currentLoad()) return;
             renderHouseholds();
             renderProfileTasksSummary();
             renderInvitations();
@@ -364,6 +369,7 @@ async function loadData() {
                 fetch(basePath + '/api/clients').then(r => r.ok ? r.json() : []),
                 fetch(basePath + '/api/scheduled-tasks').then(r => r.ok ? r.json() : { tasks: [] })
             ]);
+            if (!currentLoad()) return;
             accounts = accountsRes.accounts || [];
             profiles = profilesRes || [];
             clients = Array.isArray(clientsRes) ? clientsRes : [];
@@ -374,10 +380,12 @@ async function loadData() {
                     if (response.ok) p._maxStreams = (await response.json())?.playback?.maxConcurrentStreams || 0;
                 } catch (_) { p._maxStreams = 0; }
             }));
+            if (!currentLoad()) return;
             renderHouseholds();
             renderProfileTasksSummary();
         }
     } catch (err) {
+        if (!currentLoad()) return;
         console.error('Failed to load data:', err);
         const container = document.getElementById('households-list');
         if (container) container.innerHTML = `<p style="color: var(--danger);">Failed to load: ${escapeHtml(err.message)}</p>`;
@@ -823,12 +831,86 @@ function renderProfileTasksSummary() {
     }).join('') || '<div class="card"><div class="card-body text-muted">No account profiles are available.</div></div>';
 }
 
+// These lifetimes belong to the actual modal and its input instances. They do
+// not extend a server confirmation or undo earlier cosmetic writes.
+let profileEditorGeneration = 0;
+let profileDataGeneration = 0;
+let profileEditorAction = null;
+let profilePageRetired = false;
+let profileUsersWriteBlocked = false;
+const profileFlagUncertain = new Set();
+function retireProfileEditorAction() {
+    profileEditorGeneration++;
+    const action = profileEditorAction;
+    profileEditorAction = null;
+    action?.controller.abort();
+}
+window.addEventListener('pagehide', () => { profilePageRetired = true; retireProfileEditorAction(); });
+function profileEditorControls(form, id) {
+    const save = form?.querySelector('button[type="submit"]');
+    if (save) save.disabled = profilePageRetired || profileEditorAction !== null || profileUsersWriteBlocked || profileFlagUncertain.has(id);
+    const reload = form?.querySelector('[data-profile-reload]');
+    if (reload) reload.disabled = profilePageRetired || profileEditorAction !== null;
+}
+function captureProfileEditor(form, profile) {
+    if (profileEditorAction || profilePageRetired || !form?.isConnected || !profiles.includes(profile)) return null;
+    const inputs = Array.from(form.querySelectorAll('input,select'));
+    const values = inputs.map(input => [input, input.value, input.checked]);
+    const generation = profileEditorGeneration, owner = profiles;
+    const action = {controller: new AbortController(), form, profile};
+    action.current = () => profileEditorAction === action && !action.controller.signal.aborted && !profilePageRetired &&
+        generation === profileEditorGeneration && owner === profiles && owner.includes(profile) && form.isConnected &&
+        document.querySelector('#modal-content form') === form &&
+        inputs.length === form.querySelectorAll('input,select').length && values.every(([input,value,checked]) =>
+            input.isConnected && form.contains(input) && input.value === value && input.checked === checked);
+    profileEditorAction = action;
+    profileEditorControls(form, profile.id);
+    return action;
+}
+function finishProfileEditor(action) {
+    if (profileEditorAction !== action) return;
+    profileEditorAction = null;
+    action.controller.abort();
+    profileEditorControls(action.form, action.profile.id);
+}
+function profileEditorStatus(form, message) {
+    const status = form.querySelector('[data-profile-state-status]');
+    if (status) status.textContent = message;
+}
+async function reloadProfileEditor(form, profile) {
+    profileDataGeneration++;
+    const action = captureProfileEditor(form, profile);
+    if (!action) return;
+    try {
+        const response = await window.profileRecoveryFetch(basePath + '/api/users/' + encodeURIComponent(profile.id) + '/state/reload',
+            {method:'POST', signal:action.controller.signal}, action.current);
+        if (!action.current()) return;
+        if (!response.ok) throw new Error('Saved state unavailable');
+        const value = await response.json();
+        if (!action.current()) return;
+        if (!window.validateRecoveredProfile(value, profile.id)) throw new Error('Invalid saved state');
+        // Preserve the live Name/Color/Privacy controls. Only adopted saved facts
+        // change; recovery is not another Name/Color/Privacy save.
+        Object.assign(profile, value.profile);
+        profileUsersWriteBlocked = value.recovery.usersWriteBlocked;
+        profileFlagUncertain.delete(profile.id);
+        form.elements.isKids.checked = profile.isKidsProfile;
+        profileEditorStatus(form, profileUsersWriteBlocked ? 'Saved profile state reloaded. Other profile changes still need recovery.' :
+            value.recovery.settingsPendingUncertainty ? 'Saved profile state reloaded. Other saved settings still need recovery.' : 'Saved profile state reloaded.');
+    } catch (error) {
+        if (action.current()) profileEditorStatus(form, 'Saved profile state could not be reloaded. No save was retried.');
+    } finally { finishProfileEditor(action); }
+}
+
 function showModal(html) {
+    profileDataGeneration++;
+    retireProfileEditorAction();
     document.getElementById('modal-content').innerHTML = html;
     document.getElementById('modal-overlay').style.display = 'flex';
 }
 
 function hideModal() {
+    retireProfileEditorAction();
     document.getElementById('modal-overlay').style.display = 'none';
 }
 
@@ -1012,7 +1094,7 @@ function showEditProfileModal(profileId) {
     showModal(`
         <div class="card-header"><h2>${isAdmin ? 'Manage Person' : 'Edit Profile'}</h2></div>
         <div class="card-body">
-            <form onsubmit="updateProfile(event, '${profileId}')">
+            <form data-profile-editor>
                 <div class="form-group">
                     <label class="form-label">${isAdmin ? 'Person Name' : 'Profile Name'}</label>
                     <input type="text" name="name" class="form-input" value="${escapeHtml(p.name)}" required>
@@ -1065,47 +1147,73 @@ function showEditProfileModal(profileId) {
         </div>
     `);
     setupColorPicker();
+    const form = document.querySelector('#modal-content form');
+    form.addEventListener('submit', event => updateProfile(event, profileId));
+    const reload = document.createElement('button');
+    reload.type = 'button'; reload.className = 'btn btn-secondary'; reload.dataset.profileReload = '';
+    reload.textContent = 'Reload saved profile state';
+    reload.addEventListener('click', () => reloadProfileEditor(form, p));
+    const status = document.createElement('p'); status.dataset.profileStateStatus = ''; status.setAttribute('role', 'status');
+    form.append(reload, status);
+    const edited = () => { retireProfileEditorAction(); profileEditorControls(form, profileId); };
+    form.addEventListener('input', edited); form.addEventListener('change', edited);
+    profileEditorControls(form, profileId);
 }
 
 async function updateProfile(e, profileId) {
     e.preventDefault();
-    const form = e.target;
-    const profile = profiles.find(x => x.id === profileId);
-    const fallbackColor = PROFILE_COLORS.includes(profile?.color) ? profile.color : DEFAULT_PROFILE_COLOR;
+    const form = e.target, profile = profiles.find(x => x.id === profileId);
+    if (!profile || profileUsersWriteBlocked || profileFlagUncertain.has(profileId)) return;
+    const action = captureProfileEditor(form, profile);
+    if (!action) return;
+    const name = form.elements.name.value, desired = form.elements.isKids.checked;
+    const privacy = form.elements.activityPrivacy.value;
+    const color = getSelectedProfileColor(form, profile.color);
+    let cosmetics = 0, flagStarted = false;
+    const write = async (suffix, body) => {
+        if (!action.current()) throw new DOMException('Original form ended', 'AbortError');
+        const response = await fetch(basePath + '/api/profiles' + suffix + '?profileId=' + encodeURIComponent(profileId), {
+            method:'PUT', headers:{'Content-Type':'application/json'}, body:JSON.stringify(body), signal:action.controller.signal
+        });
+        if (!action.current()) throw new DOMException('Original form ended', 'AbortError');
+        if (!response.ok) throw new Error('Profile edit could not be saved');
+    };
     try {
-        // Update name
-        await fetch(basePath + '/api/profiles?profileId=' + encodeURIComponent(profileId), {
-            method: 'PUT',
-            headers: {'Content-Type': 'application/json'},
-            body: JSON.stringify({ name: form.name.value })
-        });
-        // Update color
-        await fetch(basePath + '/api/profiles/color?profileId=' + encodeURIComponent(profileId), {
-            method: 'PUT',
-            headers: {'Content-Type': 'application/json'},
-            body: JSON.stringify({ color: getSelectedProfileColor(form, fallbackColor) })
-        });
-        // Cosmetic profile edits do not need a parental confirmation.
-        if (Boolean(profile?.isKidsProfile) !== form.isKids.checked) {
-            const kidsResponse = await fetch(basePath + '/api/profiles/kids?profileId=' + encodeURIComponent(profileId), {
-                method: 'PUT',
-                headers: {'Content-Type': 'application/json'},
-                body: JSON.stringify({ isKidsProfile: form.isKids.checked })
-            });
-            if (!kidsResponse.ok) throw new Error(await kidsResponse.text());
+        await write('', {name}); cosmetics++;
+        await write('/color', {color}); cosmetics++;
+        if (Boolean(profile.isKidsProfile) !== desired) {
+            if (!action.current()) return;
+            flagStarted = true;
+            // A canceled/lost reply can follow a real commit. Only an explicit
+            // reload may recover that target; never repeat the flag automatically.
+            profileFlagUncertain.add(profileId);
+            const response = await window.parentProfileFlagFetch(basePath + '/api/profiles/kids?profileId=' + encodeURIComponent(profileId), {
+                method:'PUT', headers:{'Content-Type':'application/json'}, body:JSON.stringify({isKidsProfile:desired}), signal:action.controller.signal
+            }, action.current);
+            if (!action.current()) return;
+            const value = await response.json().catch(() => null);
+            if (!action.current()) return;
+            if (!response.ok) {
+                if (window.profileFlagDefinitelyRefused(response.status, value)) profileFlagUncertain.delete(profileId);
+                throw new Error('Profile flag was not confirmed');
+            }
+            const projection = window.profileFlagProjection(value, profileId, desired, response);
+            Object.assign(profile, projection);
+            profileFlagUncertain.delete(profileId);
         }
-        const privacyResponse = await fetch(basePath + '/api/profiles/activity-privacy?profileId=' + encodeURIComponent(profileId), {
-            method: 'PUT',
-            headers: {'Content-Type': 'application/json'},
-            body: JSON.stringify({ activityPrivacy: form.activityPrivacy.value })
-        });
-        if (!privacyResponse.ok) throw new Error(await privacyResponse.text());
+        await write('/activity-privacy', {activityPrivacy:privacy});
+        if (!action.current()) return;
+        // Every field here has its own successful response. No whole partial
+        // Cookie DTO replaces accountId or the existing permissions context.
+        profile.name = name; profile.color = color; profile.activityPrivacy = privacy;
         hideModal();
         showToast('Profile updated');
         loadData();
-    } catch (err) {
-        showToast('Error: ' + err.message, 'error');
-    }
+    } catch (error) {
+        if (action.current()) profileEditorStatus(form, flagStarted && profileFlagUncertain.has(profileId) ?
+            'The profile flag result is not known. Reload saved profile state before saving again. Earlier profile edits may already be saved.' :
+            cosmetics ? 'Profile update stopped. Earlier profile edits may already be saved.' : 'Profile update could not be saved.');
+    } finally { finishProfileEditor(action); }
 }
 
 async function setPin(profileId, pin) {

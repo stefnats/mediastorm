@@ -14286,15 +14286,21 @@
 
     // Profile management functions
     async function loadProfiles() {
+        retireSettingsFlagActions();
+        const load = ++settingsProfilesLoadGeneration;
         try {
             const response = await fetch(basePath + '/api/profiles');
             if (response.ok) {
-                profilesData = await response.json();
+                const value = await response.json();
+                if (load !== settingsProfilesLoadGeneration || settingsFlagPageRetired) return;
+                profilesData = value;
             } else {
+                if (load !== settingsProfilesLoadGeneration || settingsFlagPageRetired) return;
                 console.error('Failed to load profiles');
                 profilesData = [];
             }
         } catch (e) {
+            if (load !== settingsProfilesLoadGeneration || settingsFlagPageRetired) return;
             console.error('Error loading profiles:', e);
             profilesData = [];
         }
@@ -14789,26 +14795,115 @@
         }
     }
 
-    async function setKidsProfile(profileId, isKids) {
+    let settingsFlagGeneration = 0;
+    let settingsProfilesLoadGeneration = 0;
+    let settingsFlagPageRetired = false;
+    let settingsUsersWriteBlocked = false;
+    const settingsFlagActions = new Map();
+    const settingsFlagUncertain = new Set();
+    function retireSettingsFlagActions() {
+        settingsFlagGeneration++;
+        for (const action of settingsFlagActions.values()) action.controller.abort();
+        settingsFlagActions.clear();
+    }
+    window.addEventListener('pagehide', () => { settingsFlagPageRetired = true; retireSettingsFlagActions(); });
+    function settingsFlagControls(row, profile) {
+        const toggle = row.querySelector('[data-kids-flag]');
+        if (toggle) toggle.disabled = settingsFlagPageRetired || settingsUsersWriteBlocked || settingsFlagUncertain.has(profile.id) || settingsFlagActions.has(row);
+        const reload = row.querySelector('[data-kids-flag-reload]');
+        if (reload) reload.disabled = settingsFlagPageRetired || settingsFlagActions.has(row);
+    }
+    function captureSettingsFlag(row, profile, checkbox) {
+        if (settingsFlagPageRetired || settingsFlagActions.has(row) || !row.isConnected || !profilesData.includes(profile)) return null;
+        const records = profilesData, scope = settingsDisclosureContext(), generation = settingsFlagGeneration;
+        const inputs = Array.from(row.querySelectorAll('input,select'));
+        const values = inputs.map(input => [input, input.value, input.checked]);
+        const action = {controller:new AbortController()};
+        action.current = () => !settingsFlagPageRetired && !action.controller.signal.aborted && settingsFlagActions.get(row) === action &&
+            settingsFlagGeneration === generation && settingsDisclosureContext() === scope && profilesData === records && records.includes(profile) &&
+            row.isConnected && row.querySelector('[data-kids-flag]') === checkbox && inputs.length === row.querySelectorAll('input,select').length &&
+            values.every(([input, value, checked]) => row.contains(input) && input.value === value && input.checked === checked);
+        settingsFlagActions.set(row, action);
+        settingsFlagControls(row, profile);
+        return action;
+    }
+    function finishSettingsFlag(row, profile, action) {
+        if (settingsFlagActions.get(row) !== action) return;
+        settingsFlagActions.delete(row); action.controller.abort();
+        settingsFlagControls(row, profile);
+    }
+    function settingsFlagStatus(row, message) {
+        row.querySelector('[data-kids-flag-status]').textContent = message;
+    }
+    async function setKidsProfile(profile, checkbox, row) {
+        if (settingsUsersWriteBlocked || settingsFlagUncertain.has(profile.id)) return;
+        const desired = checkbox.checked, action = captureSettingsFlag(row, profile, checkbox);
+        if (!action) return;
+        settingsFlagUncertain.add(profile.id);
         try {
-            const response = await fetch(basePath + '/api/profiles/kids?profileId=' + encodeURIComponent(profileId), {
-                method: 'PUT',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ isKidsProfile: isKids })
-            });
-            if (response.ok) {
-                const updated = await response.json();
-                const idx = profilesData.findIndex(p => p.id === profileId);
-                if (idx >= 0) profilesData[idx] = updated;
-                showToast(isKids ? 'Kids profile enabled' : 'Kids profile disabled');
-                renderSettings();
-            } else {
-                const error = await response.text();
-                showToast(error || 'Failed to update kids profile setting', 'error');
+            const response = await window.parentProfileFlagFetch(basePath + '/api/profiles/kids?profileId=' + encodeURIComponent(profile.id), {
+                method:'PUT', headers:{'Content-Type':'application/json'}, body:JSON.stringify({isKidsProfile:desired}), signal:action.controller.signal
+            }, action.current);
+            if (!action.current()) return;
+            const value = await response.json().catch(() => null);
+            if (!action.current()) return;
+            if (!response.ok) {
+                if (window.profileFlagDefinitelyRefused(response.status, value)) settingsFlagUncertain.delete(profile.id);
+                throw new Error('Profile flag not confirmed');
             }
-        } catch (e) {
-            showToast('Error updating kids profile: ' + e.message, 'error');
-        }
+            Object.assign(profile, window.profileFlagProjection(value, profile.id, desired, response));
+            settingsFlagUncertain.delete(profile.id);
+            settingsFlagStatus(row, desired ? 'Kids profile enabled' : 'Kids profile disabled');
+        } catch (error) {
+            if (action.current()) {
+                if (!settingsFlagUncertain.has(profile.id)) checkbox.checked = Boolean(profile.isKidsProfile);
+                settingsFlagStatus(row, settingsFlagUncertain.has(profile.id) ?
+                    'The profile flag result is not known. Reload saved profile state before saving again.' : 'Profile flag was not confirmed.');
+            }
+        } finally { finishSettingsFlag(row, profile, action); }
+    }
+    async function reloadSettingsProfile(profile, checkbox, row) {
+        settingsProfilesLoadGeneration++;
+        const action = captureSettingsFlag(row, profile, checkbox);
+        if (!action) return;
+        try {
+            const response = await window.profileRecoveryFetch(basePath + '/api/users/' + encodeURIComponent(profile.id) + '/state/reload',
+                {method:'POST', signal:action.controller.signal}, action.current);
+            if (!action.current()) return;
+            if (!response.ok) throw new Error('Saved state unavailable');
+            const value = await response.json();
+            if (!action.current()) return;
+            if (!window.validateRecoveredProfile(value, profile.id)) throw new Error('Invalid saved state');
+            Object.assign(profile, value.profile);
+            settingsUsersWriteBlocked = value.recovery.usersWriteBlocked;
+            settingsFlagUncertain.delete(profile.id);
+            document.querySelectorAll('[data-kids-flag]').forEach(control => {
+                const owner = profilesData[Number(control.dataset.kidsFlag)];
+                if (owner) settingsFlagControls(control.closest('.array-item'), owner);
+            });
+            checkbox.checked = profile.isKidsProfile;
+            // No renderSettings(): unrelated live controls/drafts keep their owners.
+            settingsFlagStatus(row, settingsUsersWriteBlocked ? 'Saved profile state reloaded. Other profile changes still need recovery.' :
+                value.recovery.settingsPendingUncertainty ? 'Saved profile state reloaded. Other saved settings still need recovery.' : 'Saved profile state reloaded.');
+        } catch (error) {
+            if (action.current()) settingsFlagStatus(row, 'Saved profile state could not be reloaded. No save was retried.');
+        } finally { finishSettingsFlag(row, profile, action); }
+    }
+    function bindSettingsFlagRows(container) {
+        container.querySelectorAll('[data-kids-flag]').forEach(checkbox => {
+            const profile = profilesData[Number(checkbox.dataset.kidsFlag)];
+            const row = checkbox.closest('.array-item');
+            if (!profile || !row) return;
+            checkbox.addEventListener('change', () => setKidsProfile(profile, checkbox, row));
+            row.querySelector('[data-kids-flag-reload]').addEventListener('click', () => reloadSettingsProfile(profile, checkbox, row));
+            const changed = () => {
+                const action = settingsFlagActions.get(row);
+                if (action) { settingsFlagActions.delete(row); action.controller.abort(); }
+                settingsFlagControls(row, profile);
+            };
+            row.addEventListener('input', changed, true); row.addEventListener('change', changed, true);
+            settingsFlagControls(row, profile);
+        });
     }
 
     function customizeKidsProfile(profileId) {
@@ -14966,7 +15061,7 @@
                 '</div>';
         }
 
-        const profilesHtml = profilesData.map(profile => {
+        const profilesHtml = profilesData.map((profile, profileIndex) => {
             const avatarColor = profile.color || '#3B82F6';
             const initial = (profile.name || 'U').charAt(0).toUpperCase();
             const pinStatus = profile.hasPin
@@ -14985,7 +15080,7 @@
                 : '<button class="btn btn-sm btn-icon" disabled title="Cannot delete last profile" style="opacity: 0.5; cursor: not-allowed;">' + icons.trash + '</button>';
 
             const kidsToggle = '<label style="display: flex; align-items: center; gap: 0.5rem; cursor: pointer;">' +
-                '<input type="checkbox" ' + (profile.isKidsProfile ? 'checked' : '') + ' onchange="setKidsProfile(\'' + profile.id + '\', this.checked)" style="width: 16px; height: 16px;">' +
+                '<input type="checkbox" data-kids-flag="' + profileIndex + '" ' + (profile.isKidsProfile ? 'checked' : '') + ' style="width: 16px; height: 16px;">' +
                 '<span style="font-size: 0.875rem;">This is a kids profile</span>' +
                 '</label>';
 
@@ -15025,6 +15120,8 @@
                 '<div>' +
                 '<div style="font-size: 0.75rem; font-weight: 500; color: var(--text-secondary); margin-bottom: 0.5rem;">Kids Profile</div>' +
                 '<div>' + kidsToggle + kidsCustomizeBtn + '</div>' +
+                '<button type="button" class="btn btn-sm btn-secondary" data-kids-flag-reload>Reload saved profile state</button>' +
+                '<p role="status" data-kids-flag-status></p>' +
                 '</div>' +
                 '</div>' +
                 '</div>';
@@ -15055,6 +15152,7 @@
     }
 
     function renderSettings() {
+        retireSettingsFlagActions();
         const container = document.getElementById('settingsContainer');
         renderSettingsWorkspaceNavigation();
 
@@ -15156,6 +15254,7 @@
         }
 
         container.innerHTML = html;
+        bindSettingsFlagRows(container);
         restoreSettingsDisclosureState(container, disclosureState);
 
         // Restore previously open sections (or auto-expand if searching)

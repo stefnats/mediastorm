@@ -21,14 +21,16 @@ var (
 )
 
 type Profile struct {
-	ID                 string   `json:"id"`
-	Name               string   `json:"name"`
-	IsKidsProfile      bool     `json:"isKidsProfile"`
-	KidsMode           string   `json:"kidsMode"`
-	KidsMaxRating      string   `json:"kidsMaxRating"`
-	KidsMaxMovieRating string   `json:"kidsMaxMovieRating"`
-	KidsMaxTVRating    string   `json:"kidsMaxTVRating"`
-	KidsAllowedLists   []string `json:"kidsAllowedLists"`
+	ID                         string   `json:"id"`
+	Name                       string   `json:"name"`
+	IsKidsProfile              bool     `json:"isKidsProfile"`
+	KidsMode                   string   `json:"kidsMode"`
+	KidsMaxRating              string   `json:"kidsMaxRating"`
+	KidsMaxMovieRating         string   `json:"kidsMaxMovieRating"`
+	KidsMaxTVRating            string   `json:"kidsMaxTVRating"`
+	KidsAllowedLists           []string `json:"kidsAllowedLists"`
+	AllowLiveTakeover          bool     `json:"allowLiveTakeover"`
+	AllowRecordingInterruption bool     `json:"allowRecordingInterruption"`
 }
 type Recovery struct {
 	UsersWriteBlocked          bool `json:"usersWriteBlocked"`
@@ -101,7 +103,7 @@ func safeProfile(value models.User) (Profile, error) {
 		return Profile{}, datastore.ErrProfileRecoveryUnavailable
 	}
 	lists := append([]string{}, value.KidsAllowedLists...)
-	return Profile{ID: value.ID, Name: value.Name, IsKidsProfile: value.IsKidsProfile, KidsMode: value.KidsMode, KidsMaxRating: value.KidsMaxRating, KidsMaxMovieRating: value.KidsMaxMovieRating, KidsMaxTVRating: value.KidsMaxTVRating, KidsAllowedLists: lists}, nil
+	return Profile{ID: value.ID, Name: value.Name, IsKidsProfile: value.IsKidsProfile, KidsMode: value.KidsMode, KidsMaxRating: value.KidsMaxRating, KidsMaxMovieRating: value.KidsMaxMovieRating, KidsMaxTVRating: value.KidsMaxTVRating, KidsAllowedLists: lists, AllowLiveTakeover: value.AllowLiveTakeover, AllowRecordingInterruption: value.AllowRecordingInterruption}, nil
 }
 func (s *Service) recover(original *http.Request, target string, entry entryKind, policy func() config.SecuritySettings) (*Result, error) {
 	if s == nil || s.self != s || s.store == nil || s.users == nil || s.settings == nil || s.pins == nil || original == nil || entry != apiEntry && entry != managementEntry {

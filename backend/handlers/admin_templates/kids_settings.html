@@ -519,14 +519,7 @@ function exactRecoveryObject(value, keys) {
 }
 
 function validateProfileRecovery(value) {
-    const fields = ['id', 'name', 'isKidsProfile', 'kidsMode', 'kidsMaxRating', 'kidsMaxMovieRating', 'kidsMaxTVRating', 'kidsAllowedLists'];
-    if (!exactRecoveryObject(value, ['profile', 'recovery']) || !exactRecoveryObject(value.profile, fields) ||
-        !exactRecoveryObject(value.recovery, ['usersWriteBlocked', 'settingsPendingUncertainty'])) return false;
-    const saved = value.profile;
-    return saved.id === profileId && typeof saved.name === 'string' && typeof saved.isKidsProfile === 'boolean' &&
-        ['kidsMode', 'kidsMaxRating', 'kidsMaxMovieRating', 'kidsMaxTVRating'].every(key => typeof saved[key] === 'string') &&
-        Array.isArray(saved.kidsAllowedLists) && saved.kidsAllowedLists.every(item => typeof item === 'string') &&
-        typeof value.recovery.usersWriteBlocked === 'boolean' && typeof value.recovery.settingsPendingUncertainty === 'boolean';
+    return window.validateRecoveredProfile(value, profileId);
 }
 
 function renderProfileSettings(saved) {

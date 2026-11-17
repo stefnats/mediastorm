@@ -107,6 +107,10 @@ with sync_playwright() as pw:
         lambda dto: dto['profile'].update(kidsAllowedLists=[None]),
         lambda dto: dto['recovery'].update(usersWriteBlocked='false'),
         lambda dto: dto['profile'].update(pinHash='synthetic-field-must-not-be-accepted'),
+        lambda dto: dto['profile'].pop('allowLiveTakeover'),
+        lambda dto: dto['profile'].update(allowLiveTakeover=None),
+        lambda dto: dto['profile'].pop('allowRecordingInterruption'),
+        lambda dto: dto['profile'].update(allowRecordingInterruption='false'),
     ]
     for mutate in malformed:
         before = loaded()
