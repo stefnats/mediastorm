@@ -1981,3 +1981,13 @@ exact ten wire bodies. Latest closed native source remains local at 2,116 tests
 and both APKs; previously requested five-branch publication approval is pending.
 No production activation, real provider query, private playlist or upstream
 submission occurred.
+
+## Fork-only native cached Continue Watching contract
+
+The native cached Continue Watching request builder now has an independent backend contract test. Seven exported URLs run unchanged against the real local history producer, original-language cache reader and display-list handler over HTTP. The checks cover the complete 702-row producer, current suppression before paging, late language matches, unknown-language OR selection and original episode/resume coordinates without extra provider work.
+
+The test-only branch `test/native-cached-watching-contract` and combined `feature/integrated-requirements` both point to `f38f981250a26e8b401ca2687f3e33d3c0e7b477`. Eight normal and 24 repeated race test events pass. The combined committed source passes 10,890 test events in 106 packages, with 38 explicit optional skips; nine isolated PostgreSQL opt-ins and five unchanged native request exports are included. Its server build carries the same clean revision.
+
+The matching native consumer is complete locally with 2,151 JVM tests and both APKs. Its newest branch has not been published. The native evidence covers actual helper/transport seams, source wiring and built APKs; it does not execute full authenticated Android send, Compose input or a physical device. Backend authentication in this new contract test is injected over a synthetic owner, and separate registered API/PIN coverage remains separate.
+
+No upstream pull request, comment, production activation or private provider/playlist access is included. The initial reverse fixture compile error and exact source snapshot are retained; it is not a product failure.
