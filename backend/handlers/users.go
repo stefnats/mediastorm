@@ -1465,6 +1465,11 @@ func (h *UsersHandler) SetKidsAllowedLists(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
+	if h.pgPins != nil {
+		h.currentParentListReplace(w, r, id)
+		return
+	}
+
 	// Verify caller can configure this profile
 	if !h.canConfigureKidsProfile(r, id) {
 		http.Error(w, "cannot configure kids settings for this profile", http.StatusForbidden)
@@ -1505,6 +1510,11 @@ func (h *UsersHandler) AddKidsAllowedList(w http.ResponseWriter, r *http.Request
 	id := strings.TrimSpace(vars["userID"])
 	if id == "" {
 		http.Error(w, "user id is required", http.StatusBadRequest)
+		return
+	}
+
+	if h.pgPins != nil {
+		h.currentParentListAdd(w, r, id)
 		return
 	}
 

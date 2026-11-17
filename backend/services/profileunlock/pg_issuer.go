@@ -338,12 +338,15 @@ type parentConfirmationAction uint8
 const (
 	parentConfirmationMode parentConfirmationAction = iota + 1
 	parentConfirmationListRemoval
+	parentConfirmationListAdd
+	parentConfirmationListReplace
 )
 
 type parentModeEntry struct {
 	action   parentConfirmationAction
 	intent   *ParentModeIntent
 	removal  *ParentListRemovalIntent
+	write    *ParentListWriteIntent
 	actor    string
 	bytes    int
 	deadline time.Time
@@ -356,6 +359,9 @@ func (entry *parentModeEntry) close() {
 	}
 	if entry.removal != nil {
 		entry.removal.Close()
+	}
+	if entry.write != nil {
+		entry.write.Close()
 	}
 }
 
@@ -566,4 +572,122 @@ func (v *PGProfilePins) BoundParentListRemovalRequest(r *http.Request, intent *P
 		return nil, datastore.ErrParentListRemovalUnavailable
 	}
 	return v.store.BoundParentListRemovalRequest(r, intent)
+}
+
+// ParentListWriteIntent remains opaque and action-bound throughout the facade.
+type ParentListWriteIntent = datastore.ParentListWriteIntent
+
+func (v *PGProfilePins) ParentListAddChallenge(r *http.Request, target string, body []byte) (string, error) {
+	return v.parentListWriteChallenge(parentConfirmationListAdd, "pla_", r, target, body)
+}
+func (v *PGProfilePins) ParentListReplaceChallenge(r *http.Request, target string, body []byte) (string, error) {
+	return v.parentListWriteChallenge(parentConfirmationListReplace, "plw_", r, target, body)
+}
+func (v *PGProfilePins) parentListWriteChallenge(action parentConfirmationAction, prefix string, r *http.Request, target string, body []byte) (string, error) {
+	if !v.valid() || r == nil || r.URL == nil {
+		return "", datastore.ErrParentListWriteUnavailable
+	}
+	var intent *ParentListWriteIntent
+	var err error
+	if action == parentConfirmationListAdd {
+		intent, err = v.store.PrepareParentListAdd(r, target, body, RequestTokens(r))
+	} else if action == parentConfirmationListReplace {
+		intent, err = v.store.PrepareParentListReplace(r, target, body, RequestTokens(r))
+	} else {
+		return "", datastore.ErrParentListWriteChanged
+	}
+	if err != nil {
+		return "", err
+	}
+	actor, size, deadline, err := v.store.ParentListWriteBudget(intent)
+	if err != nil {
+		intent.Close()
+		return "", err
+	}
+	token, err := v.registerParentConfirmation(r, prefix, &parentModeEntry{action: action, write: intent, actor: actor, bytes: size, deadline: deadline})
+	if err != nil {
+		return "", datastore.ErrParentListWriteUnavailable
+	}
+	return token, nil
+}
+func (v *PGProfilePins) ClaimParentListAdd(r *http.Request, target string, body []byte, token string) (*ParentListWriteIntent, error) {
+	return v.claimParentListWrite(parentConfirmationListAdd, "pla_", r, target, body, token)
+}
+func (v *PGProfilePins) ClaimParentListReplace(r *http.Request, target string, body []byte, token string) (*ParentListWriteIntent, error) {
+	return v.claimParentListWrite(parentConfirmationListReplace, "plw_", r, target, body, token)
+}
+func (v *PGProfilePins) claimParentListWrite(action parentConfirmationAction, prefix string, r *http.Request, target string, body []byte, token string) (*ParentListWriteIntent, error) {
+	if !v.valid() || r == nil || r.URL == nil {
+		return nil, datastore.ErrParentListWriteUnavailable
+	}
+	key, ok := parentConfirmationTokenKey(token, prefix)
+	if !ok {
+		return nil, datastore.ErrParentListWriteChanged
+	}
+	entry := v.claimParentConfirmation(key, action)
+	if entry == nil {
+		return nil, datastore.ErrParentListWriteChanged
+	}
+	if !entry.deadline.After(time.Now()) {
+		entry.close()
+		return nil, datastore.ErrParentListWriteChanged
+	}
+	var err error
+	if action == parentConfirmationListAdd {
+		err = v.store.BindParentListAddRetry(r, entry.write, target, body, RequestTokens(r))
+	} else if action == parentConfirmationListReplace {
+		err = v.store.BindParentListReplaceRetry(r, entry.write, target, body, RequestTokens(r))
+	} else {
+		err = datastore.ErrParentListWriteChanged
+	}
+	if err != nil {
+		entry.close()
+		return nil, err
+	}
+	return entry.write, nil
+}
+func (v *PGProfilePins) ImmediateParentListAdd(r *http.Request, target string, body []byte) (*ParentListWriteIntent, error) {
+	return v.immediateParentListWrite(parentConfirmationListAdd, r, target, body)
+}
+func (v *PGProfilePins) ImmediateParentListReplace(r *http.Request, target string, body []byte) (*ParentListWriteIntent, error) {
+	return v.immediateParentListWrite(parentConfirmationListReplace, r, target, body)
+}
+func (v *PGProfilePins) immediateParentListWrite(action parentConfirmationAction, r *http.Request, target string, body []byte) (*ParentListWriteIntent, error) {
+	if !v.valid() || r == nil || r.URL == nil {
+		return nil, datastore.ErrParentListWriteUnavailable
+	}
+	var intent *ParentListWriteIntent
+	var err error
+	if action == parentConfirmationListAdd {
+		intent, err = v.store.PrepareParentListAdd(r, target, body, RequestTokens(r))
+	} else if action == parentConfirmationListReplace {
+		intent, err = v.store.PrepareParentListReplace(r, target, body, RequestTokens(r))
+	} else {
+		return nil, datastore.ErrParentListWriteChanged
+	}
+	if err != nil {
+		return nil, err
+	}
+	if action == parentConfirmationListAdd {
+		err = v.store.BindParentListAddRetry(r, intent, target, body, RequestTokens(r))
+	} else {
+		err = v.store.BindParentListReplaceRetry(r, intent, target, body, RequestTokens(r))
+	}
+	if err != nil {
+		intent.Close()
+		return nil, err
+	}
+	return intent, nil
+}
+func (v *PGProfilePins) VerifyParentListWrite(r *http.Request, intent *ParentListWriteIntent) error {
+	if !v.valid() {
+		return datastore.ErrParentListWriteUnavailable
+	}
+	return v.store.VerifyParentListWritePassword(r, intent)
+}
+func (v *PGProfilePins) BoundParentListWriteRequest(r *http.Request, intent *ParentListWriteIntent) (*http.Request, error) {
+	if !v.valid() {
+		return nil, datastore.ErrParentListWriteUnavailable
+	}
+	return v.store.BoundParentListWriteRequest(r, intent)
 }

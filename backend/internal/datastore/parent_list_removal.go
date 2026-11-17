@@ -149,7 +149,7 @@ func (ds *DataStore) PrepareParentListRemoval(r *http.Request, target, listURL s
 	for _, list := range lists {
 		listBytes += len(list)
 	}
-	size := len(tuple.session.raw) + len(tuple.actor.raw) + len(tuple.profile.raw) + len(tuple.owner.raw) + len(tuple.grants) + len(path) + len(r.URL.RawPath) + len(query) + len(client) + len(listURL) + listBytes + len(hashes)*64 + 1024
+	size := len(tuple.session.raw) + len(tuple.actor.raw) + len(tuple.profile.raw) + len(tuple.owner.raw) + len(tuple.grants) + len(path) + len(r.URL.RawPath) + len(query) + len(client) + len(listURL) + listBytes + len(lists)*16 + len(hashes)*64 + 1024
 	if size > parentModeSnapshotLimit {
 		return nil, ErrParentListRemovalUnavailable
 	}
