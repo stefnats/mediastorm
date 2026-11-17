@@ -340,6 +340,10 @@ const (
 	parentConfirmationListRemoval
 	parentConfirmationListAdd
 	parentConfirmationListReplace
+	parentConfirmationRatingGeneric
+	parentConfirmationRatingMovie
+	parentConfirmationRatingTV
+	parentConfirmationRatingPair
 )
 
 type parentModeEntry struct {
@@ -347,6 +351,7 @@ type parentModeEntry struct {
 	intent   *ParentModeIntent
 	removal  *ParentListRemovalIntent
 	write    *ParentListWriteIntent
+	rating   *ParentRatingIntent
 	actor    string
 	bytes    int
 	deadline time.Time
@@ -362,6 +367,9 @@ func (entry *parentModeEntry) close() {
 	}
 	if entry.write != nil {
 		entry.write.Close()
+	}
+	if entry.rating != nil {
+		entry.rating.Close()
 	}
 }
 
@@ -690,4 +698,243 @@ func (v *PGProfilePins) BoundParentListWriteRequest(r *http.Request, intent *Par
 		return nil, datastore.ErrParentListWriteUnavailable
 	}
 	return v.store.BoundParentListWriteRequest(r, intent)
+}
+
+type ParentRatingIntent = datastore.ParentRatingIntent
+
+func (v *PGProfilePins) ParentRatingGenericChallenge(r *http.Request, target string, body []byte) (string, error) {
+	if !v.valid() || r == nil || r.URL == nil {
+		return "", datastore.ErrParentRatingUnavailable
+	}
+	intent, err := v.store.PrepareParentRatingGeneric(r, target, body, RequestTokens(r))
+	if err != nil {
+		return "", err
+	}
+	actor, size, deadline, err := v.store.ParentRatingBudget(intent)
+	if err != nil {
+		intent.Close()
+		return "", err
+	}
+	token, err := v.registerParentConfirmation(r, "prg_", &parentModeEntry{action: parentConfirmationRatingGeneric, rating: intent, actor: actor, bytes: size, deadline: deadline})
+	if err != nil {
+		return "", datastore.ErrParentRatingUnavailable
+	}
+	return token, nil
+}
+func (v *PGProfilePins) ClaimParentRatingGeneric(r *http.Request, target string, body []byte, token string) (*ParentRatingIntent, error) {
+	if !v.valid() || r == nil || r.URL == nil {
+		return nil, datastore.ErrParentRatingUnavailable
+	}
+	key, ok := parentConfirmationTokenKey(token, "prg_")
+	if !ok {
+		return nil, datastore.ErrParentRatingChanged
+	}
+	entry := v.claimParentConfirmation(key, parentConfirmationRatingGeneric)
+	if entry == nil {
+		return nil, datastore.ErrParentRatingChanged
+	}
+	if !entry.deadline.After(time.Now()) {
+		entry.close()
+		return nil, datastore.ErrParentRatingChanged
+	}
+	if err := v.store.BindParentRatingGenericRetry(r, entry.rating, target, body, RequestTokens(r)); err != nil {
+		entry.close()
+		return nil, err
+	}
+	return entry.rating, nil
+}
+func (v *PGProfilePins) ImmediateParentRatingGeneric(r *http.Request, target string, body []byte) (*ParentRatingIntent, error) {
+	if !v.valid() || r == nil || r.URL == nil {
+		return nil, datastore.ErrParentRatingUnavailable
+	}
+	intent, err := v.store.PrepareParentRatingGeneric(r, target, body, RequestTokens(r))
+	if err != nil {
+		return nil, err
+	}
+	if err = v.store.BindParentRatingGenericRetry(r, intent, target, body, RequestTokens(r)); err != nil {
+		intent.Close()
+		return nil, err
+	}
+	return intent, nil
+}
+
+func (v *PGProfilePins) ParentRatingMovieChallenge(r *http.Request, target string, body []byte) (string, error) {
+	if !v.valid() || r == nil || r.URL == nil {
+		return "", datastore.ErrParentRatingUnavailable
+	}
+	intent, err := v.store.PrepareParentRatingMovie(r, target, body, RequestTokens(r))
+	if err != nil {
+		return "", err
+	}
+	actor, size, deadline, err := v.store.ParentRatingBudget(intent)
+	if err != nil {
+		intent.Close()
+		return "", err
+	}
+	token, err := v.registerParentConfirmation(r, "prm_", &parentModeEntry{action: parentConfirmationRatingMovie, rating: intent, actor: actor, bytes: size, deadline: deadline})
+	if err != nil {
+		return "", datastore.ErrParentRatingUnavailable
+	}
+	return token, nil
+}
+func (v *PGProfilePins) ClaimParentRatingMovie(r *http.Request, target string, body []byte, token string) (*ParentRatingIntent, error) {
+	if !v.valid() || r == nil || r.URL == nil {
+		return nil, datastore.ErrParentRatingUnavailable
+	}
+	key, ok := parentConfirmationTokenKey(token, "prm_")
+	if !ok {
+		return nil, datastore.ErrParentRatingChanged
+	}
+	entry := v.claimParentConfirmation(key, parentConfirmationRatingMovie)
+	if entry == nil {
+		return nil, datastore.ErrParentRatingChanged
+	}
+	if !entry.deadline.After(time.Now()) {
+		entry.close()
+		return nil, datastore.ErrParentRatingChanged
+	}
+	if err := v.store.BindParentRatingMovieRetry(r, entry.rating, target, body, RequestTokens(r)); err != nil {
+		entry.close()
+		return nil, err
+	}
+	return entry.rating, nil
+}
+func (v *PGProfilePins) ImmediateParentRatingMovie(r *http.Request, target string, body []byte) (*ParentRatingIntent, error) {
+	if !v.valid() || r == nil || r.URL == nil {
+		return nil, datastore.ErrParentRatingUnavailable
+	}
+	intent, err := v.store.PrepareParentRatingMovie(r, target, body, RequestTokens(r))
+	if err != nil {
+		return nil, err
+	}
+	if err = v.store.BindParentRatingMovieRetry(r, intent, target, body, RequestTokens(r)); err != nil {
+		intent.Close()
+		return nil, err
+	}
+	return intent, nil
+}
+
+func (v *PGProfilePins) ParentRatingTVChallenge(r *http.Request, target string, body []byte) (string, error) {
+	if !v.valid() || r == nil || r.URL == nil {
+		return "", datastore.ErrParentRatingUnavailable
+	}
+	intent, err := v.store.PrepareParentRatingTV(r, target, body, RequestTokens(r))
+	if err != nil {
+		return "", err
+	}
+	actor, size, deadline, err := v.store.ParentRatingBudget(intent)
+	if err != nil {
+		intent.Close()
+		return "", err
+	}
+	token, err := v.registerParentConfirmation(r, "prt_", &parentModeEntry{action: parentConfirmationRatingTV, rating: intent, actor: actor, bytes: size, deadline: deadline})
+	if err != nil {
+		return "", datastore.ErrParentRatingUnavailable
+	}
+	return token, nil
+}
+func (v *PGProfilePins) ClaimParentRatingTV(r *http.Request, target string, body []byte, token string) (*ParentRatingIntent, error) {
+	if !v.valid() || r == nil || r.URL == nil {
+		return nil, datastore.ErrParentRatingUnavailable
+	}
+	key, ok := parentConfirmationTokenKey(token, "prt_")
+	if !ok {
+		return nil, datastore.ErrParentRatingChanged
+	}
+	entry := v.claimParentConfirmation(key, parentConfirmationRatingTV)
+	if entry == nil {
+		return nil, datastore.ErrParentRatingChanged
+	}
+	if !entry.deadline.After(time.Now()) {
+		entry.close()
+		return nil, datastore.ErrParentRatingChanged
+	}
+	if err := v.store.BindParentRatingTVRetry(r, entry.rating, target, body, RequestTokens(r)); err != nil {
+		entry.close()
+		return nil, err
+	}
+	return entry.rating, nil
+}
+func (v *PGProfilePins) ImmediateParentRatingTV(r *http.Request, target string, body []byte) (*ParentRatingIntent, error) {
+	if !v.valid() || r == nil || r.URL == nil {
+		return nil, datastore.ErrParentRatingUnavailable
+	}
+	intent, err := v.store.PrepareParentRatingTV(r, target, body, RequestTokens(r))
+	if err != nil {
+		return nil, err
+	}
+	if err = v.store.BindParentRatingTVRetry(r, intent, target, body, RequestTokens(r)); err != nil {
+		intent.Close()
+		return nil, err
+	}
+	return intent, nil
+}
+
+func (v *PGProfilePins) ParentRatingPairChallenge(r *http.Request, target string, body []byte) (string, error) {
+	if !v.valid() || r == nil || r.URL == nil {
+		return "", datastore.ErrParentRatingUnavailable
+	}
+	intent, err := v.store.PrepareParentRatingPair(r, target, body, RequestTokens(r))
+	if err != nil {
+		return "", err
+	}
+	actor, size, deadline, err := v.store.ParentRatingBudget(intent)
+	if err != nil {
+		intent.Close()
+		return "", err
+	}
+	token, err := v.registerParentConfirmation(r, "prp_", &parentModeEntry{action: parentConfirmationRatingPair, rating: intent, actor: actor, bytes: size, deadline: deadline})
+	if err != nil {
+		return "", datastore.ErrParentRatingUnavailable
+	}
+	return token, nil
+}
+func (v *PGProfilePins) ClaimParentRatingPair(r *http.Request, target string, body []byte, token string) (*ParentRatingIntent, error) {
+	if !v.valid() || r == nil || r.URL == nil {
+		return nil, datastore.ErrParentRatingUnavailable
+	}
+	key, ok := parentConfirmationTokenKey(token, "prp_")
+	if !ok {
+		return nil, datastore.ErrParentRatingChanged
+	}
+	entry := v.claimParentConfirmation(key, parentConfirmationRatingPair)
+	if entry == nil {
+		return nil, datastore.ErrParentRatingChanged
+	}
+	if !entry.deadline.After(time.Now()) {
+		entry.close()
+		return nil, datastore.ErrParentRatingChanged
+	}
+	if err := v.store.BindParentRatingPairRetry(r, entry.rating, target, body, RequestTokens(r)); err != nil {
+		entry.close()
+		return nil, err
+	}
+	return entry.rating, nil
+}
+func (v *PGProfilePins) ImmediateParentRatingPair(r *http.Request, target string, body []byte) (*ParentRatingIntent, error) {
+	if !v.valid() || r == nil || r.URL == nil {
+		return nil, datastore.ErrParentRatingUnavailable
+	}
+	intent, err := v.store.PrepareParentRatingPair(r, target, body, RequestTokens(r))
+	if err != nil {
+		return nil, err
+	}
+	if err = v.store.BindParentRatingPairRetry(r, intent, target, body, RequestTokens(r)); err != nil {
+		intent.Close()
+		return nil, err
+	}
+	return intent, nil
+}
+
+func (v *PGProfilePins) VerifyParentRating(r *http.Request, intent *ParentRatingIntent) error {
+	if !v.valid() {
+		return datastore.ErrParentRatingUnavailable
+	}
+	return v.store.VerifyParentRatingPassword(r, intent)
+}
+func (v *PGProfilePins) BoundParentRatingRequest(r *http.Request, intent *ParentRatingIntent) (*http.Request, error) {
+	if !v.valid() {
+		return nil, datastore.ErrParentRatingUnavailable
+	}
+	return v.store.BoundParentRatingRequest(r, intent)
 }

@@ -880,6 +880,8 @@ func Register(
 	profileProtected.HandleFunc("/{userID}/kids/rating", usersHandler.Options).Methods(http.MethodOptions)
 	profileProtected.HandleFunc("/{userID}/kids/rating/movie", usersHandler.SetKidsMaxMovieRating).Methods(http.MethodPut)
 	profileProtected.HandleFunc("/{userID}/kids/rating/movie", usersHandler.Options).Methods(http.MethodOptions)
+	profileProtected.HandleFunc("/{userID}/kids/ratings", usersHandler.SetKidsRatings).Methods(http.MethodPut)
+	profileProtected.HandleFunc("/{userID}/kids/ratings", usersHandler.Options).Methods(http.MethodOptions)
 	profileProtected.HandleFunc("/{userID}/kids/rating/tv", usersHandler.SetKidsMaxTVRating).Methods(http.MethodPut)
 	profileProtected.HandleFunc("/{userID}/kids/rating/tv", usersHandler.Options).Methods(http.MethodOptions)
 	profileProtected.HandleFunc("/{userID}/kids/lists", usersHandler.SetKidsAllowedLists).Methods(http.MethodPut)

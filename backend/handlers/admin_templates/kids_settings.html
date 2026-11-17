@@ -82,6 +82,7 @@
             <div class="form-group">
                 <label class="form-label">Movie Rating (MPAA)</label>
                 <select id="movieRating" class="form-select" onchange="updateRatingPreview()">
+                    <option value="">No separate value</option>
                     <option value="G">G - General Audiences</option>
                     <option value="PG">PG - Parental Guidance Suggested</option>
                     <option value="PG-13">PG-13 - Parents Strongly Cautioned</option>
@@ -93,6 +94,7 @@
             <div class="form-group">
                 <label class="form-label">TV Rating</label>
                 <select id="tvRating" class="form-select" onchange="updateRatingPreview()">
+                    <option value="">No separate value</option>
                     <option value="TV-Y">TV-Y - All Children</option>
                     <option value="TV-Y7">TV-Y7 - Directed to Older Children</option>
                     <option value="TV-G">TV-G - General Audience</option>
@@ -104,13 +106,14 @@
 
             <div id="rating-preview" style="padding: 0.75rem; background: var(--bg-tertiary); border-radius: var(--radius); margin-top: 1rem;">
                 <p style="font-size: 0.875rem; color: var(--text-secondary); margin: 0;">
-                    <strong style="color: var(--text-primary);">Preview:</strong>
-                    Movies rated <span id="preview-movie" style="color: var(--accent);">G</span> or lower,
-                    TV shows rated <span id="preview-tv" style="color: var(--accent);">TV-Y</span> or lower will be allowed.
+                    <strong style="color: var(--text-primary);">Selected separate values:</strong>
+                    Movies: <span id="preview-movie" style="color: var(--accent);"></span>,
+                    TV: <span id="preview-tv" style="color: var(--accent);"></span>.
+                    Saving changes these two values together. When both are empty, the saved combined limit is kept.
                 </p>
             </div>
 
-            <button class="btn btn-primary" onclick="saveRating()" style="margin-top: 1rem;">
+            <button class="btn btn-primary" id="save-rating-pair" onclick="saveRating()" style="margin-top: 1rem;">
                 <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="width: 16px; height: 16px;">
                     <path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z"/>
                     <polyline points="17 21 17 13 7 13 7 21"/><polyline points="7 3 7 8 15 8"/>
@@ -318,6 +321,46 @@ let listRemovalUncertain = false;
 let listAdditionAction = null;
 let listAdditionGeneration = 0;
 let listAdditionUncertain = false;
+let ratingPairAction = null;
+let ratingPairGeneration = 0;
+let ratingPairUncertain = false;
+
+function ratingPairControls() {
+    const button = document.getElementById('save-rating-pair');
+    if (button) button.disabled = modePageRetired || modeProfileLoading || ratingPairUncertain || ratingPairAction !== null;
+}
+
+function retireRatingPair() {
+    ratingPairGeneration++;
+    const original = ratingPairAction;
+    ratingPairAction = null;
+    original?.controller.abort();
+    ratingPairControls();
+}
+
+function currentRatingPair(action) {
+    return ratingPairAction === action && !action.controller.signal.aborted && !modePageRetired && !modeProfileLoading &&
+        action.generation === ratingPairGeneration && action.page === modePageGeneration &&
+        profile === action.profile && profile?.id === profileId && profile.kidsMaxRating === action.generic &&
+        profile.kidsMaxMovieRating === action.originalMovie && profile.kidsMaxTVRating === action.originalTV &&
+        document.getElementById('rating-section') === action.form && action.form.isConnected &&
+        document.getElementById('movieRating') === action.movie && action.form.contains(action.movie) && action.movie.value === action.movieValue &&
+        document.getElementById('tvRating') === action.tv && action.form.contains(action.tv) && action.tv.value === action.tvValue &&
+        document.getElementById('save-rating-pair') === action.button && action.form.contains(action.button) &&
+        modeSelection() === action.mode && new URLSearchParams(window.location.search).get('profileId') === profileId;
+}
+
+function setRatingSelection(select, value) {
+    // Preserve an existing unknown scalar verbatim. These controls do not
+    // create a server enum, a regional mapping or a new content permission.
+    if (![...select.options].some(option => option.value === value)) {
+        const option = document.createElement('option');
+        option.value = value;
+        option.textContent = 'Saved value: ' + value;
+        select.appendChild(option);
+    }
+    select.value = value;
+}
 
 function listAdditionControls() {
     const button = document.getElementById('add-allowed-list');
@@ -394,11 +437,11 @@ function currentModeAction(action) {
         new URLSearchParams(window.location.search).get('profileId') === profileId && modeSelection() === action.mode;
 }
 
-window.addEventListener('pagehide', () => { modePageRetired = true; modePageGeneration++; retireModeAction(); retireListRemoval(); retireListAddition(); });
+window.addEventListener('pagehide', () => { modePageRetired = true; modePageGeneration++; retireModeAction(); retireListRemoval(); retireListAddition(); retireRatingPair(); });
 window.addEventListener('pageshow', event => {
-    if (event.persisted) { modePageRetired = false; modePageGeneration++; retireModeAction(); retireListRemoval(); retireListAddition(); }
+    if (event.persisted) { modePageRetired = false; modePageGeneration++; retireModeAction(); retireListRemoval(); retireListAddition(); retireRatingPair(); }
 });
-window.addEventListener('popstate', () => { retireModeAction(); retireListRemoval(); retireListAddition(); });
+window.addEventListener('popstate', () => { retireModeAction(); retireListRemoval(); retireListAddition(); retireRatingPair(); });
 
 // Rating mappings for sync
 const movieToTvRating = {
@@ -422,10 +465,12 @@ async function loadProfile() {
     retireModeAction();
     retireListRemoval();
     retireListAddition();
+    retireRatingPair();
     modeProfileLoading = true;
     modeControls();
     listRemovalControls();
     listAdditionControls();
+    ratingPairControls();
     const page = modePageGeneration;
     if (!profileId) {
         showToast('No profile ID provided', 'error');
@@ -458,11 +503,13 @@ async function loadProfile() {
         const mode = profile.kidsMode || 'rating';
         document.querySelector(`input[name="kidsMode"][value="${mode}"]`).checked = true;
 
-        // Set ratings - use separate movie/TV ratings, or fall back to old combined rating, or default to G/TV-Y
-        const movieRating = profile.kidsMaxMovieRating || profile.kidsMaxRating || 'G';
-        const tvRating = profile.kidsMaxTVRating || movieToTvRating[profile.kidsMaxRating] || 'TV-Y';
-        document.getElementById('movieRating').value = movieRating;
-        document.getElementById('tvRating').value = tvRating;
+        // Display the actual separate values. Saving an empty pair must not
+        // silently materialize the existing generic fallback as new values.
+        const movieRating = profile.kidsMaxMovieRating === undefined ? '' : profile.kidsMaxMovieRating;
+        const tvRating = profile.kidsMaxTVRating === undefined ? '' : profile.kidsMaxTVRating;
+        if (typeof movieRating !== 'string' || typeof tvRating !== 'string') throw new Error('Invalid saved ratings');
+        setRatingSelection(document.getElementById('movieRating'), movieRating);
+        setRatingSelection(document.getElementById('tvRating'), tvRating);
 
         // Render lists
         renderLists();
@@ -477,6 +524,8 @@ async function loadProfile() {
         listRemovalControls();
         listAdditionUncertain = false;
         listAdditionControls();
+        ratingPairUncertain = false;
+        ratingPairControls();
     } catch (err) {
         showToast('Error: ' + err.message, 'error');
     }
@@ -499,8 +548,8 @@ function updateSectionVisibility() {
 function updateRatingPreview() {
     const movieRating = document.getElementById('movieRating').value;
     const tvRating = document.getElementById('tvRating').value;
-    document.getElementById('preview-movie').textContent = movieRating;
-    document.getElementById('preview-tv').textContent = tvRating;
+    document.getElementById('preview-movie').textContent = movieRating || 'No separate value';
+    document.getElementById('preview-tv').textContent = tvRating || 'No separate value';
 }
 
 function renderLists() {
@@ -617,31 +666,68 @@ async function saveMode() {
 }
 
 async function saveRating() {
-    const movieRating = document.getElementById('movieRating').value;
-    const tvRating = document.getElementById('tvRating').value;
+    if (ratingPairAction || ratingPairUncertain || modePageRetired || modeProfileLoading) return;
+    const form = document.getElementById('rating-section');
+    const movie = document.getElementById('movieRating');
+    const tv = document.getElementById('tvRating');
+    const button = document.getElementById('save-rating-pair');
+    if (!form?.isConnected || !movie || !tv || !button || !form.contains(movie) || !form.contains(tv) || !form.contains(button) ||
+        profile?.id !== profileId || (profile.kidsMaxRating !== undefined && typeof profile.kidsMaxRating !== 'string') ||
+        new URLSearchParams(window.location.search).get('profileId') !== profileId || typeof window.parentRatingFetch !== 'function') return;
+    const action = {form, movie, tv, button, profile, generic: profile.kidsMaxRating, originalMovie: profile.kidsMaxMovieRating,
+        originalTV: profile.kidsMaxTVRating, movieValue: movie.value, tvValue: tv.value, mode: modeSelection(),
+        body: JSON.stringify({movieRating: movie.value, tvRating: tv.value}), generation: ++ratingPairGeneration,
+        page: modePageGeneration, controller: new AbortController()};
+    ratingPairAction = action;
+    ratingPairControls();
 
     try {
-        // Save movie rating
-        const movieRes = await fetch(basePath + '/api/users/' + profileId + '/kids/rating/movie', {
+        const res = await window.parentRatingFetch(basePath + '/api/users/' + encodeURIComponent(profileId) + '/kids/ratings', {
             method: 'PUT',
             headers: {'Content-Type': 'application/json'},
-            body: JSON.stringify({ rating: movieRating })
-        });
-        if (!movieRes.ok) throw new Error(await movieRes.text());
-
-        // Save TV rating
-        const tvRes = await fetch(basePath + '/api/users/' + profileId + '/kids/rating/tv', {
-            method: 'PUT',
-            headers: {'Content-Type': 'application/json'},
-            body: JSON.stringify({ rating: tvRating })
-        });
-        if (!tvRes.ok) throw new Error(await tvRes.text());
-
-        profile.kidsMaxMovieRating = movieRating;
-        profile.kidsMaxTVRating = tvRating;
+            body: action.body, signal: action.controller.signal
+        }, () => currentRatingPair(action));
+        if (!currentRatingPair(action)) return;
+        if (!res.ok) {
+            const error = await res.json().catch(() => null);
+            if (!currentRatingPair(action)) return;
+            if (error?.code === 'parent_confirmation_outcome_unknown') {
+                ratingPairUncertain = true;
+                showToast('The result is not known. Reload settings before trying again.', 'error');
+            } else if (error?.code === 'parent_confirmation_changed') {
+                showToast('Confirmation expired or the request changed. Save again.', 'error');
+            } else if (res.status === 429) {
+                showToast('Too many confirmation attempts. Wait before saving again.', 'error');
+            } else {
+                showToast('Confirmation was not completed. Save again when ready.', 'error');
+            }
+            return;
+        }
+        const saved = await res.json();
+        if (!currentRatingPair(action)) return;
+        const savedMovie = saved && Object.hasOwn(saved, 'kidsMaxMovieRating') ? saved.kidsMaxMovieRating : '';
+        const savedTV = saved && Object.hasOwn(saved, 'kidsMaxTVRating') ? saved.kidsMaxTVRating : '';
+        const savedGeneric = saved && Object.hasOwn(saved, 'kidsMaxRating') ? saved.kidsMaxRating : '';
+        const trim = value => value.replace(/^[\u0009-\u000d\u0020\u0085\u00a0\u1680\u2000-\u200a\u2028\u2029\u202f\u205f\u3000]+|[\u0009-\u000d\u0020\u0085\u00a0\u1680\u2000-\u200a\u2028\u2029\u202f\u205f\u3000]+$/g, '');
+        if (saved?.id !== profileId || typeof savedMovie !== 'string' || typeof savedTV !== 'string' ||
+            savedMovie !== trim(action.movieValue) || savedTV !== trim(action.tvValue) || savedGeneric !== (action.generic === undefined ? '' : action.generic)) throw new Error('Unconfirmed rating pair');
+        action.profile.kidsMaxMovieRating = savedMovie;
+        action.profile.kidsMaxTVRating = savedTV;
+        setRatingSelection(action.movie, savedMovie);
+        setRatingSelection(action.tv, savedTV);
+        updateRatingPreview();
+        retireRatingPair();
         showToast('Ratings saved');
     } catch (err) {
-        showToast('Error: ' + err.message, 'error');
+        if (!currentRatingPair(action) || err.name === 'AbortError') return;
+        ratingPairUncertain = true;
+        showToast('The result could not be confirmed. Reload settings before trying again.', 'error');
+    } finally {
+        if (ratingPairAction === action) {
+            const publish = currentRatingPair(action);
+            ratingPairAction = null;
+            if (publish) ratingPairControls();
+        }
     }
 }
 
@@ -785,8 +871,10 @@ async function removeList(url, row, button, lists) {
 
 // Listen for mode changes
 document.querySelectorAll('input[name="kidsMode"]').forEach(radio => {
-    radio.addEventListener('change', () => { retireModeAction(); retireListRemoval(); retireListAddition(); updateSectionVisibility(); });
+    radio.addEventListener('change', () => { retireModeAction(); retireListRemoval(); retireListAddition(); retireRatingPair(); updateSectionVisibility(); });
 });
+document.getElementById('movieRating').addEventListener('change', retireRatingPair);
+document.getElementById('tvRating').addEventListener('change', retireRatingPair);
 document.getElementById('new-list-url').addEventListener('input', retireListAddition);
 document.getElementById('new-list-url').addEventListener('change', retireListAddition);
 

@@ -94,7 +94,8 @@
             const mode = actionType === undefined && request.method === 'PUT' && /\/api\/users\/[^/]+\/kids\/mode$/.test(url.pathname) && /^pmi_[0-9a-f]{64}$/.test(body.parentIntent);
             const listRemoval = actionType === 'listRemoval' && typeof isCurrent === 'function' && request.method === 'DELETE' && request.body === null && /\/api\/users\/[^/]+\/kids\/lists$/.test(url.pathname) && /^pli_[0-9a-f]{64}$/.test(body.parentIntent);
             const listAddition = actionType === 'listAddition' && typeof isCurrent === 'function' && request.method === 'POST' && request.body !== null && /\/api\/users\/[^/]+\/kids\/lists$/.test(url.pathname) && /^pla_[0-9a-f]{64}$/.test(body.parentIntent);
-            if (!mode && !listRemoval && !listAddition) return response;
+            const ratingPair = actionType === 'ratingPair' && typeof isCurrent === 'function' && request.method === 'PUT' && request.body !== null && /\/api\/users\/[^/]+\/kids\/ratings$/.test(url.pathname) && /^prp_[0-9a-f]{64}$/.test(body.parentIntent);
+            if (!mode && !listRemoval && !listAddition && !ratingPair) return response;
             const generation = pageGeneration;
             if (!current()) throw abortError();
             legacyPrompt?.cancel();
@@ -133,5 +134,6 @@
     window.parentModeFetch = (input, options, isCurrent) => fetchWithConfirmation(input, options, isCurrent);
     window.parentListRemovalFetch = (input, options, isCurrent) => fetchWithConfirmation(input, options, isCurrent, 'listRemoval');
     window.parentListAdditionFetch = (input, options, isCurrent) => fetchWithConfirmation(input, options, isCurrent, 'listAddition');
+    window.parentRatingFetch = (input, options, isCurrent) => fetchWithConfirmation(input, options, isCurrent, 'ratingPair');
     window.addEventListener?.('pagehide', () => { pageGeneration++; intentPrompt?.cancel(); });
 })();

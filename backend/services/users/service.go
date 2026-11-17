@@ -927,6 +927,29 @@ func (s *Service) SetKidsMaxTVRating(id, rating string) (models.User, error) {
 	return user, nil
 }
 
+// SetKidsMaxRatings updates both separate limits with one existing persistence
+// operation. It intentionally leaves the generic legacy fallback unchanged.
+func (s *Service) SetKidsMaxRatings(id, movieRating, tvRating string) (models.User, error) {
+	id = strings.TrimSpace(id)
+	if id == "" {
+		return models.User{}, ErrUserNotFound
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	user, ok := s.users[id]
+	if !ok {
+		return models.User{}, ErrUserNotFound
+	}
+	user.KidsMaxMovieRating = strings.TrimSpace(movieRating)
+	user.KidsMaxTVRating = strings.TrimSpace(tvRating)
+	user.UpdatedAt = time.Now().UTC()
+	s.users[id] = user
+	if err := s.saveLocked(); err != nil {
+		return models.User{}, err
+	}
+	return cloneUser(s.users[id]), nil
+}
+
 // SetKidsAllowedLists replaces the allowed lists for a kids profile.
 func (s *Service) SetKidsAllowedLists(id string, lists []string) (models.User, error) {
 	id = strings.TrimSpace(id)
