@@ -45,3 +45,45 @@ func (v *PGPinIssuer) Commit(intent *PGPinIntent, proof *PGPinProof) (*PGPinComm
 	}
 	return v.core.Commit(intent, proof)
 }
+
+// PGPinAccess is a separate, uninstalled typed access adapter. It observes the
+// current absence of a PIN as well as current grants and never asks cached
+// users.HasPin/PinFingerprint or Service.Validate to decide the result.
+type PGPinAccess struct {
+	self *PGPinAccess
+	core *datastore.ProfilePinAccessReader
+}
+
+type PGPinAccessState = datastore.ProfilePinAccessState
+type PGPinAccessOutcome = datastore.ProfilePinAccessOutcome
+
+const (
+	PGPinUnavailable = datastore.ProfilePinUnavailable
+	PGPinNotFound    = datastore.ProfilePinNotFound
+	PGPinLocked      = datastore.ProfilePinLocked
+	PGPinNoPin       = datastore.ProfilePinNoPin
+	PGPinUnlocked    = datastore.ProfilePinUnlocked
+)
+
+func NewPGPinAccess(store *datastore.DataStore) *PGPinAccess {
+	value := &PGPinAccess{core: datastore.NewProfilePinAccessReader(store)}
+	value.self = value
+	return value
+}
+func (*PGPinAccess) MarshalJSON() ([]byte, error) { return []byte("null"), nil }
+func (*PGPinAccess) Format(f fmt.State, _ rune)   { _, _ = f.Write([]byte("PGPinAccess(opaque)")) }
+func (v *PGPinAccess) Read(r *http.Request, targetID string) (*PGPinAccessState, error) {
+	if v == nil || v.self != v || v.core == nil {
+		return nil, datastore.ErrProfilePinAccessUsed
+	}
+	if r == nil {
+		return nil, datastore.ErrProfilePinAccessUnavailable
+	}
+	return v.core.Read(r, targetID, RequestTokens(r))
+}
+func (v *PGPinAccess) Check(state *PGPinAccessState) (PGPinAccessOutcome, error) {
+	if v == nil || v.self != v || v.core == nil {
+		return PGPinUnavailable, datastore.ErrProfilePinAccessUsed
+	}
+	return v.core.Check(state)
+}
