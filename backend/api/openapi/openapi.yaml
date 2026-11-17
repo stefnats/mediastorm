@@ -1324,6 +1324,789 @@ paths:
         '401':
           $ref: '#/components/responses/Error'
 
+  /api/users/{userId}/kids/rating:
+    put:
+      operationId: parentRatingGenericWithConfirmation
+      summary: Save Generic rating settings with original parental confirmation
+      description: |
+        Existing scalar endpoint: change only kidsMaxRating plus updatedAt,
+        including identical and empty values; preserve the other two fields.
+        Existing JSON decoding/setter behavior remains: one Decode with unknown
+        fields rejected, case-insensitive names, duplicate/trailing semantics and
+        null into an existing scalar string retaining that previous string. Root
+        null/missing rating initially select empty. Only Go strings.TrimSpace is
+        applied; comments or UI choices do not impose a server enum. JSON retains
+        the previous Guard.Require/master behavior and has no new body limit.
+
+        PG requires fresh current account credentials even for a master. The
+        first 403 parent_authorization_required includes a prg_ opaque intent.
+        Retry exact original method/raw path/query/body with X-Parent-Intent and
+        X-Account-Password. Original full session/client/actor/owner/target row,
+        PIN and revocation epochs, selected values and original body bytes stay
+        bound. The PG body cap is 16384 bytes; changing bytes without changing
+        meaning is still a changed request. Intent kinds cannot be interchanged.
+        Its one-shot deadline is at most 30 seconds from capture, bounded by
+        original authority expiry and never renewed by response receipt.
+
+        Wrong password consumes the intent. Changed/expired/replayed proof is
+        409. Unknown COMMIT outcome is 503: reload before a new explicit save,
+        never retry automatically or downgrade to old scalar endpoints. Lost or
+        canceled replies do not undo completed writes. JSON returns no intent.
+        Existing ownership/PIN gates remain; no provider reads, stream stops,
+        token revocations or changed regional/age/playback rules are introduced.
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/UserID'
+        - $ref: '#/components/parameters/ParentRatingGenericIntent'
+        - $ref: '#/components/parameters/ParentAccountPassword'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/ParentRatingScalarRequest'}
+      responses:
+        '200':
+          description: The confirmed targeted profile; unrelated rating fields remain unchanged.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Profile'}
+        '400': {$ref: '#/components/responses/Error'}
+        '401': {$ref: '#/components/responses/Error'}
+        '403': {$ref: '#/components/responses/ParentRatingGenericForbidden'}
+        '404': {$ref: '#/components/responses/Error'}
+        '409':
+          description: Confirmation expired, consumed or changed; a new explicit action is required.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/ParentModeFailure'}
+        '413': {$ref: '#/components/responses/Error'}
+        '429': {$ref: '#/components/responses/Error'}
+        '503':
+          description: Unavailable or commit outcome unknown; never automatically retry.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/ParentModeFailure'}
+
+  /api/users/{userId}/kids/rating/movie:
+    put:
+      operationId: parentRatingMovieWithConfirmation
+      summary: Save Movie rating settings with original parental confirmation
+      description: |
+        Existing scalar endpoint: change only kidsMaxMovieRating plus updatedAt,
+        including identical and empty values; preserve the other two fields.
+        Existing JSON decoding/setter behavior remains: one Decode with unknown
+        fields rejected, case-insensitive names, duplicate/trailing semantics and
+        null into an existing scalar string retaining that previous string. Root
+        null/missing rating initially select empty. Only Go strings.TrimSpace is
+        applied; comments or UI choices do not impose a server enum. JSON retains
+        the previous Guard.Require/master behavior and has no new body limit.
+
+        PG requires fresh current account credentials even for a master. The
+        first 403 parent_authorization_required includes a prm_ opaque intent.
+        Retry exact original method/raw path/query/body with X-Parent-Intent and
+        X-Account-Password. Original full session/client/actor/owner/target row,
+        PIN and revocation epochs, selected values and original body bytes stay
+        bound. The PG body cap is 16384 bytes; changing bytes without changing
+        meaning is still a changed request. Intent kinds cannot be interchanged.
+        Its one-shot deadline is at most 30 seconds from capture, bounded by
+        original authority expiry and never renewed by response receipt.
+
+        Wrong password consumes the intent. Changed/expired/replayed proof is
+        409. Unknown COMMIT outcome is 503: reload before a new explicit save,
+        never retry automatically or downgrade to old scalar endpoints. Lost or
+        canceled replies do not undo completed writes. JSON returns no intent.
+        Existing ownership/PIN gates remain; no provider reads, stream stops,
+        token revocations or changed regional/age/playback rules are introduced.
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/UserID'
+        - $ref: '#/components/parameters/ParentRatingMovieIntent'
+        - $ref: '#/components/parameters/ParentAccountPassword'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/ParentRatingScalarRequest'}
+      responses:
+        '200':
+          description: The confirmed targeted profile; unrelated rating fields remain unchanged.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Profile'}
+        '400': {$ref: '#/components/responses/Error'}
+        '401': {$ref: '#/components/responses/Error'}
+        '403': {$ref: '#/components/responses/ParentRatingMovieForbidden'}
+        '404': {$ref: '#/components/responses/Error'}
+        '409':
+          description: Confirmation expired, consumed or changed; a new explicit action is required.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/ParentModeFailure'}
+        '413': {$ref: '#/components/responses/Error'}
+        '429': {$ref: '#/components/responses/Error'}
+        '503':
+          description: Unavailable or commit outcome unknown; never automatically retry.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/ParentModeFailure'}
+
+  /api/users/{userId}/kids/rating/tv:
+    put:
+      operationId: parentRatingTVWithConfirmation
+      summary: Save TV rating settings with original parental confirmation
+      description: |
+        Existing scalar endpoint: change only kidsMaxTVRating plus updatedAt,
+        including identical and empty values; preserve the other two fields.
+        Existing JSON decoding/setter behavior remains: one Decode with unknown
+        fields rejected, case-insensitive names, duplicate/trailing semantics and
+        null into an existing scalar string retaining that previous string. Root
+        null/missing rating initially select empty. Only Go strings.TrimSpace is
+        applied; comments or UI choices do not impose a server enum. JSON retains
+        the previous Guard.Require/master behavior and has no new body limit.
+
+        PG requires fresh current account credentials even for a master. The
+        first 403 parent_authorization_required includes a prt_ opaque intent.
+        Retry exact original method/raw path/query/body with X-Parent-Intent and
+        X-Account-Password. Original full session/client/actor/owner/target row,
+        PIN and revocation epochs, selected values and original body bytes stay
+        bound. The PG body cap is 16384 bytes; changing bytes without changing
+        meaning is still a changed request. Intent kinds cannot be interchanged.
+        Its one-shot deadline is at most 30 seconds from capture, bounded by
+        original authority expiry and never renewed by response receipt.
+
+        Wrong password consumes the intent. Changed/expired/replayed proof is
+        409. Unknown COMMIT outcome is 503: reload before a new explicit save,
+        never retry automatically or downgrade to old scalar endpoints. Lost or
+        canceled replies do not undo completed writes. JSON returns no intent.
+        Existing ownership/PIN gates remain; no provider reads, stream stops,
+        token revocations or changed regional/age/playback rules are introduced.
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/UserID'
+        - $ref: '#/components/parameters/ParentRatingTVIntent'
+        - $ref: '#/components/parameters/ParentAccountPassword'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/ParentRatingScalarRequest'}
+      responses:
+        '200':
+          description: The confirmed targeted profile; unrelated rating fields remain unchanged.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Profile'}
+        '400': {$ref: '#/components/responses/Error'}
+        '401': {$ref: '#/components/responses/Error'}
+        '403': {$ref: '#/components/responses/ParentRatingTVForbidden'}
+        '404': {$ref: '#/components/responses/Error'}
+        '409':
+          description: Confirmation expired, consumed or changed; a new explicit action is required.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/ParentModeFailure'}
+        '413': {$ref: '#/components/responses/Error'}
+        '429': {$ref: '#/components/responses/Error'}
+        '503':
+          description: Unavailable or commit outcome unknown; never automatically retry.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/ParentModeFailure'}
+
+  /api/users/{userId}/kids/ratings:
+    put:
+      operationId: parentRatingPairWithConfirmation
+      summary: Save Pair rating settings with original parental confirmation
+      description: |
+        New explicit atomic pair: both final decoded movieRating/tvRating
+        components must be present non-null strings; empty strings are allowed.
+        With duplicates, String then null is invalid; null then String is valid.
+        Existing case-insensitive field matching, DisallowUnknownFields and one
+        Decode/trailing behavior apply. Both values receive Go strings.TrimSpace.
+        PG changes exactly the two separate fields plus updatedAt in one target
+        CAS/SQL update. JSON changes both under one Users lock and one Save using
+        the previous Guard.Require/master policy. Both runtimes cap this new body
+        at 16384 bytes (413). Identical values still write updatedAt.
+
+        The generic kidsMaxRating is never changed. If both separate values are
+        empty, the existing generic fallback remains exactly as before. This is
+        not an enum validation, regional certification or playback permission.
+
+        PG requires fresh current account credentials even for a master. The
+        first 403 parent_authorization_required includes a prp_ opaque intent.
+        Retry exact original method/raw path/query/body with X-Parent-Intent and
+        X-Account-Password. Original full session/client/actor/owner/target row,
+        PIN and revocation epochs, selected values and original body bytes stay
+        bound. The PG body cap is 16384 bytes; changing bytes without changing
+        meaning is still a changed request. Intent kinds cannot be interchanged.
+        Its one-shot deadline is at most 30 seconds from capture, bounded by
+        original authority expiry and never renewed by response receipt.
+
+        Wrong password consumes the intent. Changed/expired/replayed proof is
+        409. Unknown COMMIT outcome is 503: reload before a new explicit save,
+        never retry automatically or downgrade to old scalar endpoints. Lost or
+        canceled replies do not undo completed writes. JSON returns no intent.
+        Existing ownership/PIN gates remain; no provider reads, stream stops,
+        token revocations or changed regional/age/playback rules are introduced.
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/UserID'
+        - $ref: '#/components/parameters/ParentRatingPairIntent'
+        - $ref: '#/components/parameters/ParentAccountPassword'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/ParentRatingPairRequest'}
+      responses:
+        '200':
+          description: The confirmed targeted profile; unrelated rating fields remain unchanged.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Profile'}
+        '400': {$ref: '#/components/responses/Error'}
+        '401': {$ref: '#/components/responses/Error'}
+        '403': {$ref: '#/components/responses/ParentRatingPairForbidden'}
+        '404': {$ref: '#/components/responses/Error'}
+        '409':
+          description: Confirmation expired, consumed or changed; a new explicit action is required.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/ParentModeFailure'}
+        '413': {$ref: '#/components/responses/Error'}
+        '429': {$ref: '#/components/responses/Error'}
+        '503':
+          description: Unavailable or commit outcome unknown; never automatically retry.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/ParentModeFailure'}
+
+  /admin/api/users/{userId}/kids/rating:
+    put:
+      operationId: parentAdminRatingGenericWithConfirmation
+      summary: Save Generic rating settings with original parental confirmation
+      description: |
+        Existing scalar endpoint: change only kidsMaxRating plus updatedAt,
+        including identical and empty values; preserve the other two fields.
+        Existing JSON decoding/setter behavior remains: one Decode with unknown
+        fields rejected, case-insensitive names, duplicate/trailing semantics and
+        null into an existing scalar string retaining that previous string. Root
+        null/missing rating initially select empty. Only Go strings.TrimSpace is
+        applied; comments or UI choices do not impose a server enum. JSON retains
+        the previous Guard.Require/master behavior and has no new body limit.
+
+        PG requires fresh current account credentials even for a master. The
+        first 403 parent_authorization_required includes a prg_ opaque intent.
+        Retry exact original method/raw path/query/body with X-Parent-Intent and
+        X-Account-Password. Original full session/client/actor/owner/target row,
+        PIN and revocation epochs, selected values and original body bytes stay
+        bound. The PG body cap is 16384 bytes; changing bytes without changing
+        meaning is still a changed request. Intent kinds cannot be interchanged.
+        Its one-shot deadline is at most 30 seconds from capture, bounded by
+        original authority expiry and never renewed by response receipt.
+
+        Wrong password consumes the intent. Changed/expired/replayed proof is
+        409. Unknown COMMIT outcome is 503: reload before a new explicit save,
+        never retry automatically or downgrade to old scalar endpoints. Lost or
+        canceled replies do not undo completed writes. JSON returns no intent.
+        Existing ownership/PIN gates remain; no provider reads, stream stops,
+        token revocations or changed regional/age/playback rules are introduced.
+      security:
+        - accountSession: []
+      parameters:
+        - $ref: '#/components/parameters/UserID'
+        - $ref: '#/components/parameters/ParentRatingGenericIntent'
+        - $ref: '#/components/parameters/ParentAccountPassword'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/ParentRatingScalarRequest'}
+      responses:
+        '200':
+          description: The confirmed targeted profile; unrelated rating fields remain unchanged.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Profile'}
+        '400': {$ref: '#/components/responses/Error'}
+        '401': {$ref: '#/components/responses/Error'}
+        '403': {$ref: '#/components/responses/ParentRatingGenericForbidden'}
+        '404': {$ref: '#/components/responses/Error'}
+        '409':
+          description: Confirmation expired, consumed or changed; a new explicit action is required.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/ParentModeFailure'}
+        '413': {$ref: '#/components/responses/Error'}
+        '429': {$ref: '#/components/responses/Error'}
+        '503':
+          description: Unavailable or commit outcome unknown; never automatically retry.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/ParentModeFailure'}
+
+  /admin/api/users/{userId}/kids/rating/movie:
+    put:
+      operationId: parentAdminRatingMovieWithConfirmation
+      summary: Save Movie rating settings with original parental confirmation
+      description: |
+        Existing scalar endpoint: change only kidsMaxMovieRating plus updatedAt,
+        including identical and empty values; preserve the other two fields.
+        Existing JSON decoding/setter behavior remains: one Decode with unknown
+        fields rejected, case-insensitive names, duplicate/trailing semantics and
+        null into an existing scalar string retaining that previous string. Root
+        null/missing rating initially select empty. Only Go strings.TrimSpace is
+        applied; comments or UI choices do not impose a server enum. JSON retains
+        the previous Guard.Require/master behavior and has no new body limit.
+
+        PG requires fresh current account credentials even for a master. The
+        first 403 parent_authorization_required includes a prm_ opaque intent.
+        Retry exact original method/raw path/query/body with X-Parent-Intent and
+        X-Account-Password. Original full session/client/actor/owner/target row,
+        PIN and revocation epochs, selected values and original body bytes stay
+        bound. The PG body cap is 16384 bytes; changing bytes without changing
+        meaning is still a changed request. Intent kinds cannot be interchanged.
+        Its one-shot deadline is at most 30 seconds from capture, bounded by
+        original authority expiry and never renewed by response receipt.
+
+        Wrong password consumes the intent. Changed/expired/replayed proof is
+        409. Unknown COMMIT outcome is 503: reload before a new explicit save,
+        never retry automatically or downgrade to old scalar endpoints. Lost or
+        canceled replies do not undo completed writes. JSON returns no intent.
+        Existing ownership/PIN gates remain; no provider reads, stream stops,
+        token revocations or changed regional/age/playback rules are introduced.
+      security:
+        - accountSession: []
+      parameters:
+        - $ref: '#/components/parameters/UserID'
+        - $ref: '#/components/parameters/ParentRatingMovieIntent'
+        - $ref: '#/components/parameters/ParentAccountPassword'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/ParentRatingScalarRequest'}
+      responses:
+        '200':
+          description: The confirmed targeted profile; unrelated rating fields remain unchanged.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Profile'}
+        '400': {$ref: '#/components/responses/Error'}
+        '401': {$ref: '#/components/responses/Error'}
+        '403': {$ref: '#/components/responses/ParentRatingMovieForbidden'}
+        '404': {$ref: '#/components/responses/Error'}
+        '409':
+          description: Confirmation expired, consumed or changed; a new explicit action is required.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/ParentModeFailure'}
+        '413': {$ref: '#/components/responses/Error'}
+        '429': {$ref: '#/components/responses/Error'}
+        '503':
+          description: Unavailable or commit outcome unknown; never automatically retry.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/ParentModeFailure'}
+
+  /admin/api/users/{userId}/kids/rating/tv:
+    put:
+      operationId: parentAdminRatingTVWithConfirmation
+      summary: Save TV rating settings with original parental confirmation
+      description: |
+        Existing scalar endpoint: change only kidsMaxTVRating plus updatedAt,
+        including identical and empty values; preserve the other two fields.
+        Existing JSON decoding/setter behavior remains: one Decode with unknown
+        fields rejected, case-insensitive names, duplicate/trailing semantics and
+        null into an existing scalar string retaining that previous string. Root
+        null/missing rating initially select empty. Only Go strings.TrimSpace is
+        applied; comments or UI choices do not impose a server enum. JSON retains
+        the previous Guard.Require/master behavior and has no new body limit.
+
+        PG requires fresh current account credentials even for a master. The
+        first 403 parent_authorization_required includes a prt_ opaque intent.
+        Retry exact original method/raw path/query/body with X-Parent-Intent and
+        X-Account-Password. Original full session/client/actor/owner/target row,
+        PIN and revocation epochs, selected values and original body bytes stay
+        bound. The PG body cap is 16384 bytes; changing bytes without changing
+        meaning is still a changed request. Intent kinds cannot be interchanged.
+        Its one-shot deadline is at most 30 seconds from capture, bounded by
+        original authority expiry and never renewed by response receipt.
+
+        Wrong password consumes the intent. Changed/expired/replayed proof is
+        409. Unknown COMMIT outcome is 503: reload before a new explicit save,
+        never retry automatically or downgrade to old scalar endpoints. Lost or
+        canceled replies do not undo completed writes. JSON returns no intent.
+        Existing ownership/PIN gates remain; no provider reads, stream stops,
+        token revocations or changed regional/age/playback rules are introduced.
+      security:
+        - accountSession: []
+      parameters:
+        - $ref: '#/components/parameters/UserID'
+        - $ref: '#/components/parameters/ParentRatingTVIntent'
+        - $ref: '#/components/parameters/ParentAccountPassword'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/ParentRatingScalarRequest'}
+      responses:
+        '200':
+          description: The confirmed targeted profile; unrelated rating fields remain unchanged.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Profile'}
+        '400': {$ref: '#/components/responses/Error'}
+        '401': {$ref: '#/components/responses/Error'}
+        '403': {$ref: '#/components/responses/ParentRatingTVForbidden'}
+        '404': {$ref: '#/components/responses/Error'}
+        '409':
+          description: Confirmation expired, consumed or changed; a new explicit action is required.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/ParentModeFailure'}
+        '413': {$ref: '#/components/responses/Error'}
+        '429': {$ref: '#/components/responses/Error'}
+        '503':
+          description: Unavailable or commit outcome unknown; never automatically retry.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/ParentModeFailure'}
+
+  /admin/api/users/{userId}/kids/ratings:
+    put:
+      operationId: parentAdminRatingPairWithConfirmation
+      summary: Save Pair rating settings with original parental confirmation
+      description: |
+        New explicit atomic pair: both final decoded movieRating/tvRating
+        components must be present non-null strings; empty strings are allowed.
+        With duplicates, String then null is invalid; null then String is valid.
+        Existing case-insensitive field matching, DisallowUnknownFields and one
+        Decode/trailing behavior apply. Both values receive Go strings.TrimSpace.
+        PG changes exactly the two separate fields plus updatedAt in one target
+        CAS/SQL update. JSON changes both under one Users lock and one Save using
+        the previous Guard.Require/master policy. Both runtimes cap this new body
+        at 16384 bytes (413). Identical values still write updatedAt.
+
+        The generic kidsMaxRating is never changed. If both separate values are
+        empty, the existing generic fallback remains exactly as before. This is
+        not an enum validation, regional certification or playback permission.
+
+        PG requires fresh current account credentials even for a master. The
+        first 403 parent_authorization_required includes a prp_ opaque intent.
+        Retry exact original method/raw path/query/body with X-Parent-Intent and
+        X-Account-Password. Original full session/client/actor/owner/target row,
+        PIN and revocation epochs, selected values and original body bytes stay
+        bound. The PG body cap is 16384 bytes; changing bytes without changing
+        meaning is still a changed request. Intent kinds cannot be interchanged.
+        Its one-shot deadline is at most 30 seconds from capture, bounded by
+        original authority expiry and never renewed by response receipt.
+
+        Wrong password consumes the intent. Changed/expired/replayed proof is
+        409. Unknown COMMIT outcome is 503: reload before a new explicit save,
+        never retry automatically or downgrade to old scalar endpoints. Lost or
+        canceled replies do not undo completed writes. JSON returns no intent.
+        Existing ownership/PIN gates remain; no provider reads, stream stops,
+        token revocations or changed regional/age/playback rules are introduced.
+      security:
+        - accountSession: []
+      parameters:
+        - $ref: '#/components/parameters/UserID'
+        - $ref: '#/components/parameters/ParentRatingPairIntent'
+        - $ref: '#/components/parameters/ParentAccountPassword'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/ParentRatingPairRequest'}
+      responses:
+        '200':
+          description: The confirmed targeted profile; unrelated rating fields remain unchanged.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Profile'}
+        '400': {$ref: '#/components/responses/Error'}
+        '401': {$ref: '#/components/responses/Error'}
+        '403': {$ref: '#/components/responses/ParentRatingPairForbidden'}
+        '404': {$ref: '#/components/responses/Error'}
+        '409':
+          description: Confirmation expired, consumed or changed; a new explicit action is required.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/ParentModeFailure'}
+        '413': {$ref: '#/components/responses/Error'}
+        '429': {$ref: '#/components/responses/Error'}
+        '503':
+          description: Unavailable or commit outcome unknown; never automatically retry.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/ParentModeFailure'}
+
+  /account/api/users/{userId}/kids/rating:
+    put:
+      operationId: parentAccountRatingGenericWithConfirmation
+      summary: Save Generic rating settings with original parental confirmation
+      description: |
+        Existing scalar endpoint: change only kidsMaxRating plus updatedAt,
+        including identical and empty values; preserve the other two fields.
+        Existing JSON decoding/setter behavior remains: one Decode with unknown
+        fields rejected, case-insensitive names, duplicate/trailing semantics and
+        null into an existing scalar string retaining that previous string. Root
+        null/missing rating initially select empty. Only Go strings.TrimSpace is
+        applied; comments or UI choices do not impose a server enum. JSON retains
+        the previous Guard.Require/master behavior and has no new body limit.
+
+        PG requires fresh current account credentials even for a master. The
+        first 403 parent_authorization_required includes a prg_ opaque intent.
+        Retry exact original method/raw path/query/body with X-Parent-Intent and
+        X-Account-Password. Original full session/client/actor/owner/target row,
+        PIN and revocation epochs, selected values and original body bytes stay
+        bound. The PG body cap is 16384 bytes; changing bytes without changing
+        meaning is still a changed request. Intent kinds cannot be interchanged.
+        Its one-shot deadline is at most 30 seconds from capture, bounded by
+        original authority expiry and never renewed by response receipt.
+
+        Wrong password consumes the intent. Changed/expired/replayed proof is
+        409. Unknown COMMIT outcome is 503: reload before a new explicit save,
+        never retry automatically or downgrade to old scalar endpoints. Lost or
+        canceled replies do not undo completed writes. JSON returns no intent.
+        Existing ownership/PIN gates remain; no provider reads, stream stops,
+        token revocations or changed regional/age/playback rules are introduced.
+      security:
+        - accountSession: []
+      parameters:
+        - $ref: '#/components/parameters/UserID'
+        - $ref: '#/components/parameters/ParentRatingGenericIntent'
+        - $ref: '#/components/parameters/ParentAccountPassword'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/ParentRatingScalarRequest'}
+      responses:
+        '200':
+          description: The confirmed targeted profile; unrelated rating fields remain unchanged.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Profile'}
+        '400': {$ref: '#/components/responses/Error'}
+        '401': {$ref: '#/components/responses/Error'}
+        '403': {$ref: '#/components/responses/ParentRatingGenericForbidden'}
+        '404': {$ref: '#/components/responses/Error'}
+        '409':
+          description: Confirmation expired, consumed or changed; a new explicit action is required.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/ParentModeFailure'}
+        '413': {$ref: '#/components/responses/Error'}
+        '429': {$ref: '#/components/responses/Error'}
+        '503':
+          description: Unavailable or commit outcome unknown; never automatically retry.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/ParentModeFailure'}
+
+  /account/api/users/{userId}/kids/rating/movie:
+    put:
+      operationId: parentAccountRatingMovieWithConfirmation
+      summary: Save Movie rating settings with original parental confirmation
+      description: |
+        Existing scalar endpoint: change only kidsMaxMovieRating plus updatedAt,
+        including identical and empty values; preserve the other two fields.
+        Existing JSON decoding/setter behavior remains: one Decode with unknown
+        fields rejected, case-insensitive names, duplicate/trailing semantics and
+        null into an existing scalar string retaining that previous string. Root
+        null/missing rating initially select empty. Only Go strings.TrimSpace is
+        applied; comments or UI choices do not impose a server enum. JSON retains
+        the previous Guard.Require/master behavior and has no new body limit.
+
+        PG requires fresh current account credentials even for a master. The
+        first 403 parent_authorization_required includes a prm_ opaque intent.
+        Retry exact original method/raw path/query/body with X-Parent-Intent and
+        X-Account-Password. Original full session/client/actor/owner/target row,
+        PIN and revocation epochs, selected values and original body bytes stay
+        bound. The PG body cap is 16384 bytes; changing bytes without changing
+        meaning is still a changed request. Intent kinds cannot be interchanged.
+        Its one-shot deadline is at most 30 seconds from capture, bounded by
+        original authority expiry and never renewed by response receipt.
+
+        Wrong password consumes the intent. Changed/expired/replayed proof is
+        409. Unknown COMMIT outcome is 503: reload before a new explicit save,
+        never retry automatically or downgrade to old scalar endpoints. Lost or
+        canceled replies do not undo completed writes. JSON returns no intent.
+        Existing ownership/PIN gates remain; no provider reads, stream stops,
+        token revocations or changed regional/age/playback rules are introduced.
+      security:
+        - accountSession: []
+      parameters:
+        - $ref: '#/components/parameters/UserID'
+        - $ref: '#/components/parameters/ParentRatingMovieIntent'
+        - $ref: '#/components/parameters/ParentAccountPassword'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/ParentRatingScalarRequest'}
+      responses:
+        '200':
+          description: The confirmed targeted profile; unrelated rating fields remain unchanged.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Profile'}
+        '400': {$ref: '#/components/responses/Error'}
+        '401': {$ref: '#/components/responses/Error'}
+        '403': {$ref: '#/components/responses/ParentRatingMovieForbidden'}
+        '404': {$ref: '#/components/responses/Error'}
+        '409':
+          description: Confirmation expired, consumed or changed; a new explicit action is required.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/ParentModeFailure'}
+        '413': {$ref: '#/components/responses/Error'}
+        '429': {$ref: '#/components/responses/Error'}
+        '503':
+          description: Unavailable or commit outcome unknown; never automatically retry.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/ParentModeFailure'}
+
+  /account/api/users/{userId}/kids/rating/tv:
+    put:
+      operationId: parentAccountRatingTVWithConfirmation
+      summary: Save TV rating settings with original parental confirmation
+      description: |
+        Existing scalar endpoint: change only kidsMaxTVRating plus updatedAt,
+        including identical and empty values; preserve the other two fields.
+        Existing JSON decoding/setter behavior remains: one Decode with unknown
+        fields rejected, case-insensitive names, duplicate/trailing semantics and
+        null into an existing scalar string retaining that previous string. Root
+        null/missing rating initially select empty. Only Go strings.TrimSpace is
+        applied; comments or UI choices do not impose a server enum. JSON retains
+        the previous Guard.Require/master behavior and has no new body limit.
+
+        PG requires fresh current account credentials even for a master. The
+        first 403 parent_authorization_required includes a prt_ opaque intent.
+        Retry exact original method/raw path/query/body with X-Parent-Intent and
+        X-Account-Password. Original full session/client/actor/owner/target row,
+        PIN and revocation epochs, selected values and original body bytes stay
+        bound. The PG body cap is 16384 bytes; changing bytes without changing
+        meaning is still a changed request. Intent kinds cannot be interchanged.
+        Its one-shot deadline is at most 30 seconds from capture, bounded by
+        original authority expiry and never renewed by response receipt.
+
+        Wrong password consumes the intent. Changed/expired/replayed proof is
+        409. Unknown COMMIT outcome is 503: reload before a new explicit save,
+        never retry automatically or downgrade to old scalar endpoints. Lost or
+        canceled replies do not undo completed writes. JSON returns no intent.
+        Existing ownership/PIN gates remain; no provider reads, stream stops,
+        token revocations or changed regional/age/playback rules are introduced.
+      security:
+        - accountSession: []
+      parameters:
+        - $ref: '#/components/parameters/UserID'
+        - $ref: '#/components/parameters/ParentRatingTVIntent'
+        - $ref: '#/components/parameters/ParentAccountPassword'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/ParentRatingScalarRequest'}
+      responses:
+        '200':
+          description: The confirmed targeted profile; unrelated rating fields remain unchanged.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Profile'}
+        '400': {$ref: '#/components/responses/Error'}
+        '401': {$ref: '#/components/responses/Error'}
+        '403': {$ref: '#/components/responses/ParentRatingTVForbidden'}
+        '404': {$ref: '#/components/responses/Error'}
+        '409':
+          description: Confirmation expired, consumed or changed; a new explicit action is required.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/ParentModeFailure'}
+        '413': {$ref: '#/components/responses/Error'}
+        '429': {$ref: '#/components/responses/Error'}
+        '503':
+          description: Unavailable or commit outcome unknown; never automatically retry.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/ParentModeFailure'}
+
+  /account/api/users/{userId}/kids/ratings:
+    put:
+      operationId: parentAccountRatingPairWithConfirmation
+      summary: Save Pair rating settings with original parental confirmation
+      description: |
+        New explicit atomic pair: both final decoded movieRating/tvRating
+        components must be present non-null strings; empty strings are allowed.
+        With duplicates, String then null is invalid; null then String is valid.
+        Existing case-insensitive field matching, DisallowUnknownFields and one
+        Decode/trailing behavior apply. Both values receive Go strings.TrimSpace.
+        PG changes exactly the two separate fields plus updatedAt in one target
+        CAS/SQL update. JSON changes both under one Users lock and one Save using
+        the previous Guard.Require/master policy. Both runtimes cap this new body
+        at 16384 bytes (413). Identical values still write updatedAt.
+
+        The generic kidsMaxRating is never changed. If both separate values are
+        empty, the existing generic fallback remains exactly as before. This is
+        not an enum validation, regional certification or playback permission.
+
+        PG requires fresh current account credentials even for a master. The
+        first 403 parent_authorization_required includes a prp_ opaque intent.
+        Retry exact original method/raw path/query/body with X-Parent-Intent and
+        X-Account-Password. Original full session/client/actor/owner/target row,
+        PIN and revocation epochs, selected values and original body bytes stay
+        bound. The PG body cap is 16384 bytes; changing bytes without changing
+        meaning is still a changed request. Intent kinds cannot be interchanged.
+        Its one-shot deadline is at most 30 seconds from capture, bounded by
+        original authority expiry and never renewed by response receipt.
+
+        Wrong password consumes the intent. Changed/expired/replayed proof is
+        409. Unknown COMMIT outcome is 503: reload before a new explicit save,
+        never retry automatically or downgrade to old scalar endpoints. Lost or
+        canceled replies do not undo completed writes. JSON returns no intent.
+        Existing ownership/PIN gates remain; no provider reads, stream stops,
+        token revocations or changed regional/age/playback rules are introduced.
+      security:
+        - accountSession: []
+      parameters:
+        - $ref: '#/components/parameters/UserID'
+        - $ref: '#/components/parameters/ParentRatingPairIntent'
+        - $ref: '#/components/parameters/ParentAccountPassword'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/ParentRatingPairRequest'}
+      responses:
+        '200':
+          description: The confirmed targeted profile; unrelated rating fields remain unchanged.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Profile'}
+        '400': {$ref: '#/components/responses/Error'}
+        '401': {$ref: '#/components/responses/Error'}
+        '403': {$ref: '#/components/responses/ParentRatingPairForbidden'}
+        '404': {$ref: '#/components/responses/Error'}
+        '409':
+          description: Confirmation expired, consumed or changed; a new explicit action is required.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/ParentModeFailure'}
+        '413': {$ref: '#/components/responses/Error'}
+        '429': {$ref: '#/components/responses/Error'}
+        '503':
+          description: Unavailable or commit outcome unknown; never automatically retry.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/ParentModeFailure'}
+
   /api/users/{userId}/kids/lists:
     post:
       operationId: parentListAddWithConfirmation
@@ -4100,6 +4883,26 @@ components:
       description: Session token as a query parameter; only accepted on media URLs such as `/api/video/stream`.
 
   parameters:
+    ParentRatingGenericIntent:
+      name: X-Parent-Intent
+      in: header
+      description: Exactly one original Generic rating confirmation; cannot authorize any other operation.
+      schema: {type: string, pattern: '^prg_[0-9a-f]{64}$'}
+    ParentRatingMovieIntent:
+      name: X-Parent-Intent
+      in: header
+      description: Exactly one original Movie rating confirmation; cannot authorize any other operation.
+      schema: {type: string, pattern: '^prm_[0-9a-f]{64}$'}
+    ParentRatingTVIntent:
+      name: X-Parent-Intent
+      in: header
+      description: Exactly one original TV rating confirmation; cannot authorize any other operation.
+      schema: {type: string, pattern: '^prt_[0-9a-f]{64}$'}
+    ParentRatingPairIntent:
+      name: X-Parent-Intent
+      in: header
+      description: Exactly one original Pair rating confirmation; cannot authorize any other operation.
+      schema: {type: string, pattern: '^prp_[0-9a-f]{64}$'}
     ParentListAddIntent:
       name: X-Parent-Intent
       in: header
@@ -4291,6 +5094,62 @@ components:
         type: string
 
   responses:
+    ParentRatingGenericForbidden:
+      description: First PG challenge, wrong credentials or existing ownership/PIN denial; retries never create replacement intents.
+      content:
+        application/json:
+          schema:
+            type: object
+            required: [error]
+            properties:
+              error: {type: string}
+              code: {type: string}
+              profileId: {type: string}
+              parentIntent: {type: string, pattern: '^prg_[0-9a-f]{64}$'}
+        text/plain:
+          schema: {type: string}
+    ParentRatingMovieForbidden:
+      description: First PG challenge, wrong credentials or existing ownership/PIN denial; retries never create replacement intents.
+      content:
+        application/json:
+          schema:
+            type: object
+            required: [error]
+            properties:
+              error: {type: string}
+              code: {type: string}
+              profileId: {type: string}
+              parentIntent: {type: string, pattern: '^prm_[0-9a-f]{64}$'}
+        text/plain:
+          schema: {type: string}
+    ParentRatingTVForbidden:
+      description: First PG challenge, wrong credentials or existing ownership/PIN denial; retries never create replacement intents.
+      content:
+        application/json:
+          schema:
+            type: object
+            required: [error]
+            properties:
+              error: {type: string}
+              code: {type: string}
+              profileId: {type: string}
+              parentIntent: {type: string, pattern: '^prt_[0-9a-f]{64}$'}
+        text/plain:
+          schema: {type: string}
+    ParentRatingPairForbidden:
+      description: First PG challenge, wrong credentials or existing ownership/PIN denial; retries never create replacement intents.
+      content:
+        application/json:
+          schema:
+            type: object
+            required: [error]
+            properties:
+              error: {type: string}
+              code: {type: string}
+              profileId: {type: string}
+              parentIntent: {type: string, pattern: '^prp_[0-9a-f]{64}$'}
+        text/plain:
+          schema: {type: string}
     ParentListAddForbidden:
       description: First PG operation-specific challenge, wrong credentials, or existing ownership/PIN denial; no replacement on retry.
       content:
@@ -4920,6 +5779,22 @@ components:
           type: array
           nullable: true
           items: {type: string, nullable: true}
+
+    ParentRatingScalarRequest:
+      type: object
+      nullable: true
+      additionalProperties: true
+      description: Case-insensitive rating field; real decoder rejects unknown fields. Missing/null initially selects empty; scalar duplicate null behavior is preserved.
+      properties:
+        rating: {type: string, nullable: true}
+    ParentRatingPairRequest:
+      type: object
+      minProperties: 2
+      additionalProperties: true
+      description: Both final decoded movieRating/tvRating strings required, case-insensitively. Empty allowed; final null rejected. Schema allows field-name casing; real decoder rejects unknown fields.
+      properties:
+        movieRating: {type: string}
+        tvRating: {type: string}
 
     ParentModeRequest:
       type: object

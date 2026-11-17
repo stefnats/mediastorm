@@ -404,3 +404,183 @@ func (s *Service) CommitParentListReplace(ctx context.Context, targetID string, 
 	}
 	return cloneUser(record.User), nil
 }
+
+// CommitParentRatingGeneric advances only the exact confirmed target projection. A known
+// server commit may remain after cancellation; unknown outcomes quarantine all
+// later local writes until the existing explicit storage resync.
+func (s *Service) CommitParentRatingGeneric(ctx context.Context, targetID string, intent *datastore.ParentRatingIntent) (models.User, error) {
+	if s == nil || !s.useDB() || ctx == nil || ctx.Err() != nil {
+		return models.User{}, datastore.ErrParentRatingUnavailable
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.ensurePersistenceLocked()
+	if s.persistence.uncertain {
+		return models.User{}, ErrPersistenceUncertain
+	}
+	current, known := s.users[targetID]
+	confirmed, present := s.persistence.confirmed[targetID]
+	revision, exists := s.persistence.revisions[targetID]
+	if !known || !present || !exists || !reflect.DeepEqual(current, confirmed) {
+		return models.User{}, datastore.ErrUserWriteConflict
+	}
+	if selected, err := s.store.ParentRatingGenericTarget(ctx, intent, revision); err != nil || selected != targetID {
+		if err != nil {
+			return models.User{}, err
+		}
+		return models.User{}, datastore.ErrUserWriteConflict
+	}
+	receipt, err := s.store.CommitParentRatingGeneric(intent)
+	if err != nil {
+		if errors.Is(err, datastore.ErrParentRatingUnknown) {
+			s.persistence.uncertain = true
+		}
+		return models.User{}, err
+	}
+	record, err := s.store.AcknowledgeParentRatingGeneric(ctx, intent, receipt, revision)
+	if err != nil {
+		return models.User{}, err
+	}
+	s.users[targetID] = cloneUser(record.User)
+	s.persistence.confirmed[targetID] = cloneUser(record.User)
+	s.persistence.revisions[targetID] = record.Revision
+	if err = ctx.Err(); err != nil {
+		return models.User{}, err
+	}
+	return cloneUser(record.User), nil
+}
+
+// CommitParentRatingMovie advances only the exact confirmed target projection. A known
+// server commit may remain after cancellation; unknown outcomes quarantine all
+// later local writes until the existing explicit storage resync.
+func (s *Service) CommitParentRatingMovie(ctx context.Context, targetID string, intent *datastore.ParentRatingIntent) (models.User, error) {
+	if s == nil || !s.useDB() || ctx == nil || ctx.Err() != nil {
+		return models.User{}, datastore.ErrParentRatingUnavailable
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.ensurePersistenceLocked()
+	if s.persistence.uncertain {
+		return models.User{}, ErrPersistenceUncertain
+	}
+	current, known := s.users[targetID]
+	confirmed, present := s.persistence.confirmed[targetID]
+	revision, exists := s.persistence.revisions[targetID]
+	if !known || !present || !exists || !reflect.DeepEqual(current, confirmed) {
+		return models.User{}, datastore.ErrUserWriteConflict
+	}
+	if selected, err := s.store.ParentRatingMovieTarget(ctx, intent, revision); err != nil || selected != targetID {
+		if err != nil {
+			return models.User{}, err
+		}
+		return models.User{}, datastore.ErrUserWriteConflict
+	}
+	receipt, err := s.store.CommitParentRatingMovie(intent)
+	if err != nil {
+		if errors.Is(err, datastore.ErrParentRatingUnknown) {
+			s.persistence.uncertain = true
+		}
+		return models.User{}, err
+	}
+	record, err := s.store.AcknowledgeParentRatingMovie(ctx, intent, receipt, revision)
+	if err != nil {
+		return models.User{}, err
+	}
+	s.users[targetID] = cloneUser(record.User)
+	s.persistence.confirmed[targetID] = cloneUser(record.User)
+	s.persistence.revisions[targetID] = record.Revision
+	if err = ctx.Err(); err != nil {
+		return models.User{}, err
+	}
+	return cloneUser(record.User), nil
+}
+
+// CommitParentRatingTV advances only the exact confirmed target projection. A known
+// server commit may remain after cancellation; unknown outcomes quarantine all
+// later local writes until the existing explicit storage resync.
+func (s *Service) CommitParentRatingTV(ctx context.Context, targetID string, intent *datastore.ParentRatingIntent) (models.User, error) {
+	if s == nil || !s.useDB() || ctx == nil || ctx.Err() != nil {
+		return models.User{}, datastore.ErrParentRatingUnavailable
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.ensurePersistenceLocked()
+	if s.persistence.uncertain {
+		return models.User{}, ErrPersistenceUncertain
+	}
+	current, known := s.users[targetID]
+	confirmed, present := s.persistence.confirmed[targetID]
+	revision, exists := s.persistence.revisions[targetID]
+	if !known || !present || !exists || !reflect.DeepEqual(current, confirmed) {
+		return models.User{}, datastore.ErrUserWriteConflict
+	}
+	if selected, err := s.store.ParentRatingTVTarget(ctx, intent, revision); err != nil || selected != targetID {
+		if err != nil {
+			return models.User{}, err
+		}
+		return models.User{}, datastore.ErrUserWriteConflict
+	}
+	receipt, err := s.store.CommitParentRatingTV(intent)
+	if err != nil {
+		if errors.Is(err, datastore.ErrParentRatingUnknown) {
+			s.persistence.uncertain = true
+		}
+		return models.User{}, err
+	}
+	record, err := s.store.AcknowledgeParentRatingTV(ctx, intent, receipt, revision)
+	if err != nil {
+		return models.User{}, err
+	}
+	s.users[targetID] = cloneUser(record.User)
+	s.persistence.confirmed[targetID] = cloneUser(record.User)
+	s.persistence.revisions[targetID] = record.Revision
+	if err = ctx.Err(); err != nil {
+		return models.User{}, err
+	}
+	return cloneUser(record.User), nil
+}
+
+// CommitParentRatingPair advances only the exact confirmed target projection. A known
+// server commit may remain after cancellation; unknown outcomes quarantine all
+// later local writes until the existing explicit storage resync.
+func (s *Service) CommitParentRatingPair(ctx context.Context, targetID string, intent *datastore.ParentRatingIntent) (models.User, error) {
+	if s == nil || !s.useDB() || ctx == nil || ctx.Err() != nil {
+		return models.User{}, datastore.ErrParentRatingUnavailable
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.ensurePersistenceLocked()
+	if s.persistence.uncertain {
+		return models.User{}, ErrPersistenceUncertain
+	}
+	current, known := s.users[targetID]
+	confirmed, present := s.persistence.confirmed[targetID]
+	revision, exists := s.persistence.revisions[targetID]
+	if !known || !present || !exists || !reflect.DeepEqual(current, confirmed) {
+		return models.User{}, datastore.ErrUserWriteConflict
+	}
+	if selected, err := s.store.ParentRatingPairTarget(ctx, intent, revision); err != nil || selected != targetID {
+		if err != nil {
+			return models.User{}, err
+		}
+		return models.User{}, datastore.ErrUserWriteConflict
+	}
+	receipt, err := s.store.CommitParentRatingPair(intent)
+	if err != nil {
+		if errors.Is(err, datastore.ErrParentRatingUnknown) {
+			s.persistence.uncertain = true
+		}
+		return models.User{}, err
+	}
+	record, err := s.store.AcknowledgeParentRatingPair(ctx, intent, receipt, revision)
+	if err != nil {
+		return models.User{}, err
+	}
+	s.users[targetID] = cloneUser(record.User)
+	s.persistence.confirmed[targetID] = cloneUser(record.User)
+	s.persistence.revisions[targetID] = record.Revision
+	if err = ctx.Err(); err != nil {
+		return models.User{}, err
+	}
+	return cloneUser(record.User), nil
+}

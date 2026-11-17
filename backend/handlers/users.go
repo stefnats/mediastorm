@@ -1336,6 +1336,11 @@ func (h *UsersHandler) SetKidsMaxRating(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
+	if h.pgPins != nil {
+		h.currentParentRating(w, r, id, parentRatingGeneric)
+		return
+	}
+
 	// Verify caller can configure this profile
 	if !h.canConfigureKidsProfile(r, id) {
 		http.Error(w, "cannot configure kids settings for this profile", http.StatusForbidden)
@@ -1376,6 +1381,11 @@ func (h *UsersHandler) SetKidsMaxMovieRating(w http.ResponseWriter, r *http.Requ
 	id := strings.TrimSpace(vars["userID"])
 	if id == "" {
 		http.Error(w, "user id is required", http.StatusBadRequest)
+		return
+	}
+
+	if h.pgPins != nil {
+		h.currentParentRating(w, r, id, parentRatingMovie)
 		return
 	}
 
@@ -1422,6 +1432,11 @@ func (h *UsersHandler) SetKidsMaxTVRating(w http.ResponseWriter, r *http.Request
 		return
 	}
 
+	if h.pgPins != nil {
+		h.currentParentRating(w, r, id, parentRatingTV)
+		return
+	}
+
 	// Verify caller can configure this profile
 	if !h.canConfigureKidsProfile(r, id) {
 		http.Error(w, "cannot configure kids settings for this profile", http.StatusForbidden)
@@ -1454,6 +1469,53 @@ func (h *UsersHandler) SetKidsMaxTVRating(w http.ResponseWriter, r *http.Request
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(user)
+}
+
+// SetKidsRatings changes both separate limits in one operation. The generic
+// legacy fallback remains independent and is never rewritten by this route.
+func (h *UsersHandler) SetKidsRatings(w http.ResponseWriter, r *http.Request) {
+	id := strings.TrimSpace(mux.Vars(r)["userID"])
+	if id == "" {
+		http.Error(w, "user id is required", http.StatusBadRequest)
+		return
+	}
+	if h.pgPins != nil {
+		h.currentParentRating(w, r, id, parentRatingPair)
+		return
+	}
+	if !h.canConfigureKidsProfile(r, id) {
+		http.Error(w, "cannot configure kids settings for this profile", http.StatusForbidden)
+		return
+	}
+	body, err := readParentRatingBody(r)
+	if err != nil {
+		writeParentRatingError(w, r, err)
+		return
+	}
+	movie, tv, err := datastore.ParentRatingPairValues(body)
+	if err != nil {
+		writeParentRatingError(w, r, err)
+		return
+	}
+	if !h.parentAuthorization.Require(w, r) {
+		return
+	}
+	pair, ok := h.Service.(parentRatingJSONPair)
+	if !ok {
+		http.Error(w, "rating pair persistence unavailable", http.StatusServiceUnavailable)
+		return
+	}
+	user, err := pair.SetKidsMaxRatings(id, movie, tv)
+	if err != nil {
+		status := http.StatusInternalServerError
+		if errors.Is(err, users.ErrUserNotFound) {
+			status = http.StatusNotFound
+		}
+		http.Error(w, err.Error(), status)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(user)
 }
 
 // SetKidsAllowedLists replaces the allowed lists for a kids profile.
