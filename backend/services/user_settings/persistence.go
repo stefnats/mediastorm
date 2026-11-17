@@ -3,8 +3,10 @@ package user_settings
 import (
 	"context"
 	"errors"
+	"fmt"
 	"reflect"
 	"sort"
+	"sync/atomic"
 	"time"
 
 	"novastream/internal/datastore"
@@ -12,9 +14,10 @@ import (
 )
 
 type settingsPersistence struct {
-	records   map[string]datastore.UserSettingsRecord
-	confirmed map[string]models.UserSettings
-	uncertain map[string]bool
+	records        map[string]datastore.UserSettingsRecord
+	confirmed      map[string]models.UserSettings
+	uncertain      map[string]bool
+	unknownMarkers map[string]*userSettingsUnknownMarker
 }
 
 // cloneSettingsValue isolates every mutable pointer, map, slice and raw field.
@@ -81,7 +84,7 @@ func settingsStorageContext() (context.Context, context.CancelFunc) {
 }
 
 func (s *Service) installPGRecordsLocked(records []datastore.UserSettingsRecord) {
-	s.pg = &settingsPersistence{records: make(map[string]datastore.UserSettingsRecord), confirmed: make(map[string]models.UserSettings), uncertain: make(map[string]bool)}
+	s.pg = &settingsPersistence{records: make(map[string]datastore.UserSettingsRecord), confirmed: make(map[string]models.UserSettings), uncertain: make(map[string]bool), unknownMarkers: make(map[string]*userSettingsUnknownMarker)}
 	s.settings = make(map[string]models.UserSettings)
 	for _, r := range records {
 		s.installPGRecordLocked(r)
@@ -255,7 +258,7 @@ func (s *Service) persistPGLocked(ctx context.Context, checks, deletes []string)
 		s.restorePGConfirmedLocked()
 		if errors.Is(err, datastore.ErrUserSettingsOutcomeUnknown) {
 			for _, id := range ordered {
-				s.pg.uncertain[id] = true
+				s.markUserSettingsUnknownLocked([]string{id})
 			}
 		}
 		return err
@@ -265,7 +268,7 @@ func (s *Service) persistPGLocked(ctx context.Context, checks, deletes []string)
 	if err != nil {
 		s.restorePGConfirmedLocked()
 		for _, id := range ordered {
-			s.pg.uncertain[id] = true
+			s.markUserSettingsUnknownLocked([]string{id})
 		}
 		return datastore.ErrUserSettingsOutcomeUnknown
 	}
@@ -307,4 +310,144 @@ func (s *Service) deletePGLocked(id string) error {
 	}
 	delete(s.settings, id)
 	return s.persistPGLocked(ctx, nil, []string{id})
+}
+
+type userSettingsUnknownMarker struct{ identity byte }
+
+func (s *Service) markUserSettingsUnknownLocked(ids []string) {
+	if s.pg.unknownMarkers == nil {
+		s.pg.unknownMarkers = make(map[string]*userSettingsUnknownMarker)
+	}
+	for _, id := range ids {
+		s.pg.uncertain[id] = true
+		s.pg.unknownMarkers[id] = &userSettingsUnknownMarker{identity: 1}
+	}
+}
+
+type UserSettingsRecoveryTicket struct {
+	state *userSettingsRecoveryTicketState
+}
+type userSettingsRecoveryTicketState struct {
+	self                                            *UserSettingsRecoveryTicket
+	service                                         *Service
+	ctx                                             context.Context
+	target                                          string
+	slot                                            *datastore.ProfileRecoverySlot
+	current, confirmed                              models.UserSettings
+	currentPresent, confirmedPresent, recordPresent bool
+	revision                                        datastore.UserSettingsRevision
+	uncertain                                       bool
+	marker                                          *userSettingsUnknownMarker
+	closed                                          atomic.Bool
+}
+
+func (UserSettingsRecoveryTicket) MarshalJSON() ([]byte, error) { return []byte("null"), nil }
+func (UserSettingsRecoveryTicket) Format(f fmt.State, _ rune) {
+	_, _ = f.Write([]byte("UserSettingsRecoveryTicket(opaque)"))
+}
+func (t *UserSettingsRecoveryTicket) Close() {
+	if t != nil && t.state != nil && t.state.self == t {
+		t.state.closed.Store(true)
+		t.state.slot.Close()
+	}
+}
+
+// PrepareUserSettingsRecovery reserves a clean local target before the common
+// read. It never invokes first-target acquire, migrations or a whole-cache load.
+func (s *Service) PrepareUserSettingsRecovery(ctx context.Context, read *datastore.ProfileRecoveryRead) (*UserSettingsRecoveryTicket, error) {
+	if s == nil || !s.useDB() || ctx == nil {
+		return nil, datastore.ErrProfileRecoveryUnavailable
+	}
+	if ctx.Err() != nil {
+		return nil, ctx.Err()
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.pg == nil {
+		return nil, datastore.ErrProfileRecoveryUnavailable
+	}
+	target, err := s.store.ProfileRecoveryTarget(ctx, read)
+	if err != nil {
+		return nil, err
+	}
+	current, present := s.settings[target]
+	confirmed, known := s.pg.confirmed[target]
+	if present != known || !reflect.DeepEqual(current, confirmed) {
+		return nil, datastore.ErrProfileRecoveryChanged
+	}
+	slot, err := s.store.ReserveUserSettingsRecovery(ctx, read)
+	if err != nil {
+		return nil, err
+	}
+	record, recordPresent := s.pg.records[target]
+	ticket := &UserSettingsRecoveryTicket{}
+	ticket.state = &userSettingsRecoveryTicketState{self: ticket, service: s, ctx: ctx, target: target, slot: slot, current: cloneSettingsValue(current), confirmed: cloneSettingsValue(confirmed), currentPresent: present, confirmedPresent: known, recordPresent: recordPresent, revision: record.Revision, uncertain: s.pg.uncertain[target], marker: s.pg.unknownMarkers[target]}
+	return ticket, nil
+}
+func (s *Service) validateUserSettingsRecoveryLocked(ctx context.Context, ticket *UserSettingsRecoveryTicket, snapshot *datastore.ProfileRecoverySnapshot) error {
+	if ticket == nil || ticket.state == nil || ticket.state.self != ticket || ticket.state.service != s || ticket.state.ctx != ctx || ticket.state.closed.Load() {
+		return datastore.ErrProfileRecoveryChanged
+	}
+	if ctx == nil {
+		return datastore.ErrProfileRecoveryChanged
+	}
+	if ctx.Err() != nil {
+		return ctx.Err()
+	}
+	t := ticket.state
+	p := s.pg
+	if p == nil {
+		return datastore.ErrProfileRecoveryChanged
+	}
+	current, present := s.settings[t.target]
+	confirmed, known := p.confirmed[t.target]
+	record, recordPresent := p.records[t.target]
+	if present != t.currentPresent || known != t.confirmedPresent || recordPresent != t.recordPresent || record.Revision != t.revision || !reflect.DeepEqual(current, t.current) || !reflect.DeepEqual(confirmed, t.confirmed) || p.uncertain[t.target] != t.uncertain || p.unknownMarkers[t.target] != t.marker {
+		return datastore.ErrProfileRecoveryChanged
+	}
+	return s.store.ValidateProfileRecoverySlot(ctx, t.slot, snapshot)
+}
+
+// Validation is not a shared installation lock. A future coordinator must hold
+// both caches together; these separate installs make no atomicity guarantee.
+func (s *Service) ValidateUserSettingsRecovery(ctx context.Context, ticket *UserSettingsRecoveryTicket, snapshot *datastore.ProfileRecoverySnapshot) error {
+	if s == nil || !s.useDB() {
+		return datastore.ErrProfileRecoveryUnavailable
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.validateUserSettingsRecoveryLocked(ctx, ticket, snapshot)
+}
+func (s *Service) InstallUserSettingsRecovery(ctx context.Context, ticket *UserSettingsRecoveryTicket, snapshot *datastore.ProfileRecoverySnapshot) (datastore.ProfileRecoveryStatus, error) {
+	var status datastore.ProfileRecoveryStatus
+	if s == nil || !s.useDB() {
+		return status, datastore.ErrProfileRecoveryUnavailable
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if err := s.validateUserSettingsRecoveryLocked(ctx, ticket, snapshot); err != nil {
+		return status, err
+	}
+	t := ticket.state
+	record, present, err := s.store.TakeUserSettingsRecovery(ctx, t.slot, snapshot)
+	if err != nil {
+		return status, err
+	}
+	t.closed.Store(true)
+	if ctx.Err() != nil {
+		return status, ctx.Err()
+	}
+	// An absent user's record remains observed. Normal first-target acquire must
+	// not silently adopt a later reuse of this ID as a completely new profile.
+	s.installPGRecordLocked(record)
+	delete(s.pg.uncertain, t.target)
+	delete(s.pg.unknownMarkers, t.target)
+	status.TargetPresent = present
+	for _, unknown := range s.pg.uncertain {
+		if unknown {
+			status.PendingUncertainty = true
+			break
+		}
+	}
+	return status, nil
 }

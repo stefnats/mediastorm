@@ -3,7 +3,9 @@ package users
 import (
 	"context"
 	"errors"
+	"fmt"
 	"reflect"
+	"sync/atomic"
 	"time"
 
 	"github.com/google/uuid"
@@ -18,9 +20,11 @@ const userPersistenceBudget = 10 * time.Second
 // This is a last-confirmed local projection, not an authoritative policy reader.
 // An unchanged stale profile is never written merely because another changes.
 type persistenceState struct {
-	confirmed map[string]models.User
-	revisions map[string]datastore.UserRevision
-	uncertain bool
+	confirmed       map[string]models.User
+	revisions       map[string]datastore.UserRevision
+	uncertain       bool
+	unknownTargets  map[string]*storageUnknownMarker
+	unknownUnscoped bool
 }
 
 func cloneUser(u models.User) models.User {
@@ -126,7 +130,11 @@ func (s *Service) saveLocked() error {
 		if err != nil {
 			rollback()
 			if errors.Is(err, datastore.ErrUserWriteOutcomeUnknown) {
-				s.persistence.uncertain = true
+				ids := make([]string, 0, len(changes))
+				for _, change := range changes {
+					ids = append(ids, change.ID)
+				}
+				s.markStorageUnknownLocked(ids)
 				return ErrPersistenceUncertain
 			}
 			return err
@@ -220,7 +228,7 @@ func (s *Service) CommitPGPinChange(ctx context.Context, intent *datastore.PGPin
 	record, err := s.store.CommitPinChange(intent)
 	if err != nil {
 		if errors.Is(err, datastore.ErrPGPinOutcomeUnknown) {
-			s.persistence.uncertain = true
+			s.markStorageUnknownLocked([]string{targetID})
 		}
 		return models.User{}, err
 	}
@@ -261,7 +269,7 @@ func (s *Service) CommitParentMode(ctx context.Context, targetID string, intent 
 	record, err := s.store.CommitParentMode(intent)
 	if err != nil {
 		if errors.Is(err, datastore.ErrParentModeUnknown) {
-			s.persistence.uncertain = true
+			s.markStorageUnknownLocked([]string{targetID})
 		}
 		return models.User{}, err
 	}
@@ -302,7 +310,7 @@ func (s *Service) CommitParentListRemoval(ctx context.Context, targetID string, 
 	record, err := s.store.CommitParentListRemoval(intent)
 	if err != nil {
 		if errors.Is(err, datastore.ErrParentListRemovalUnknown) {
-			s.persistence.uncertain = true
+			s.markStorageUnknownLocked([]string{targetID})
 		}
 		return models.User{}, err
 	}
@@ -343,7 +351,7 @@ func (s *Service) CommitParentListAdd(ctx context.Context, targetID string, inte
 	receipt, err := s.store.CommitParentListAdd(intent)
 	if err != nil {
 		if errors.Is(err, datastore.ErrParentListWriteUnknown) {
-			s.persistence.uncertain = true
+			s.markStorageUnknownLocked([]string{targetID})
 		}
 		return models.User{}, err
 	}
@@ -388,7 +396,7 @@ func (s *Service) CommitParentListReplace(ctx context.Context, targetID string, 
 	receipt, err := s.store.CommitParentListReplace(intent)
 	if err != nil {
 		if errors.Is(err, datastore.ErrParentListWriteUnknown) {
-			s.persistence.uncertain = true
+			s.markStorageUnknownLocked([]string{targetID})
 		}
 		return models.User{}, err
 	}
@@ -433,7 +441,7 @@ func (s *Service) CommitParentRatingGeneric(ctx context.Context, targetID string
 	receipt, err := s.store.CommitParentRatingGeneric(intent)
 	if err != nil {
 		if errors.Is(err, datastore.ErrParentRatingUnknown) {
-			s.persistence.uncertain = true
+			s.markStorageUnknownLocked([]string{targetID})
 		}
 		return models.User{}, err
 	}
@@ -478,7 +486,7 @@ func (s *Service) CommitParentRatingMovie(ctx context.Context, targetID string, 
 	receipt, err := s.store.CommitParentRatingMovie(intent)
 	if err != nil {
 		if errors.Is(err, datastore.ErrParentRatingUnknown) {
-			s.persistence.uncertain = true
+			s.markStorageUnknownLocked([]string{targetID})
 		}
 		return models.User{}, err
 	}
@@ -523,7 +531,7 @@ func (s *Service) CommitParentRatingTV(ctx context.Context, targetID string, int
 	receipt, err := s.store.CommitParentRatingTV(intent)
 	if err != nil {
 		if errors.Is(err, datastore.ErrParentRatingUnknown) {
-			s.persistence.uncertain = true
+			s.markStorageUnknownLocked([]string{targetID})
 		}
 		return models.User{}, err
 	}
@@ -568,7 +576,7 @@ func (s *Service) CommitParentRatingPair(ctx context.Context, targetID string, i
 	receipt, err := s.store.CommitParentRatingPair(intent)
 	if err != nil {
 		if errors.Is(err, datastore.ErrParentRatingUnknown) {
-			s.persistence.uncertain = true
+			s.markStorageUnknownLocked([]string{targetID})
 		}
 		return models.User{}, err
 	}
@@ -583,4 +591,157 @@ func (s *Service) CommitParentRatingPair(ctx context.Context, targetID string, i
 		return models.User{}, err
 	}
 	return cloneUser(record.User), nil
+}
+
+// storageUnknownMarker distinguishes successive uncertain operations even for
+// the same ID. The old global fail-closed write gate remains authoritative.
+type storageUnknownMarker struct{ identity byte }
+
+func (s *Service) markStorageUnknownLocked(ids []string) {
+	p := s.persistence
+	if p.uncertain && p.unknownTargets == nil {
+		p.unknownUnscoped = true
+	}
+	if p.unknownTargets == nil {
+		p.unknownTargets = make(map[string]*storageUnknownMarker)
+	}
+	p.uncertain = true
+	if len(ids) == 0 {
+		p.unknownUnscoped = true
+	}
+	for _, id := range ids {
+		p.unknownTargets[id] = &storageUnknownMarker{identity: 1}
+	}
+}
+
+type StorageRecoveryTicket struct{ state *storageRecoveryTicketState }
+type storageRecoveryTicketState struct {
+	self                                              *StorageRecoveryTicket
+	service                                           *Service
+	ctx                                               context.Context
+	target                                            string
+	slot                                              *datastore.ProfileRecoverySlot
+	current, confirmed                                models.User
+	currentPresent, confirmedPresent, revisionPresent bool
+	revision                                          datastore.UserRevision
+	marker                                            *storageUnknownMarker
+	closed                                            atomic.Bool
+}
+
+func (StorageRecoveryTicket) MarshalJSON() ([]byte, error) { return []byte("null"), nil }
+func (StorageRecoveryTicket) Format(f fmt.State, _ rune) {
+	_, _ = f.Write([]byte("StorageRecoveryTicket(opaque)"))
+}
+func (t *StorageRecoveryTicket) Close() {
+	if t != nil && t.state != nil && t.state.self == t {
+		t.state.closed.Store(true)
+		t.state.slot.Close()
+	}
+}
+
+// PrepareStorageRecovery captures only a clean target before the shared read.
+// No authentication or SQL takes place here. Later public coordination must
+// provide its own original actor/PIN checks and shared installation locks.
+func (s *Service) PrepareStorageRecovery(ctx context.Context, read *datastore.ProfileRecoveryRead) (*StorageRecoveryTicket, error) {
+	if s == nil || !s.useDB() || ctx == nil {
+		return nil, datastore.ErrProfileRecoveryUnavailable
+	}
+	if ctx.Err() != nil {
+		return nil, ctx.Err()
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.ensurePersistenceLocked()
+	target, err := s.store.ProfileRecoveryTarget(ctx, read)
+	if err != nil {
+		return nil, err
+	}
+	current, present := s.users[target]
+	confirmed, known := s.persistence.confirmed[target]
+	if present != known || !reflect.DeepEqual(current, confirmed) {
+		return nil, datastore.ErrProfileRecoveryChanged
+	}
+	slot, err := s.store.ReserveUsersRecovery(ctx, read)
+	if err != nil {
+		return nil, err
+	}
+	if s.persistence.uncertain && s.persistence.unknownTargets == nil {
+		s.persistence.unknownUnscoped = true
+	}
+	revision, hasRevision := s.persistence.revisions[target]
+	ticket := &StorageRecoveryTicket{}
+	ticket.state = &storageRecoveryTicketState{self: ticket, service: s, ctx: ctx, target: target, slot: slot, current: cloneUser(current), confirmed: cloneUser(confirmed), currentPresent: present, confirmedPresent: known, revision: revision, revisionPresent: hasRevision, marker: s.persistence.unknownTargets[target]}
+	return ticket, nil
+}
+func (s *Service) validateStorageRecoveryLocked(ctx context.Context, ticket *StorageRecoveryTicket, snapshot *datastore.ProfileRecoverySnapshot) error {
+	if ticket == nil || ticket.state == nil || ticket.state.self != ticket || ticket.state.service != s || ticket.state.ctx != ctx || ticket.state.closed.Load() {
+		return datastore.ErrProfileRecoveryChanged
+	}
+	if ctx == nil {
+		return datastore.ErrProfileRecoveryChanged
+	}
+	if ctx.Err() != nil {
+		return ctx.Err()
+	}
+	t := ticket.state
+	p := s.persistence
+	if p == nil {
+		return datastore.ErrProfileRecoveryChanged
+	}
+	current, present := s.users[t.target]
+	confirmed, known := p.confirmed[t.target]
+	revision, hasRevision := p.revisions[t.target]
+	if present != t.currentPresent || known != t.confirmedPresent || hasRevision != t.revisionPresent || revision != t.revision || !reflect.DeepEqual(current, t.current) || !reflect.DeepEqual(confirmed, t.confirmed) || p.unknownTargets[t.target] != t.marker {
+		return datastore.ErrProfileRecoveryChanged
+	}
+	return s.store.ValidateProfileRecoverySlot(ctx, t.slot, snapshot)
+}
+
+// ValidateStorageRecovery does not consume or install. It cannot make a later
+// installation atomic with a second service; Install always rechecks locally.
+func (s *Service) ValidateStorageRecovery(ctx context.Context, ticket *StorageRecoveryTicket, snapshot *datastore.ProfileRecoverySnapshot) error {
+	if s == nil || !s.useDB() {
+		return datastore.ErrProfileRecoveryUnavailable
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.validateStorageRecoveryLocked(ctx, ticket, snapshot)
+}
+func (s *Service) InstallStorageRecovery(ctx context.Context, ticket *StorageRecoveryTicket, snapshot *datastore.ProfileRecoverySnapshot) (datastore.ProfileRecoveryStatus, error) {
+	var status datastore.ProfileRecoveryStatus
+	if s == nil || !s.useDB() {
+		return status, datastore.ErrProfileRecoveryUnavailable
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if err := s.validateStorageRecoveryLocked(ctx, ticket, snapshot); err != nil {
+		return status, err
+	}
+	t := ticket.state
+	record, present, err := s.store.TakeUsersRecovery(ctx, t.slot, snapshot)
+	if err != nil {
+		return status, err
+	}
+	t.closed.Store(true)
+	if ctx.Err() != nil {
+		return status, ctx.Err()
+	}
+	// Historical read bookkeeping only. No global reload, bootstrap or retry.
+	if present {
+		s.users[t.target] = cloneUser(record.User)
+		s.persistence.confirmed[t.target] = cloneUser(record.User)
+	} else {
+		delete(s.users, t.target)
+		delete(s.persistence.confirmed, t.target)
+	}
+	s.persistence.revisions[t.target] = record.Revision
+	if t.marker != nil {
+		delete(s.persistence.unknownTargets, t.target)
+	}
+	if !s.persistence.unknownUnscoped && s.persistence.unknownTargets != nil && len(s.persistence.unknownTargets) == 0 {
+		s.persistence.uncertain = false
+	}
+	status.TargetPresent = present
+	status.PendingUncertainty = s.persistence.uncertain
+	return status, nil
 }

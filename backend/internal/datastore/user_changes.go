@@ -6,11 +6,63 @@ import (
 	"errors"
 	"fmt"
 	"sort"
+	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5"
 	"novastream/models"
 )
+
+// recoveryUserRow decodes the actual complete SQL row through the existing
+// scanner, including private credential columns. It is never a public DTO.
+type recoveryUserRow struct {
+	raw     json.RawMessage
+	version string
+}
+
+func (r recoveryUserRow) Scan(dest ...any) error {
+	columns := strings.Split(userColumns, ",")
+	if len(dest) != len(columns)+1 || r.version == "" {
+		return ErrProfileRecoveryUnavailable
+	}
+	var fields map[string]json.RawMessage
+	if json.Unmarshal(r.raw, &fields) != nil || fields == nil {
+		return ErrProfileRecoveryUnavailable
+	}
+	for i, column := range columns {
+		column = strings.TrimSpace(column)
+		raw, ok := fields[column]
+		if !ok || string(raw) == "null" && column != "kids_allowed_lists" {
+			return ErrProfileRecoveryUnavailable
+		}
+		if column == "kids_allowed_lists" {
+			if string(raw) != "null" {
+				var items []json.RawMessage
+				if json.Unmarshal(raw, &items) != nil || items == nil {
+					return ErrProfileRecoveryUnavailable
+				}
+				for _, item := range items {
+					var value string
+					if len(item) == 0 || item[0] != '"' || json.Unmarshal(item, &value) != nil {
+						return ErrProfileRecoveryUnavailable
+					}
+				}
+			}
+			*dest[i].(*[]byte) = append([]byte(nil), raw...)
+		} else if json.Unmarshal(raw, dest[i]) != nil {
+			return ErrProfileRecoveryUnavailable
+		}
+	}
+	*dest[len(columns)].(*string) = r.version
+	return nil
+}
+func (ds *DataStore) recoveryUserRecord(raw json.RawMessage, version string) (UserWriteRecord, error) {
+	record, err := ds.scanUserWrite(recoveryUserRow{raw: raw, version: version})
+	if err != nil {
+		return UserWriteRecord{}, ErrProfileRecoveryUnavailable
+	}
+	return record, nil
+}
 
 var (
 	ErrUserWriteConflict       = errors.New("profile storage revision conflict")

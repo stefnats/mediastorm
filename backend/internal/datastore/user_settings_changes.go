@@ -9,7 +9,9 @@ import (
 	"reflect"
 	"sort"
 	"strings"
+	"sync"
 	"sync/atomic"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
@@ -29,6 +31,7 @@ type userSettingsSnapshot struct {
 	generation  int64
 	raw         json.RawMessage
 	settings    models.UserSettings
+	userPresent bool
 }
 
 // UserSettingsRevision is an immutable storage snapshot, not an ownership or
@@ -107,7 +110,7 @@ func (ds *DataStore) scanSettings(row pgx.Row) (UserSettingsRecord, error) {
 	if generation == nil || *generation < 0 || id == "" {
 		return UserSettingsRecord{}, ErrUserSettingsUnavailable
 	}
-	s := &userSettingsSnapshot{ds: ds, id: id, version: version, generation: *generation, raw: append(json.RawMessage(nil), raw...)}
+	s := &userSettingsSnapshot{ds: ds, id: id, version: version, generation: *generation, raw: append(json.RawMessage(nil), raw...), userPresent: true}
 	if version != "" {
 		var object map[string]json.RawMessage
 		if json.Unmarshal(raw, &object) != nil || object == nil || json.Unmarshal(raw, &s.settings) != nil {
@@ -200,7 +203,7 @@ func (ds *DataStore) CommitUserSettingsChanges(ctx context.Context, input []User
 	}
 	changes := append([]UserSettingsChange(nil), input...)
 	for _, c := range changes {
-		if c.Expected.snapshot == nil || c.Expected.snapshot.ds != ds || c.Kind < UserSettingsPatch || c.Kind > UserSettingsCheck {
+		if c.Expected.snapshot == nil || c.Expected.snapshot.ds != ds || !c.Expected.snapshot.userPresent || c.Kind < UserSettingsPatch || c.Kind > UserSettingsCheck {
 			return nil, ErrUserSettingsConflict
 		}
 	}
@@ -283,6 +286,317 @@ func (ds *DataStore) CommitUserSettingsChanges(ctx context.Context, input []User
 		return nil, ErrUserSettingsOutcomeUnknown
 	}
 	return result, nil
+}
+
+var (
+	ErrProfileRecoveryChanged     = errors.New("profile recovery selection changed")
+	ErrProfileRecoveryUnavailable = errors.New("profile recovery storage unavailable")
+)
+
+// These are storage-read objects, never actor, PIN or ownership grants. Slots
+// must be reserved by the services before the one SQL snapshot is read.
+type ProfileRecoveryRead struct{ state *profileRecoveryReadState }
+type ProfileRecoverySnapshot struct {
+	state    *profileRecoveryReadState
+	self     *ProfileRecoverySnapshot
+	present  bool
+	user     UserWriteRecord
+	settings UserSettingsRecord
+}
+type ProfileRecoverySlot struct {
+	state        *profileRecoveryReadState
+	self         *ProfileRecoverySlot
+	kind         uint8
+	used, closed bool
+}
+type ProfileRecoveryStatus struct {
+	TargetPresent      bool
+	PendingUncertainty bool
+}
+type profileRecoveryReadState struct {
+	mu           sync.Mutex
+	ds           *DataStore
+	self         *ProfileRecoveryRead
+	ctx, run     context.Context
+	cancel       context.CancelFunc
+	id           string
+	read, closed bool
+	slots        [2]*ProfileRecoverySlot
+	snapshot     *ProfileRecoverySnapshot
+}
+
+func (ProfileRecoveryRead) MarshalJSON() ([]byte, error)     { return []byte("null"), nil }
+func (ProfileRecoverySnapshot) MarshalJSON() ([]byte, error) { return []byte("null"), nil }
+func (ProfileRecoverySlot) MarshalJSON() ([]byte, error)     { return []byte("null"), nil }
+func (ProfileRecoveryRead) Format(f fmt.State, _ rune) {
+	_, _ = f.Write([]byte("ProfileRecoveryRead(opaque)"))
+}
+func (ProfileRecoverySnapshot) Format(f fmt.State, _ rune) {
+	_, _ = f.Write([]byte("ProfileRecoverySnapshot(opaque)"))
+}
+func (ProfileRecoverySlot) Format(f fmt.State, _ rune) {
+	_, _ = f.Write([]byte("ProfileRecoverySlot(opaque)"))
+}
+func (r *ProfileRecoveryRead) Close() {
+	if r == nil || r.state == nil {
+		return
+	}
+	s := r.state
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.self == r {
+		s.closed = true
+		s.cancel()
+	}
+}
+func (r *ProfileRecoverySnapshot) Close() {
+	if r == nil || r.state == nil {
+		return
+	}
+	s := r.state
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if r.self == r && s.snapshot == r {
+		s.closed = true
+		s.cancel()
+	}
+}
+func (r *ProfileRecoverySlot) Close() {
+	if r == nil || r.state == nil {
+		return
+	}
+	s := r.state
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if r.self == r {
+		r.closed = true
+	}
+}
+func recoveryContextError(s *profileRecoveryReadState) error {
+	if s.ctx.Err() != nil {
+		return s.ctx.Err()
+	}
+	if s.closed {
+		return ErrProfileRecoveryChanged
+	}
+	if s.run.Err() != nil {
+		return s.run.Err()
+	}
+	if deadline, ok := s.run.Deadline(); ok && !time.Now().Before(deadline) {
+		return context.DeadlineExceeded
+	}
+	if s.closed {
+		return ErrProfileRecoveryChanged
+	}
+	return nil
+}
+
+// PrepareProfileRecovery performs no SQL and cannot refresh authentication.
+// Its read window is at most ten seconds and never extends its original ctx.
+func (ds *DataStore) PrepareProfileRecovery(ctx context.Context, id string) (*ProfileRecoveryRead, error) {
+	if ds == nil || ds.pool == nil || ctx == nil {
+		return nil, ErrProfileRecoveryUnavailable
+	}
+	if ctx.Err() != nil {
+		return nil, ctx.Err()
+	}
+	if id == "" || id != strings.TrimSpace(id) {
+		return nil, ErrProfileRecoveryChanged
+	}
+	run, cancel := context.WithTimeout(ctx, 10*time.Second)
+	r := &ProfileRecoveryRead{}
+	r.state = &profileRecoveryReadState{ds: ds, self: r, ctx: ctx, run: run, cancel: cancel, id: id}
+	if err := recoveryContextError(r.state); err != nil {
+		cancel()
+		return nil, err
+	}
+	return r, nil
+}
+func (ds *DataStore) ProfileRecoveryTarget(ctx context.Context, r *ProfileRecoveryRead) (string, error) {
+	if r == nil || r.state == nil {
+		return "", ErrProfileRecoveryChanged
+	}
+	s := r.state
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.ds != ds || s.self != r || s.ctx != ctx || s.read {
+		return "", ErrProfileRecoveryChanged
+	}
+	if err := recoveryContextError(s); err != nil {
+		return "", err
+	}
+	return s.id, nil
+}
+func (ds *DataStore) reserveRecovery(ctx context.Context, r *ProfileRecoveryRead, kind uint8) (*ProfileRecoverySlot, error) {
+	if r == nil || r.state == nil {
+		return nil, ErrProfileRecoveryChanged
+	}
+	s := r.state
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.ds != ds || s.self != r || s.ctx != ctx || s.read || kind > 1 || s.slots[kind] != nil {
+		return nil, ErrProfileRecoveryChanged
+	}
+	if err := recoveryContextError(s); err != nil {
+		return nil, err
+	}
+	slot := &ProfileRecoverySlot{state: s, kind: kind}
+	slot.self = slot
+	s.slots[kind] = slot
+	return slot, nil
+}
+func (ds *DataStore) ReserveUsersRecovery(ctx context.Context, r *ProfileRecoveryRead) (*ProfileRecoverySlot, error) {
+	return ds.reserveRecovery(ctx, r, 0)
+}
+func (ds *DataStore) ReserveUserSettingsRecovery(ctx context.Context, r *ProfileRecoveryRead) (*ProfileRecoverySlot, error) {
+	return ds.reserveRecovery(ctx, r, 1)
+}
+
+// ReadProfileRecovery is one SQL snapshot, including successful absence and its
+// persistent lifecycle stamp. No missing-row fallback, bootstrap or DML occurs.
+// A later database change is not a locally detected change or durable permit.
+func (ds *DataStore) ReadProfileRecovery(r *ProfileRecoveryRead) (*ProfileRecoverySnapshot, error) {
+	if r == nil || r.state == nil {
+		return nil, ErrProfileRecoveryChanged
+	}
+	s := r.state
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.ds != ds || s.self != r || s.read {
+		return nil, ErrProfileRecoveryChanged
+	}
+	if err := recoveryContextError(s); err != nil {
+		return nil, err
+	}
+	registered := false
+	for _, slot := range s.slots {
+		if slot != nil {
+			if slot.closed {
+				return nil, ErrProfileRecoveryChanged
+			}
+			registered = true
+		}
+	}
+	if !registered {
+		return nil, ErrProfileRecoveryChanged
+	}
+	s.read = true
+	var present bool
+	var userRaw, settingsRaw []byte
+	var userVersion, settingsVersion string
+	var generation *int64
+	err := ds.pool.QueryRow(s.run, `SELECT u.id IS NOT NULL,to_jsonb(u),
+ CASE WHEN u.id IS NULL THEN '' ELSE `+userWriteVersion+` END,s.settings,
+ CASE WHEN s.user_id IS NULL THEN '' ELSE `+userSettingsVersion+` END,v.generation
+ FROM (SELECT $1::text AS id) selected
+ LEFT JOIN users u ON u.id=selected.id
+ LEFT JOIN user_settings s ON s.user_id=selected.id
+ LEFT JOIN user_settings_versions v ON v.user_id=selected.id`, s.id).Scan(&present, &userRaw, &userVersion, &settingsRaw, &settingsVersion, &generation)
+	if e := recoveryContextError(s); e != nil {
+		return nil, e
+	}
+	if err != nil {
+		return nil, ErrProfileRecoveryUnavailable
+	}
+	if generation != nil && *generation < 0 || present && (generation == nil || userVersion == "") || !present && (userVersion != "" || settingsVersion != "" || len(settingsRaw) > 0) {
+		return nil, ErrProfileRecoveryUnavailable
+	}
+	stamp := int64(0)
+	if generation != nil {
+		stamp = *generation
+	}
+	value := &ProfileRecoverySnapshot{state: s, present: present}
+	value.self = value
+	if !present {
+		value.user = UserWriteRecord{User: models.User{ID: s.id}, Revision: UserRevision{owner: ds, id: s.id, version: fmt.Sprintf("absent:%d", stamp)}}
+	}
+	if present {
+		value.user, err = ds.recoveryUserRecord(userRaw, userVersion)
+		if err != nil || value.user.User.ID != s.id {
+			return nil, ErrProfileRecoveryUnavailable
+		}
+	}
+	settings := &userSettingsSnapshot{ds: ds, id: s.id, version: settingsVersion, generation: stamp, raw: append(json.RawMessage(nil), settingsRaw...), userPresent: present}
+	value.settings = UserSettingsRecord{ID: s.id, Revision: UserSettingsRevision{snapshot: settings}}
+	if settingsVersion != "" {
+		var object map[string]json.RawMessage
+		if json.Unmarshal(settingsRaw, &object) != nil || object == nil || json.Unmarshal(settingsRaw, &settings.settings) != nil {
+			return nil, ErrProfileRecoveryUnavailable
+		}
+		copy, e := cloneSettings(settings.settings)
+		if e != nil {
+			return nil, ErrProfileRecoveryUnavailable
+		}
+		value.settings.Settings = &copy
+	}
+	if e := recoveryContextError(s); e != nil {
+		return nil, e
+	}
+	s.snapshot = value
+	return value, nil
+}
+func checkRecoverySlotLocked(ds *DataStore, ctx context.Context, slot *ProfileRecoverySlot, value *ProfileRecoverySnapshot) error {
+	if slot == nil || slot.state == nil || slot.self != slot || value == nil || value.self != value || value.state != slot.state {
+		return ErrProfileRecoveryChanged
+	}
+	s := slot.state
+	if s.ds != ds || s.ctx != ctx || s.snapshot != value || !s.read || slot.used || slot.closed || slot.kind > 1 || s.slots[slot.kind] != slot {
+		return ErrProfileRecoveryChanged
+	}
+	return recoveryContextError(s)
+}
+func (ds *DataStore) ValidateProfileRecoverySlot(ctx context.Context, slot *ProfileRecoverySlot, value *ProfileRecoverySnapshot) error {
+	if slot == nil || slot.state == nil {
+		return ErrProfileRecoveryChanged
+	}
+	s := slot.state
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return checkRecoverySlotLocked(ds, ctx, slot, value)
+}
+func (ds *DataStore) TakeUsersRecovery(ctx context.Context, slot *ProfileRecoverySlot, value *ProfileRecoverySnapshot) (UserWriteRecord, bool, error) {
+	if slot == nil || slot.state == nil {
+		return UserWriteRecord{}, false, ErrProfileRecoveryChanged
+	}
+	s := slot.state
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if err := checkRecoverySlotLocked(ds, ctx, slot, value); err != nil {
+		return UserWriteRecord{}, false, err
+	}
+	if slot.kind != 0 {
+		return UserWriteRecord{}, false, ErrProfileRecoveryChanged
+	}
+	slot.used = true
+	record := value.user
+	if record.User.KidsAllowedLists != nil {
+		record.User.KidsAllowedLists = append([]string{}, record.User.KidsAllowedLists...)
+	}
+	return record, value.present, nil
+}
+func (ds *DataStore) TakeUserSettingsRecovery(ctx context.Context, slot *ProfileRecoverySlot, value *ProfileRecoverySnapshot) (UserSettingsRecord, bool, error) {
+	if slot == nil || slot.state == nil {
+		return UserSettingsRecord{}, false, ErrProfileRecoveryChanged
+	}
+	s := slot.state
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if err := checkRecoverySlotLocked(ds, ctx, slot, value); err != nil {
+		return UserSettingsRecord{}, false, err
+	}
+	if slot.kind != 1 {
+		return UserSettingsRecord{}, false, ErrProfileRecoveryChanged
+	}
+	record := value.settings
+	if record.Settings != nil {
+		copy, err := cloneSettings(*record.Settings)
+		if err != nil {
+			return UserSettingsRecord{}, false, ErrProfileRecoveryUnavailable
+		}
+		record.Settings = &copy
+	}
+	slot.used = true
+	return record, value.present, nil
 }
 
 // AcceptUserSettingsCommit performs no SQL and consumes exactly the original
