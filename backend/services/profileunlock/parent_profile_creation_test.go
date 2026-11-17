@@ -10,6 +10,7 @@ import (
 	"strings"
 	"testing"
 
+	"novastream/internal/datastore"
 	"novastream/services/user_settings"
 )
 
@@ -38,16 +39,18 @@ func TestParentProfileCreationFacadeActualHandoffAndBothCacheOwners(t *testing.T
 	}
 	first, stop := creationFacadeRequest(t, f, pins)
 	body := []byte(creationFacadeBody)
-	token, err := pins.ParentProfileCreationChallenge(first, body)
+	bundle, err := pins.ParentProfileCreationChallenge(first, body)
 	stop()
 	if err != nil {
 		t.Fatal(err)
 	}
+	token := bundle.ParentIntent
 	body[2] = 'X'
 	if _, ok := parentConfirmationTokenKey(token, "pcc_"); !ok {
 		t.Fatal("new action token format")
 	}
 	retry, release := creationFacadeRequest(t, f, pins)
+	retry.Header.Set(datastore.ProfileCreationOperationHeader, bundle.CreationOperation)
 	defer release()
 	before := f.ds.Pool().Stat().AcquireCount()
 	copy := *pins
@@ -121,12 +124,14 @@ func TestParentProfileCreationFacadeTypedIsolationAndOneShot(t *testing.T) {
 			f := issuerFacadePG(t)
 			pins := NewPGProfilePins(f.ds)
 			first, stop := creationFacadeRequest(t, f, pins)
-			token, err := pins.ParentProfileCreationChallenge(first, []byte(creationFacadeBody))
+			bundle, err := pins.ParentProfileCreationChallenge(first, []byte(creationFacadeBody))
 			stop()
 			if err != nil {
 				t.Fatal(err)
 			}
+			token := bundle.ParentIntent
 			r, release := creationFacadeRequest(t, f, pins)
+			r.Header.Set(datastore.ProfileCreationOperationHeader, bundle.CreationOperation)
 			defer release()
 			body := []byte(creationFacadeBody)
 			switch kind {
@@ -179,10 +184,11 @@ func TestParentProfileCreationFacadeUsesOneExistingActorRegistryBudget(t *testin
 	}
 	r, stop := creationFacadeRequest(t, f, pins)
 	defer stop()
-	token, err := pins.ParentProfileCreationChallenge(r, []byte(creationFacadeBody))
+	bundle, err := pins.ParentProfileCreationChallenge(r, []byte(creationFacadeBody))
 	if err != nil {
 		t.Fatal(err)
 	}
+	token := bundle.ParentIntent
 	if !strings.HasPrefix(token, "pcc_") {
 		t.Fatal("wrong typed action")
 	}

@@ -1067,24 +1067,34 @@ func (v *PGProfilePins) TakeParentKidsFlagReceipt(i *ParentKidsFlagIntent, r *da
 
 // ParentProfileCreationChallenge shares the existing total/actor/byte registry
 // with every other parent action. Its token is never a ledger locator.
-func (v *PGProfilePins) ParentProfileCreationChallenge(r *http.Request, body []byte) (string, error) {
+type ParentProfileCreationChallengeBundle struct {
+	ParentIntent      string `json:"parentIntent"`
+	CreationOperation string `json:"creationOperation"`
+}
+
+func (v *PGProfilePins) ParentProfileCreationChallenge(r *http.Request, body []byte) (ParentProfileCreationChallengeBundle, error) {
 	if !v.valid() || r == nil || r.URL == nil {
-		return "", datastore.ErrParentProfileCreationUnavailable
+		return ParentProfileCreationChallengeBundle{}, datastore.ErrParentProfileCreationUnavailable
 	}
 	intent, err := v.store.PrepareParentProfileCreationManagement(r, body, RequestTokens(r))
 	if err != nil {
-		return "", err
+		return ParentProfileCreationChallengeBundle{}, err
+	}
+	locator, err := v.store.ParentProfileCreationLocator(intent)
+	if err != nil {
+		intent.Close()
+		return ParentProfileCreationChallengeBundle{}, err
 	}
 	actor, size, deadline, err := v.store.ParentProfileCreationBudget(intent)
 	if err != nil {
 		intent.Close()
-		return "", err
+		return ParentProfileCreationChallengeBundle{}, err
 	}
 	token, err := v.registerParentConfirmation(r, "pcc_", &parentModeEntry{action: parentConfirmationProfileCreation, creation: intent, actor: actor, bytes: size, deadline: deadline})
 	if err != nil {
-		return "", datastore.ErrParentProfileCreationUnavailable
+		return ParentProfileCreationChallengeBundle{}, datastore.ErrParentProfileCreationUnavailable
 	}
-	return token, nil
+	return ParentProfileCreationChallengeBundle{ParentIntent: token, CreationOperation: locator}, nil
 }
 func (v *PGProfilePins) ClaimParentProfileCreation(r *http.Request, body []byte, token string) (*datastore.ParentProfileCreationIntent, error) {
 	if !v.valid() || r == nil || r.URL == nil {
@@ -1108,20 +1118,6 @@ func (v *PGProfilePins) ClaimParentProfileCreation(r *http.Request, body []byte,
 	}
 	return entry.creation, nil
 }
-func (v *PGProfilePins) ImmediateParentProfileCreation(r *http.Request, body []byte) (*datastore.ParentProfileCreationIntent, error) {
-	if !v.valid() || r == nil || r.URL == nil {
-		return nil, datastore.ErrParentProfileCreationUnavailable
-	}
-	i, err := v.store.PrepareParentProfileCreationManagement(r, body, RequestTokens(r))
-	if err != nil {
-		return nil, err
-	}
-	if err = v.store.BindParentProfileCreationManagementRetry(r, i, body, RequestTokens(r)); err != nil {
-		i.Close()
-		return nil, err
-	}
-	return i, nil
-}
 func (v *PGProfilePins) BoundParentProfileCreationRequest(r *http.Request, i *datastore.ParentProfileCreationIntent) (*http.Request, error) {
 	if !v.valid() {
 		return nil, datastore.ErrParentProfileCreationUnavailable
@@ -1139,4 +1135,23 @@ func (v *PGProfilePins) TakeParentProfileCreationReceipt(i *datastore.ParentProf
 		return datastore.ErrParentProfileCreationUnavailable
 	}
 	return v.store.TakeParentProfileCreationReceipt(i, r, u, s)
+}
+
+func (v *PGProfilePins) PrepareProfileCreationRead(r *http.Request, locator string) (*datastore.ProfileCreationRead, error) {
+	if !v.valid() {
+		return nil, datastore.ErrParentProfileCreationUnavailable
+	}
+	return v.store.PrepareProfileCreationReadManagement(r, locator, RequestTokens(r))
+}
+func (v *PGProfilePins) ReadProfileCreationResult(r *datastore.ProfileCreationRead) (*datastore.ProfileCreationResultSnapshot, error) {
+	if !v.valid() {
+		return nil, datastore.ErrParentProfileCreationUnavailable
+	}
+	return v.store.ReadProfileCreationResult(r)
+}
+func (v *PGProfilePins) TakeProfileCreationRecoveryPair(ctx context.Context, r *datastore.ProfileCreationRead, s *datastore.ProfileCreationResultSnapshot, u, w *datastore.ProfileCreationRecoveryLease) error {
+	if !v.valid() {
+		return datastore.ErrParentProfileCreationUnavailable
+	}
+	return v.store.TakeProfileCreationRecoveryPair(ctx, r, s, u, w)
 }

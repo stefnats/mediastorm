@@ -5221,6 +5221,264 @@ paths:
       parameters: *recordingPartTimingParameters
       responses: *recordingPartTimingResponses
 
+  /admin/api/profiles:
+    post:
+      tags: [profiles]
+      operationId: createAdminProfileWithAcknowledgedOperation
+      summary: Create a profile with an acknowledged recovery locator
+      description: |
+        Adult requests without either confirmation header and JSON storage keep
+        their existing policy. PostgreSQL Kids creation always first returns 403
+        parent_authorization_required with parentIntent (pcc_) and creationOperation
+        (pcr_), each followed by 64 lowercase hex characters, including when the
+        first request already contains a password. No creation is attempted yet.
+        Retry the exact original request body/method/path/RawPath/raw query with
+        one X-Parent-Intent, one X-Profile-Creation-Operation echo and the existing
+        X-Account-Password. The pcr locator is correlation only, never a grant.
+        Half, duplicate, empty, changed or replayed pairs fail 409 without a new
+        capture or adult fallback. The original fresh password/30 second authority,
+        shared registry and Cookie ownership policy remain mandatory.
+        Strict new User, simpleMode defaults and qualified result commit together.
+        A lost or canceled response must never cause automatic creation or defaults
+        retry. Retain the acknowledged locator and explicitly read its result.
+        Actual Accounts/Onboarding consumers are a separate change.
+      security:
+        - accountSession: []
+      parameters:
+        - name: X-Parent-Intent
+          in: header
+          schema: {type: string}
+        - name: X-Profile-Creation-Operation
+          in: header
+          schema: {type: string, pattern: '^pcr_[0-9a-f]{64}$'}
+        - name: X-Account-Password
+          in: header
+          schema: {type: string}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name]
+              properties:
+                name: {type: string}
+                color: {type: string}
+                accountId: {type: string}
+                isKidsProfile: {type: boolean}
+      responses:
+        '200':
+          description: Saved safe management profile and original creationOperation for qualified PG creation
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/ProfileCreationSavedProfile'}
+        '403':
+          description: First acknowledged challenge, rejected parent password, or existing plain-text management denial
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/ProfileCreationChallenge'}
+            text/plain:
+              schema: {type: string}
+        '409':
+          description: Confirmation changed, expired, incomplete or already consumed
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Error'}
+        '503':
+          description: Storage unavailable or outcome unknown; explicitly read the locator
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Error'}
+  /admin/api/profiles/creation-operations/{operationRef}/read:
+    post:
+      tags: [profiles]
+      operationId: readAdminProfileCreationResult
+      summary: Read a qualified creation result using current management authority
+      description: |
+        Bodyless Cookie management read. Reject query, body, password and both
+        write confirmation headers. The locator supplies no execution authority.
+        Require a fresh full session/client/current actor role, recorded owner
+        management permission and present target current ownership/PIN policy.
+        Expiry of the old write session or five minute execution read window does
+        not renew write authority or erase already qualified created evidence.
+        pending is not absence. not_created means this operation did not create,
+        never permission to retry. Missing/pruned/legacy/unauthorized share 404
+        unqualified_or_missing. Errors/timeouts do not become not_created.
+        created returns only a current same-birth safe profile; deletion/reuse
+        invalidates the enrolled birth. changed_or_replaced installs no replacement.
+        Matching clean operation-owned cache markers can be adopted together;
+        foreign/dirty/successor/unscoped markers and unrelated write stops persist.
+        A response never acknowledges all caches. Compact attempted/created/tombstone
+        history is durable without a bounded total disk claim; never-attempted
+        preparations remain finitely retained with their execution records even
+        after a not_created read. There is no automatic retry or follow-up write.
+      security:
+        - accountSession: []
+      parameters:
+        - name: operationRef
+          in: path
+          required: true
+          schema: {type: string, pattern: '^pcr_[0-9a-f]{64}$'}
+      responses:
+        '200':
+          description: Qualified outcome with optional current safe profile
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/ProfileCreationReadResult'}
+        '400':
+          description: Body, query or write credentials were supplied
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Error'}
+        '403':
+          description: Existing Cookie Origin denial; no operation evidence is disclosed.
+          content:
+            text/plain:
+              schema: {type: string}
+        '404':
+          description: Uniform unqualified, missing or unauthorized locator
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/ProfileCreationReadResult'}
+        '409':
+          description: Current authority or local cache selection changed
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Error'}
+        '503':
+          description: Storage failure or uncertainty remains; never false absence
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Error'}
+  /account/api/profiles:
+    post:
+      tags: [profiles]
+      operationId: createAccountProfileWithAcknowledgedOperation
+      summary: Create a profile with an acknowledged recovery locator
+      description: |
+        Adult requests without either confirmation header and JSON storage keep
+        their existing policy. PostgreSQL Kids creation always first returns 403
+        parent_authorization_required with parentIntent (pcc_) and creationOperation
+        (pcr_), each followed by 64 lowercase hex characters, including when the
+        first request already contains a password. No creation is attempted yet.
+        Retry the exact original request body/method/path/RawPath/raw query with
+        one X-Parent-Intent, one X-Profile-Creation-Operation echo and the existing
+        X-Account-Password. The pcr locator is correlation only, never a grant.
+        Half, duplicate, empty, changed or replayed pairs fail 409 without a new
+        capture or adult fallback. The original fresh password/30 second authority,
+        shared registry and Cookie ownership policy remain mandatory.
+        Strict new User, simpleMode defaults and qualified result commit together.
+        A lost or canceled response must never cause automatic creation or defaults
+        retry. Retain the acknowledged locator and explicitly read its result.
+        Actual Accounts/Onboarding consumers are a separate change.
+      security:
+        - accountSession: []
+      parameters:
+        - name: X-Parent-Intent
+          in: header
+          schema: {type: string}
+        - name: X-Profile-Creation-Operation
+          in: header
+          schema: {type: string, pattern: '^pcr_[0-9a-f]{64}$'}
+        - name: X-Account-Password
+          in: header
+          schema: {type: string}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name]
+              properties:
+                name: {type: string}
+                color: {type: string}
+                accountId: {type: string}
+                isKidsProfile: {type: boolean}
+      responses:
+        '200':
+          description: Saved safe management profile and original creationOperation for qualified PG creation
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/ProfileCreationSavedProfile'}
+        '403':
+          description: First acknowledged challenge, rejected parent password, or existing plain-text management denial
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/ProfileCreationChallenge'}
+            text/plain:
+              schema: {type: string}
+        '409':
+          description: Confirmation changed, expired, incomplete or already consumed
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Error'}
+        '503':
+          description: Storage unavailable or outcome unknown; explicitly read the locator
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Error'}
+  /account/api/profiles/creation-operations/{operationRef}/read:
+    post:
+      tags: [profiles]
+      operationId: readAccountProfileCreationResult
+      summary: Read a qualified creation result using current management authority
+      description: |
+        Bodyless Cookie management read. Reject query, body, password and both
+        write confirmation headers. The locator supplies no execution authority.
+        Require a fresh full session/client/current actor role, recorded owner
+        management permission and present target current ownership/PIN policy.
+        Expiry of the old write session or five minute execution read window does
+        not renew write authority or erase already qualified created evidence.
+        pending is not absence. not_created means this operation did not create,
+        never permission to retry. Missing/pruned/legacy/unauthorized share 404
+        unqualified_or_missing. Errors/timeouts do not become not_created.
+        created returns only a current same-birth safe profile; deletion/reuse
+        invalidates the enrolled birth. changed_or_replaced installs no replacement.
+        Matching clean operation-owned cache markers can be adopted together;
+        foreign/dirty/successor/unscoped markers and unrelated write stops persist.
+        A response never acknowledges all caches. Compact attempted/created/tombstone
+        history is durable without a bounded total disk claim; never-attempted
+        preparations remain finitely retained with their execution records even
+        after a not_created read. There is no automatic retry or follow-up write.
+      security:
+        - accountSession: []
+      parameters:
+        - name: operationRef
+          in: path
+          required: true
+          schema: {type: string, pattern: '^pcr_[0-9a-f]{64}$'}
+      responses:
+        '200':
+          description: Qualified outcome with optional current safe profile
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/ProfileCreationReadResult'}
+        '400':
+          description: Body, query or write credentials were supplied
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Error'}
+        '403':
+          description: Existing Cookie Origin denial; no operation evidence is disclosed.
+          content:
+            text/plain:
+              schema: {type: string}
+        '404':
+          description: Uniform unqualified, missing or unauthorized locator
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/ProfileCreationReadResult'}
+        '409':
+          description: Current authority or local cache selection changed
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Error'}
+        '503':
+          description: Storage failure or uncertainty remains; never false absence
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Error'}
 components:
   securitySchemes:
     accountSession:
@@ -5615,6 +5873,62 @@ components:
             $ref: '#/components/schemas/Error'
 
   schemas:
+    ProfileCreationChallenge:
+      allOf:
+        - $ref: '#/components/schemas/Error'
+        - type: object
+          properties:
+            parentIntent: {type: string, pattern: '^pcc_[0-9a-f]{64}$'}
+            creationOperation: {type: string, pattern: '^pcr_[0-9a-f]{64}$'}
+      description: The initial PG Kids challenge includes both opaque fields; a password rejection may omit them. Neither locator nor challenge is a reusable grant.
+    ProfileCreationSavedProfile:
+      allOf:
+        - $ref: '#/components/schemas/ProfileCreationManagementProfile'
+        - type: object
+          properties:
+            creationOperation: {type: string, pattern: '^pcr_[0-9a-f]{64}$'}
+      description: Qualified PG Kids creation adds its original locator. Existing adult/JSON replies keep their prior fields and omit it.
+    ProfileCreationManagementProfile:
+      type: object
+      required: [id, name, hasPin, hasIcon, isKidsProfile, allowShareLinks, allowLiveTakeover, allowRecordingInterruption, activityPrivacy, createdAt, updatedAt]
+      description: Explicit safe current management projection. Passwords, PIN hashes, sessions, internal revisions and operation digests are never returned. Empty Kids fields may be omitted by the existing serializer.
+      properties:
+        id: {type: string}
+        accountId: {type: string}
+        name: {type: string}
+        color: {type: string}
+        iconUrl: {type: string}
+        hasPin: {type: boolean}
+        hasIcon: {type: boolean}
+        isKidsProfile: {type: boolean}
+        allowShareLinks: {type: boolean}
+        allowLiveTakeover: {type: boolean}
+        allowRecordingInterruption: {type: boolean}
+        activityPrivacy: {type: string}
+        kidsMode: {type: string}
+        kidsMaxRating: {type: string}
+        kidsMaxMovieRating: {type: string}
+        kidsMaxTVRating: {type: string}
+        kidsAllowedLists:
+          type: array
+          items: {type: string}
+        traktAccountId: {type: string}
+        mdblistAccountId: {type: string}
+        simklAccountId: {type: string}
+        scrobAccountId: {type: string}
+        createdAt: {type: string, format: date-time}
+        updatedAt: {type: string, format: date-time}
+    ProfileCreationReadResult:
+      type: object
+      required: [outcome, usersWriteBlocked, settingsPendingUncertainty]
+      properties:
+        outcome:
+          type: string
+          enum: [pending, created, not_created, changed_or_replaced, unqualified_or_missing]
+        profile:
+          $ref: '#/components/schemas/ProfileCreationManagementProfile'
+        usersWriteBlocked: {type: boolean}
+        settingsPendingUncertainty: {type: boolean}
     RecordingPartTiming:
       type: object
       required: [recordingId, partIndex, state]

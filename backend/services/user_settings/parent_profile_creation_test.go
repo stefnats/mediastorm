@@ -27,6 +27,11 @@ func creationSettingsIntent(t *testing.T, f *settingsFlagFixture) (*datastore.Pa
 		t.Fatal(err)
 	}
 	t.Cleanup(i.Close)
+	locator, err := f.ds.ParentProfileCreationLocator(i)
+	if err != nil {
+		t.Fatal(err)
+	}
+	r.Header.Set(datastore.ProfileCreationOperationHeader, locator)
 	if err = f.ds.BindParentProfileCreationManagementRetry(r, i, body, nil); err != nil {
 		t.Fatal(err)
 	}

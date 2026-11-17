@@ -1548,7 +1548,7 @@ func main() {
 	// Profile management endpoints
 	r.HandleFunc("/admin/api/profiles", adminUIHandler.RequireAuth(adminUIHandler.GetProfiles)).Methods(http.MethodGet)
 	r.HandleFunc("/admin/api/profiles/{userID}/custom-lists", adminUIHandler.RequireAuth(adminUIHandler.ProfileCustomLists(customListsHandler))).Methods(http.MethodGet)
-	registerParentProfileCreationCookieRoutes(r, adminUIHandler)
+	registerParentProfileCreationCookieRoutes(r, adminUIHandler, usersHandler, userSettingsService)
 	r.HandleFunc("/admin/api/profiles", adminUIHandler.RequireAuth(adminUIHandler.RenameProfile)).Methods(http.MethodPut)
 	r.HandleFunc("/admin/api/profiles", adminUIHandler.RequireAuth(adminUIHandler.DeleteProfile)).Methods(http.MethodDelete)
 	r.HandleFunc("/admin/api/profiles/pin", adminUIHandler.RequireAuth(adminUIHandler.SetProfilePin)).Methods(http.MethodPut)
@@ -3063,7 +3063,11 @@ func registerParentKidsFlagCookieRoutes(r *mux.Router, admin *handlers.AdminUIHa
 
 // registerParentProfileCreationCookieRoutes is consumed by Main and route tests.
 // Both existing aliases keep their actual cookie authentication wrapper.
-func registerParentProfileCreationCookieRoutes(r *mux.Router, admin *handlers.AdminUIHandler) {
-	r.HandleFunc("/admin/api/profiles", admin.RequireAuth(admin.CreateProfile)).Methods(http.MethodPost)
-	r.HandleFunc("/account/api/profiles", admin.RequireAuth(admin.CreateProfile)).Methods(http.MethodPost)
+func registerParentProfileCreationCookieRoutes(r *mux.Router, admin *handlers.AdminUIHandler, shared *handlers.UsersHandler, settings *user_settings.Service) {
+	for _, prefix := range []string{"/admin/api", "/account/api"} {
+		r.HandleFunc(prefix+"/profiles", admin.RequireAuth(admin.CreateProfile)).Methods(http.MethodPost)
+		r.HandleFunc(prefix+"/profiles/creation-operations/{operationRef}/read", recordingWebOrigin(admin.RequireAuth(func(w http.ResponseWriter, r *http.Request) {
+			shared.ReadProfileCreationManagement(w, r, settings)
+		}))).Methods(http.MethodPost)
+	}
 }

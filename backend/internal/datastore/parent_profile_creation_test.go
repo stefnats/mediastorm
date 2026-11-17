@@ -67,6 +67,7 @@ func (f *parentCreationFixture) prepare(t *testing.T, ds *DataStore) (*ParentPro
 	t.Cleanup(i.Close)
 	retry, release := f.request(t, ds, t.Context())
 	t.Cleanup(release)
+	creationTestEcho(retry, i)
 	if err = ds.BindParentProfileCreationManagementRetry(retry, i, []byte(parentCreationTestBody), nil); err != nil {
 		t.Fatal(err)
 	}
@@ -226,6 +227,7 @@ func TestParentProfileCreationRetryRawIdentityAndOriginalFrame(t *testing.T) {
 			case "cancel":
 				cancel()
 			}
+			creationTestEcho(r, i)
 			if err = ds.BindParentProfileCreationManagementRetry(r, i, body, nil); err == nil {
 				t.Fatal("changed retry accepted", kind)
 			}
@@ -438,6 +440,7 @@ func TestParentProfileCreationCloseCancelsActualBlockedBindWithoutCopyAuthority(
 	}
 	cleanup := func() { i.state.stop(); creationTestRollback(blocker) }
 	worker := startCreationTestWorker(t, cleanup, func() error {
+		creationTestEcho(retry, i)
 		return f.ds.BindParentProfileCreationManagementRetry(retry, i, []byte(parentCreationTestBody), nil)
 	})
 	creationOperationWaitLock(t, f.settingsDSFixture, "FROM sessions s JOIN accounts")
@@ -521,6 +524,7 @@ func TestParentProfileCreationRetryCancellationInterruptsRealClaimWait(t *testin
 		t.Fatal(err)
 	}
 	defer i.Close()
+	creationTestEcho(r, i)
 	if err = f.ds.BindParentProfileCreationManagementRetry(r, i, []byte(parentCreationTestBody), nil); err != nil {
 		t.Fatal(err)
 	}
@@ -640,6 +644,7 @@ func TestParentProfileCreationDeadlineDoesNotRenewAtRetry(t *testing.T) {
 	<-i.state.life.Done()
 	fresh, release := f.request(t, f.ds, t.Context())
 	defer release()
+	creationTestEcho(fresh, i)
 	if err = f.ds.BindParentProfileCreationManagementRetry(fresh, i, []byte(parentCreationTestBody), nil); err == nil {
 		t.Fatal("fresh HTTP request renewed expired original intent")
 	}
@@ -723,7 +728,7 @@ func TestParentProfileCreationMaintenanceLostAckIsNotNewAdmissionUnknown(t *test
 			f := newParentCreationFixture(t)
 			state, match := "reserved", "WITH candidates AS"
 			if kind == "prune" {
-				state, match = "terminal", "WITH eligible AS"
+				state, match = "terminal", "DELETE FROM profile_creation_operations WHERE operation_id=$1"
 			}
 			creationOperationSeed(t, f.ds.pool, creationOperationTestMetadata("synthetic_prior_actor"), state, true)
 			cfg, err := pgxpool.ParseConfig(f.uri)
@@ -833,4 +838,10 @@ func TestParentProfileCreationCloseInterruptsActualPostClaimCommitWait(t *testin
 	if a, b := creationTestCounts(t, f, i.state.reference.record.target); a != 0 || b != 0 {
 		t.Fatal("closed post-claim operation wrote profile/settings")
 	}
+}
+
+// Internal staged protocol probes explicitly acknowledge the private original
+// locator. These helpers do not execute an HTTP challenge or capture new work.
+func creationTestEcho(r *http.Request, i *ParentProfileCreationIntent) {
+	r.Header.Set(ProfileCreationOperationHeader, parentProfileCreationLocator(i.state.reference))
 }

@@ -349,6 +349,8 @@ type UserSettingsRecoveryTicket struct {
 	state *userSettingsRecoveryTicketState
 }
 type userSettingsRecoveryTicketState struct {
+	creation                                        string
+	creationRead                                    *datastore.ProfileCreationRead
 	self                                            *UserSettingsRecoveryTicket
 	service                                         *Service
 	ctx                                             context.Context
@@ -376,6 +378,9 @@ func (t *UserSettingsRecoveryTicket) Close() {
 // PrepareUserSettingsRecovery reserves a clean local target before the common
 // read. It never invokes first-target acquire, migrations or a whole-cache load.
 func (s *Service) PrepareUserSettingsRecovery(ctx context.Context, read *datastore.ProfileRecoveryRead) (*UserSettingsRecoveryTicket, error) {
+	return s.prepareUserSettingsRecovery(ctx, read, "", nil)
+}
+func (s *Service) prepareUserSettingsRecovery(ctx context.Context, read *datastore.ProfileRecoveryRead, creation string, creationRead *datastore.ProfileCreationRead) (*UserSettingsRecoveryTicket, error) {
 	if s == nil || !s.useDB() || ctx == nil {
 		return nil, datastore.ErrProfileRecoveryUnavailable
 	}
@@ -391,7 +396,7 @@ func (s *Service) PrepareUserSettingsRecovery(ctx context.Context, read *datasto
 	if err != nil {
 		return nil, err
 	}
-	if marker := s.pg.unknownMarkers[target]; marker != nil && marker.creation != "" {
+	if marker := s.pg.unknownMarkers[target]; marker != nil && (creation == "" && marker.creation != "" || creation != "" && marker.creation != creation) {
 		return nil, datastore.ErrProfileRecoveryChanged
 	}
 	current, present := s.settings[target]
@@ -399,13 +404,18 @@ func (s *Service) PrepareUserSettingsRecovery(ctx context.Context, read *datasto
 	if present != known || !reflect.DeepEqual(current, confirmed) {
 		return nil, datastore.ErrProfileRecoveryChanged
 	}
-	slot, err := s.store.ReserveUserSettingsRecovery(ctx, read)
+	var slot *datastore.ProfileRecoverySlot
+	if creationRead != nil {
+		slot, err = s.store.ReserveProfileCreationSettingsRecovery(ctx, creationRead)
+	} else {
+		slot, err = s.store.ReserveUserSettingsRecovery(ctx, read)
+	}
 	if err != nil {
 		return nil, err
 	}
 	record, recordPresent := s.pg.records[target]
 	ticket := &UserSettingsRecoveryTicket{}
-	ticket.state = &userSettingsRecoveryTicketState{self: ticket, service: s, ctx: ctx, target: target, slot: slot, current: cloneSettingsValue(current), confirmed: cloneSettingsValue(confirmed), currentPresent: present, confirmedPresent: known, recordPresent: recordPresent, revision: record.Revision, uncertain: s.pg.uncertain[target], marker: s.pg.unknownMarkers[target]}
+	ticket.state = &userSettingsRecoveryTicketState{creation: creation, creationRead: creationRead, self: ticket, service: s, ctx: ctx, target: target, slot: slot, current: cloneSettingsValue(current), confirmed: cloneSettingsValue(confirmed), currentPresent: present, confirmedPresent: known, recordPresent: recordPresent, revision: record.Revision, uncertain: s.pg.uncertain[target], marker: s.pg.unknownMarkers[target]}
 	return ticket, nil
 }
 func (s *Service) validateUserSettingsRecoveryLocked(ctx context.Context, ticket *UserSettingsRecoveryTicket, snapshot *datastore.ProfileRecoverySnapshot) error {
@@ -421,7 +431,7 @@ func (s *Service) validateUserSettingsRecoveryLocked(ctx context.Context, ticket
 	t := ticket.state
 	p := s.pg
 	if p != nil {
-		if marker := p.unknownMarkers[t.target]; marker != nil && marker.creation != "" {
+		if marker := p.unknownMarkers[t.target]; marker != nil && (t.creation == "" && marker.creation != "" || t.creation != "" && marker.creation != t.creation) {
 			return datastore.ErrProfileRecoveryChanged
 		}
 	}
@@ -433,6 +443,9 @@ func (s *Service) validateUserSettingsRecoveryLocked(ctx context.Context, ticket
 	record, recordPresent := p.records[t.target]
 	if present != t.currentPresent || known != t.confirmedPresent || recordPresent != t.recordPresent || record.Revision != t.revision || !reflect.DeepEqual(current, t.current) || !reflect.DeepEqual(confirmed, t.confirmed) || p.uncertain[t.target] != t.uncertain || p.unknownMarkers[t.target] != t.marker {
 		return datastore.ErrProfileRecoveryChanged
+	}
+	if t.creationRead != nil {
+		return s.store.ValidateProfileCreationRecoverySlot(ctx, t.creationRead, t.slot, snapshot)
 	}
 	return s.store.ValidateProfileRecoverySlot(ctx, t.slot, snapshot)
 }
@@ -452,10 +465,16 @@ func (s *Service) InstallUserSettingsRecovery(ctx context.Context, ticket *UserS
 	if s == nil || !s.useDB() {
 		return status, datastore.ErrProfileRecoveryUnavailable
 	}
+	if ticket != nil && ticket.state != nil && ticket.state.creation != "" {
+		return status, datastore.ErrProfileRecoveryChanged
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if err := s.validateUserSettingsRecoveryLocked(ctx, ticket, snapshot); err != nil {
 		return status, err
+	}
+	if ticket.state.creation != "" {
+		return status, datastore.ErrProfileRecoveryChanged
 	}
 	t := ticket.state
 	record, present, err := s.store.TakeUserSettingsRecovery(ctx, t.slot, snapshot)
@@ -487,6 +506,7 @@ type UserSettingsRecoveryLease struct {
 	state *userSettingsRecoveryLeaseState
 }
 type userSettingsRecoveryLeaseState struct {
+	creationProof                           *datastore.ProfileCreationRecoveryLease
 	mu                                      sync.Mutex
 	self                                    *UserSettingsRecoveryLease
 	service                                 *Service
@@ -511,13 +531,22 @@ func (s *Service) AcquireUserSettingsRecoveryLease(ctx context.Context, ticket *
 		s.mu.Unlock()
 		return nil, err
 	}
-	proof, record, present, err := s.store.BeginUserSettingsRecoveryLease(ctx, ticket.state.slot, snapshot)
+	var proof *datastore.ProfileRecoveryLease
+	var creationProof *datastore.ProfileCreationRecoveryLease
+	var record datastore.UserSettingsRecord
+	var present bool
+	var err error
+	if ticket.state.creationRead != nil {
+		creationProof, record, present, err = s.store.BeginProfileCreationSettingsRecoveryLease(ctx, ticket.state.creationRead, ticket.state.slot, snapshot)
+	} else {
+		proof, record, present, err = s.store.BeginUserSettingsRecoveryLease(ctx, ticket.state.slot, snapshot)
+	}
 	if err != nil {
 		s.mu.Unlock()
 		return nil, err
 	}
 	lease := &UserSettingsRecoveryLease{}
-	st := &userSettingsRecoveryLeaseState{self: lease, service: s, ticket: ticket, proof: proof, record: record, present: present, hasSettings: record.Settings != nil}
+	st := &userSettingsRecoveryLeaseState{self: lease, service: s, ticket: ticket, proof: proof, creationProof: creationProof, record: record, present: present, hasSettings: record.Settings != nil}
 	if record.Settings != nil {
 		st.current = cloneSettingsValue(*record.Settings)
 		st.confirmed = cloneSettingsValue(*record.Settings)
@@ -529,16 +558,32 @@ func (l *UserSettingsRecoveryLease) PairLease() *datastore.ProfileRecoveryLease 
 	if l == nil || l.state == nil || l.state.self != l {
 		return nil
 	}
+	if l.state.ticket.state.creation != "" {
+		return nil
+	}
 	return l.state.proof
 }
 func (st *userSettingsRecoveryLeaseState) completeLocked() datastore.ProfileRecoveryStatus {
 	if st.installed {
 		return st.status
 	}
-	if !st.proof.Paired() {
+	if !(st.creationProof != nil && st.creationProof.Paired() || st.creationProof == nil && st.proof.Paired()) {
 		return datastore.ProfileRecoveryStatus{PendingUncertainty: true}
 	}
 	s := st.service
+	t := st.ticket.state
+	if t.creation != "" && !st.present && t.marker == nil && !t.currentPresent && !t.confirmedPresent && !t.recordPresent {
+		st.status = datastore.ProfileRecoveryStatus{PendingUncertainty: false}
+		for _, unknown := range s.pg.uncertain {
+			if unknown {
+				st.status.PendingUncertainty = true
+				break
+			}
+		}
+		t.closed.Store(true)
+		st.installed = true
+		return st.status
+	}
 	target := st.ticket.state.target
 	s.pg.records[target] = st.record
 	if st.hasSettings {
@@ -583,7 +628,7 @@ func (l *UserSettingsRecoveryLease) Close() {
 	if st.self != l || st.closed {
 		return
 	}
-	if st.proof.Retire() {
+	if st.creationProof != nil && st.creationProof.Retire() || st.creationProof == nil && st.proof.Retire() {
 		st.completeLocked()
 	}
 	st.closed = true
@@ -944,4 +989,38 @@ func (s *Service) hasCreationUnknownLocked() bool {
 		}
 	}
 	return false
+}
+
+// PrepareProfileCreationRecovery captures only the matching operation target,
+// without first-target defaults, global reload or unrelated dirty writes.
+func (s *Service) PrepareProfileCreationRecovery(ctx context.Context, read *datastore.ProfileCreationRead) (*UserSettingsRecoveryTicket, error) {
+	if s == nil || !s.useDB() {
+		return nil, datastore.ErrParentProfileCreationUnavailable
+	}
+	inner, operation, err := s.store.ProfileCreationRecoveryRead(ctx, read)
+	if err != nil {
+		return nil, err
+	}
+	return s.prepareUserSettingsRecovery(ctx, inner, operation, read)
+}
+func (s *Service) AcquireProfileCreationRecoveryLease(ctx context.Context, t *UserSettingsRecoveryTicket, snapshot *datastore.ProfileCreationResultSnapshot) (*UserSettingsRecoveryLease, error) {
+	if s == nil || !s.useDB() || t == nil || t.state == nil || t.state.self != t || t.state.creation == "" {
+		return nil, datastore.ErrParentProfileCreationChanged
+	}
+	projection, err := s.store.ProfileCreationRecoverySnapshot(ctx, t.state.creationRead, snapshot)
+	if err != nil {
+		return nil, err
+	}
+	lease, err := s.AcquireUserSettingsRecoveryLease(ctx, t, projection)
+	if err != nil {
+		return nil, err
+	}
+	return lease, nil
+}
+
+func (l *UserSettingsRecoveryLease) CreationPairLease() *datastore.ProfileCreationRecoveryLease {
+	if l == nil || l.state == nil || l.state.self != l {
+		return nil
+	}
+	return l.state.creationProof
 }

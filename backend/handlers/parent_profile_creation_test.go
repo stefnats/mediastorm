@@ -12,6 +12,7 @@ import (
 
 	"novastream/models"
 	"novastream/services/accounts"
+	"novastream/services/profileunlock"
 	"novastream/services/sessions"
 	"novastream/services/user_settings"
 	"novastream/services/users"
@@ -25,21 +26,22 @@ func creationCookieFixture(t *testing.T, master bool) *kidsCookieFixture {
 	}
 	return f
 }
-func creationCookieRequest(f *kidsCookieFixture, prefix, body, intent, password string) *http.Request {
+func creationCookieRequest(f *kidsCookieFixture, prefix, body string, intent profileunlock.ParentProfileCreationChallengeBundle, password string) *http.Request {
 	r := httptest.NewRequest(http.MethodPost, "http://synthetic.test"+prefix+"/api/profiles", strings.NewReader(body))
 	r.Header.Set("Origin", "http://synthetic.test")
 	r.Header.Set("Sec-Fetch-Site", "same-origin")
 	r.Header.Set("Content-Type", "application/json")
 	r.AddCookie(&http.Cookie{Name: adminSessionCookieName, Value: f.base.session.Token})
-	if intent != "" {
-		r.Header.Set("X-Parent-Intent", intent)
+	if intent.ParentIntent != "" {
+		r.Header.Set("X-Parent-Intent", intent.ParentIntent)
+		r.Header.Set("X-Profile-Creation-Operation", intent.CreationOperation)
 	}
 	if password != "" {
 		r.Header.Set("X-Account-Password", password)
 	}
 	return r
 }
-func creationCookieCall(f *kidsCookieFixture, prefix, body, intent, password string) *httptest.ResponseRecorder {
+func creationCookieCall(f *kidsCookieFixture, prefix, body string, intent profileunlock.ParentProfileCreationChallengeBundle, password string) *httptest.ResponseRecorder {
 	w := httptest.NewRecorder()
 	f.router.ServeHTTP(w, creationCookieRequest(f, prefix, body, intent, password))
 	return w
@@ -53,18 +55,18 @@ func creationCookieRows(t *testing.T, f *kidsCookieFixture) []byte {
 	}
 	return raw
 }
-func creationCookieChallenge(t *testing.T, f *kidsCookieFixture, prefix, body string) string {
+func creationCookieChallenge(t *testing.T, f *kidsCookieFixture, prefix, body string) profileunlock.ParentProfileCreationChallengeBundle {
 	t.Helper()
 	before := creationCookieRows(t, f)
-	w := creationCookieCall(f, prefix, body, "", "")
-	var value struct{ Code, ParentIntent string }
-	if w.Code != 403 || json.Unmarshal(w.Body.Bytes(), &value) != nil || value.Code != "parent_authorization_required" || !strings.HasPrefix(value.ParentIntent, "pcc_") || len(value.ParentIntent) != 68 {
+	w := creationCookieCall(f, prefix, body, profileunlock.ParentProfileCreationChallengeBundle{}, "")
+	var value struct{ Code, ParentIntent, CreationOperation string }
+	if w.Code != 403 || json.Unmarshal(w.Body.Bytes(), &value) != nil || value.Code != "parent_authorization_required" || !strings.HasPrefix(value.ParentIntent, "pcc_") || len(value.ParentIntent) != 68 || !strings.HasPrefix(value.CreationOperation, "pcr_") || len(value.CreationOperation) != 68 {
 		t.Fatal("missing typed creation challenge", w.Code)
 	}
 	if !bytes.Equal(before, creationCookieRows(t, f)) {
 		t.Fatal("challenge changed profile/settings")
 	}
-	return value.ParentIntent
+	return profileunlock.ParentProfileCreationChallengeBundle{ParentIntent: value.ParentIntent, CreationOperation: value.CreationOperation}
 }
 func TestParentProfileCreationCookieActualDelegationRolesAndNoFollowup(t *testing.T) {
 	for _, master := range []bool{false, true} {
@@ -117,7 +119,7 @@ func TestParentProfileCreationCookieNoAdultDowngradeOrRequestAdoption(t *testing
 			case "alias":
 				prefix = "/admin"
 			case "cross action":
-				token = "pkf_" + token[4:]
+				token.ParentIntent = "pkf_" + token.ParentIntent[4:]
 			}
 			r := creationCookieRequest(f, prefix, body, token, "synthetic-parent-password")
 			switch kind {
@@ -126,7 +128,7 @@ func TestParentProfileCreationCookieNoAdultDowngradeOrRequestAdoption(t *testing
 			case "cookie":
 				r.Header.Set("Cookie", adminSessionCookieName+"=SYNTHETIC_OTHER_COOKIE")
 			case "header repeated":
-				r.Header.Add("X-Parent-Intent", token)
+				r.Header.Add("X-Parent-Intent", token.ParentIntent)
 			}
 			before := creationCookieRows(t, f)
 			w := httptest.NewRecorder()
@@ -151,7 +153,7 @@ func TestParentProfileCreationCookieExistingBodyOriginAndParentRefusals(t *testi
 			if kind == "body cap" {
 				body = `{"name":"Child","isKidsProfile":true,"padding":"` + strings.Repeat("x", 17000) + `"}`
 			}
-			token := ""
+			token := profileunlock.ParentProfileCreationChallengeBundle{}
 			password := ""
 			if kind == "wrong password" {
 				token = creationCookieChallenge(t, f, "/account", body)
@@ -198,7 +200,7 @@ func TestParentProfileCreationCookieAdultAndJSONRemainLegacy(t *testing.T) {
 				password = "synthetic-parent-password"
 			}
 			body := `{"name":"Legacy adult","accountId":"actor","isKidsProfile":false}`
-			w := creationCookieCall(f, "/admin", body, "", password)
+			w := creationCookieCall(f, "/admin", body, profileunlock.ParentProfileCreationChallengeBundle{}, password)
 			if w.Code != 200 {
 				t.Fatal("adult no-intent compatibility changed", w.Code)
 			}
