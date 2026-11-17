@@ -866,3 +866,142 @@ func (l *StorageRecoveryLease) Close() {
 	st.closed = true
 	st.service.mu.Unlock()
 }
+
+// ParentKidsFlagLease holds only the selected confirmed Users projection. It is
+// acquired before Settings and remains held through both compound cache ACKs.
+type ParentKidsFlagLease struct{ state *parentKidsFlagLeaseState }
+type parentKidsFlagLeaseState struct {
+	mu                           sync.Mutex
+	self                         *ParentKidsFlagLease
+	service                      *Service
+	intent                       *datastore.ParentKidsFlagIntent
+	proof                        *datastore.ParentKidsFlagCacheLease
+	target                       string
+	current, confirmed, response models.User
+	revision                     datastore.UserRevision
+	staged, installed, closed    bool
+}
+
+func (*ParentKidsFlagLease) MarshalJSON() ([]byte, error) { return []byte("null"), nil }
+func (*ParentKidsFlagLease) Format(f fmt.State, _ rune) {
+	_, _ = f.Write([]byte("ParentKidsFlagLease(opaque)"))
+}
+func (s *Service) AcquireParentKidsFlagLease(ctx context.Context, target string, intent *datastore.ParentKidsFlagIntent) (*ParentKidsFlagLease, error) {
+	if s == nil || !s.useDB() || ctx == nil {
+		return nil, datastore.ErrParentKidsFlagUnavailable
+	}
+	s.mu.Lock()
+	fail := func(err error) (*ParentKidsFlagLease, error) { s.mu.Unlock(); return nil, err }
+	if err := ctx.Err(); err != nil {
+		return fail(err)
+	}
+	s.ensurePersistenceLocked()
+	if s.persistence.uncertain {
+		return fail(ErrPersistenceUncertain)
+	}
+	current, known := s.users[target]
+	confirmed, present := s.persistence.confirmed[target]
+	revision, exists := s.persistence.revisions[target]
+	if !known || !present || !exists || !reflect.DeepEqual(current, confirmed) {
+		return fail(datastore.ErrUserWriteConflict)
+	}
+	proof, err := s.store.BeginParentKidsFlagUsersLease(ctx, intent, revision)
+	if err != nil {
+		return fail(err)
+	}
+	value := &ParentKidsFlagLease{}
+	value.state = &parentKidsFlagLeaseState{self: value, service: s, intent: intent, proof: proof, target: target}
+	return value, nil
+}
+func (l *ParentKidsFlagLease) ReceiptLease() *datastore.ParentKidsFlagCacheLease {
+	if l == nil || l.state == nil || l.state.self != l {
+		return nil
+	}
+	return l.state.proof
+}
+func (l *ParentKidsFlagLease) Commit() (*datastore.ParentKidsFlagReceipt, error) {
+	if l == nil || l.state == nil {
+		return nil, datastore.ErrParentKidsFlagChanged
+	}
+	st := l.state
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	if st.self != l || st.closed {
+		return nil, datastore.ErrParentKidsFlagChanged
+	}
+	return st.service.store.CommitParentKidsFlag(st.intent)
+}
+
+// Stage performs every fallible validation and prepares isolated cache/response
+// values before the single datastore receipt consumption point.
+func (l *ParentKidsFlagLease) Stage(r *datastore.ParentKidsFlagReceipt) (models.User, error) {
+	if l == nil || l.state == nil {
+		return models.User{}, datastore.ErrParentKidsFlagChanged
+	}
+	st := l.state
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	if st.self != l || st.closed || st.staged {
+		return models.User{}, datastore.ErrParentKidsFlagChanged
+	}
+	record, err := st.service.store.StageParentKidsFlagUsers(st.proof, r)
+	if err != nil {
+		return models.User{}, err
+	}
+	st.current = cloneUser(record.User)
+	st.confirmed = cloneUser(record.User)
+	st.response = cloneUser(record.User)
+	st.revision = record.Revision
+	st.staged = true
+	return st.response, nil
+}
+func (st *parentKidsFlagLeaseState) completeLocked() {
+	if st.installed || !st.staged || !st.proof.Taken() {
+		return
+	}
+	s := st.service
+	s.users[st.target] = st.current
+	s.persistence.confirmed[st.target] = st.confirmed
+	s.persistence.revisions[st.target] = st.revision
+	st.installed = true
+}
+
+// Complete cannot fail or skip accepted bookkeeping due to late cancellation.
+func (l *ParentKidsFlagLease) Complete() {
+	if l == nil || l.state == nil {
+		return
+	}
+	st := l.state
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	if st.self == l && !st.closed {
+		st.completeLocked()
+	}
+}
+func (l *ParentKidsFlagLease) Quarantine() {
+	if l == nil || l.state == nil {
+		return
+	}
+	st := l.state
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	if st.self == l && !st.closed && !st.proof.Taken() {
+		st.service.markStorageUnknownLocked([]string{st.target})
+	}
+}
+func (l *ParentKidsFlagLease) Close() {
+	if l == nil || l.state == nil {
+		return
+	}
+	st := l.state
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	if st.self != l || st.closed {
+		return
+	}
+	if st.proof.Retire() {
+		st.completeLocked()
+	}
+	st.closed = true
+	st.service.mu.Unlock()
+}

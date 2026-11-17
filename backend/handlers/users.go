@@ -1210,6 +1210,11 @@ func (h *UsersHandler) SetKidsProfile(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if h.pgPins != nil {
+		h.currentParentKidsFlag(w, r, id, false, nil)
+		return
+	}
+
 	// Verify profile belongs to the logged-in account (skip for master accounts)
 	if !auth.IsMaster(r) {
 		accountID := auth.GetAccountID(r)
