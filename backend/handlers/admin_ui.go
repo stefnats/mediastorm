@@ -7793,6 +7793,36 @@ func (h *AdminUIHandler) CreateProfile(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Preserve the adult/no-intent and JSON decoder/authorization paths. A
+	// present parent intent can never downgrade through a changed Kids flag.
+	if h.pgPins != nil {
+		var prefix bytes.Buffer
+		originalBody := r.Body
+		var selected CreateProfileRequest
+		decodeErr := json.NewDecoder(io.TeeReader(originalBody, &prefix)).Decode(&selected)
+		if len(r.Header.Values(profileunlock.ParentModeIntentHeader)) != 0 || decodeErr == nil && selected.IsKidsProfile {
+			body := prefix.Bytes()
+			if len(body) <= datastore.ParentProfileCreationBodyLimit {
+				rest, err := io.ReadAll(io.LimitReader(originalBody, int64(datastore.ParentProfileCreationBodyLimit+1-len(body))))
+				if err != nil {
+					writeParentProfileCreationError(w, r, datastore.ErrParentProfileCreationPayload)
+					return
+				}
+				body = append(body, rest...)
+			}
+			r.Body = io.NopCloser(bytes.NewReader(body))
+			if h.parentKidsHandler == nil {
+				writeParentProfileCreationError(w, r, datastore.ErrParentProfileCreationUnavailable)
+				return
+			}
+			h.parentKidsHandler.CreateProfileManagement(w, r, h.userSettingsService)
+			return
+		}
+		// Replay the decoder's buffered prefix and remaining stream without
+		// imposing a new body cap on the unchanged adult/no-intent path.
+		r.Body = io.NopCloser(io.MultiReader(bytes.NewReader(prefix.Bytes()), originalBody))
+	}
+
 	var req CreateProfileRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		http.Error(w, "Invalid request body: "+err.Error(), http.StatusBadRequest)

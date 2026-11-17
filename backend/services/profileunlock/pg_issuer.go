@@ -345,6 +345,7 @@ const (
 	parentConfirmationRatingTV
 	parentConfirmationRatingPair
 	parentConfirmationKidsFlag
+	parentConfirmationProfileCreation
 )
 
 type parentModeEntry struct {
@@ -354,6 +355,7 @@ type parentModeEntry struct {
 	write    *ParentListWriteIntent
 	rating   *ParentRatingIntent
 	kids     *ParentKidsFlagIntent
+	creation *datastore.ParentProfileCreationIntent
 	actor    string
 	bytes    int
 	deadline time.Time
@@ -361,6 +363,9 @@ type parentModeEntry struct {
 }
 
 func (entry *parentModeEntry) close() {
+	if entry.creation != nil {
+		entry.creation.Close()
+	}
 	if entry.kids != nil {
 		entry.kids.Close()
 	}
@@ -1058,4 +1063,80 @@ func (v *PGProfilePins) TakeParentKidsFlagReceipt(i *ParentKidsFlagIntent, r *da
 		return datastore.ErrParentKidsFlagUnavailable
 	}
 	return v.store.TakeParentKidsFlagReceipt(i, r, u, s)
+}
+
+// ParentProfileCreationChallenge shares the existing total/actor/byte registry
+// with every other parent action. Its token is never a ledger locator.
+func (v *PGProfilePins) ParentProfileCreationChallenge(r *http.Request, body []byte) (string, error) {
+	if !v.valid() || r == nil || r.URL == nil {
+		return "", datastore.ErrParentProfileCreationUnavailable
+	}
+	intent, err := v.store.PrepareParentProfileCreationManagement(r, body, RequestTokens(r))
+	if err != nil {
+		return "", err
+	}
+	actor, size, deadline, err := v.store.ParentProfileCreationBudget(intent)
+	if err != nil {
+		intent.Close()
+		return "", err
+	}
+	token, err := v.registerParentConfirmation(r, "pcc_", &parentModeEntry{action: parentConfirmationProfileCreation, creation: intent, actor: actor, bytes: size, deadline: deadline})
+	if err != nil {
+		return "", datastore.ErrParentProfileCreationUnavailable
+	}
+	return token, nil
+}
+func (v *PGProfilePins) ClaimParentProfileCreation(r *http.Request, body []byte, token string) (*datastore.ParentProfileCreationIntent, error) {
+	if !v.valid() || r == nil || r.URL == nil {
+		return nil, datastore.ErrParentProfileCreationUnavailable
+	}
+	key, ok := parentConfirmationTokenKey(token, "pcc_")
+	if !ok {
+		return nil, datastore.ErrParentProfileCreationChanged
+	}
+	entry := v.claimParentConfirmation(key, parentConfirmationProfileCreation)
+	if entry == nil {
+		return nil, datastore.ErrParentProfileCreationChanged
+	}
+	if !entry.deadline.After(time.Now()) {
+		entry.close()
+		return nil, datastore.ErrParentProfileCreationChanged
+	}
+	if err := v.store.BindParentProfileCreationManagementRetry(r, entry.creation, body, RequestTokens(r)); err != nil {
+		entry.close()
+		return nil, err
+	}
+	return entry.creation, nil
+}
+func (v *PGProfilePins) ImmediateParentProfileCreation(r *http.Request, body []byte) (*datastore.ParentProfileCreationIntent, error) {
+	if !v.valid() || r == nil || r.URL == nil {
+		return nil, datastore.ErrParentProfileCreationUnavailable
+	}
+	i, err := v.store.PrepareParentProfileCreationManagement(r, body, RequestTokens(r))
+	if err != nil {
+		return nil, err
+	}
+	if err = v.store.BindParentProfileCreationManagementRetry(r, i, body, RequestTokens(r)); err != nil {
+		i.Close()
+		return nil, err
+	}
+	return i, nil
+}
+func (v *PGProfilePins) BoundParentProfileCreationRequest(r *http.Request, i *datastore.ParentProfileCreationIntent) (*http.Request, error) {
+	if !v.valid() {
+		return nil, datastore.ErrParentProfileCreationUnavailable
+	}
+	return v.store.BoundParentProfileCreationRequest(r, i)
+}
+func (v *PGProfilePins) VerifyParentProfileCreation(r *http.Request, i *datastore.ParentProfileCreationIntent) error {
+	if !v.valid() {
+		return datastore.ErrParentProfileCreationUnavailable
+	}
+	return v.store.VerifyParentProfileCreationPassword(r, i)
+}
+func (v *PGProfilePins) TakeParentProfileCreationReceipt(i *datastore.ParentProfileCreationIntent, r *datastore.ParentProfileCreationReceipt, u, s *datastore.ParentProfileCreationCacheLease) error {
+	if !v.valid() {
+		return datastore.ErrParentProfileCreationUnavailable
+	}
+	return v.store.TakeParentProfileCreationReceipt(i, r, u, s)
 }

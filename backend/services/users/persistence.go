@@ -52,6 +52,10 @@ func (s *Service) confirmJSONLocked() {
 	s.persistence.confirmed = cloneUsers(s.users)
 }
 func (s *Service) installDatabaseSnapshotLocked(records []datastore.UserWriteRecord) {
+	// Operation-owned unknown creation cannot be settled by a generic reset.
+	if s.hasCreationUnknownLocked() {
+		return
+	}
 	users := make(map[string]models.User, len(records))
 	revisions := make(map[string]datastore.UserRevision, len(records))
 	for _, record := range records {
@@ -62,6 +66,9 @@ func (s *Service) installDatabaseSnapshotLocked(records []datastore.UserWriteRec
 	s.persistence = &persistenceState{confirmed: cloneUsers(users), revisions: revisions}
 }
 func (s *Service) loadDatabaseLocked(ctx context.Context) error {
+	if s.hasCreationUnknownLocked() {
+		return ErrPersistenceUncertain
+	}
 	records, err := s.store.LoadUserWriteSnapshot(ctx)
 	if err != nil {
 		return err
@@ -84,6 +91,9 @@ func (s *Service) ResyncStorage(ctx context.Context) error {
 	return s.loadDatabaseLocked(ctx)
 }
 func (s *Service) bootstrapDefaultLocked() error {
+	if s.hasCreationUnknownLocked() {
+		return ErrPersistenceUncertain
+	}
 	now := time.Now().UTC()
 	candidate := models.User{ID: uuid.NewString(), AccountID: models.MasterAccountID, Name: models.DefaultUserName, ActivityPrivacy: models.ActivityPrivacySharedAnonymous, CreatedAt: now, UpdatedAt: now}
 	ctx, cancel := context.WithTimeout(context.Background(), userPersistenceBudget)
@@ -596,7 +606,10 @@ func (s *Service) CommitParentRatingPair(ctx context.Context, targetID string, i
 
 // storageUnknownMarker distinguishes successive uncertain operations even for
 // the same ID. The old global fail-closed write gate remains authoritative.
-type storageUnknownMarker struct{ identity byte }
+type storageUnknownMarker struct {
+	identity byte
+	creation string
+}
 
 func (s *Service) markStorageUnknownLocked(ids []string) {
 	p := s.persistence
@@ -611,7 +624,11 @@ func (s *Service) markStorageUnknownLocked(ids []string) {
 		p.unknownUnscoped = true
 	}
 	for _, id := range ids {
-		p.unknownTargets[id] = &storageUnknownMarker{identity: 1}
+		marker := &storageUnknownMarker{identity: 1}
+		if prior := p.unknownTargets[id]; prior != nil {
+			marker.creation = prior.creation
+		}
+		p.unknownTargets[id] = marker
 	}
 }
 
@@ -657,6 +674,9 @@ func (s *Service) PrepareStorageRecovery(ctx context.Context, read *datastore.Pr
 	if err != nil {
 		return nil, err
 	}
+	if marker := s.persistence.unknownTargets[target]; marker != nil && marker.creation != "" {
+		return nil, datastore.ErrProfileRecoveryChanged
+	}
 	current, present := s.users[target]
 	confirmed, known := s.persistence.confirmed[target]
 	if present != known || !reflect.DeepEqual(current, confirmed) {
@@ -686,6 +706,11 @@ func (s *Service) validateStorageRecoveryLocked(ctx context.Context, ticket *Sto
 	}
 	t := ticket.state
 	p := s.persistence
+	if p != nil {
+		if marker := p.unknownTargets[t.target]; marker != nil && marker.creation != "" {
+			return datastore.ErrProfileRecoveryChanged
+		}
+	}
 	if p == nil {
 		return datastore.ErrProfileRecoveryChanged
 	}
@@ -1004,4 +1029,165 @@ func (l *ParentKidsFlagLease) Close() {
 	}
 	st.closed = true
 	st.service.mu.Unlock()
+}
+
+// ParentProfileCreationLease holds only the selected confirmed Users projection. It is
+// acquired before Settings and remains held through both compound cache ACKs.
+type ParentProfileCreationLease struct {
+	state *parentProfileCreationLeaseState
+}
+type parentProfileCreationLeaseState struct {
+	mu                           sync.Mutex
+	self                         *ParentProfileCreationLease
+	service                      *Service
+	intent                       *datastore.ParentProfileCreationIntent
+	proof                        *datastore.ParentProfileCreationCacheLease
+	target, operation            string
+	current, confirmed, response models.User
+	revision                     datastore.UserRevision
+	staged, installed, closed    bool
+}
+
+func (*ParentProfileCreationLease) MarshalJSON() ([]byte, error) { return []byte("null"), nil }
+func (*ParentProfileCreationLease) Format(f fmt.State, _ rune) {
+	_, _ = f.Write([]byte("ParentProfileCreationLease(opaque)"))
+}
+func (s *Service) AcquireParentProfileCreationLease(ctx context.Context, intent *datastore.ParentProfileCreationIntent) (*ParentProfileCreationLease, error) {
+	if s == nil || !s.useDB() || ctx == nil {
+		return nil, datastore.ErrParentProfileCreationUnavailable
+	}
+	s.mu.Lock()
+	fail := func(err error) (*ParentProfileCreationLease, error) { s.mu.Unlock(); return nil, err }
+	if err := ctx.Err(); err != nil {
+		return fail(err)
+	}
+	s.ensurePersistenceLocked()
+	if s.persistence.uncertain {
+		return fail(ErrPersistenceUncertain)
+	}
+	target, operation, err := s.store.ParentProfileCreationTarget(ctx, intent)
+	if err != nil {
+		return fail(err)
+	}
+	_, current := s.users[target]
+	_, confirmed := s.persistence.confirmed[target]
+	_, revision := s.persistence.revisions[target]
+	if current || confirmed || revision || s.persistence.unknownTargets[target] != nil {
+		return fail(datastore.ErrUserWriteConflict)
+	}
+	proof, err := s.store.BeginParentProfileCreationUsersLease(ctx, intent)
+	if err != nil {
+		return fail(err)
+	}
+	value := &ParentProfileCreationLease{}
+	value.state = &parentProfileCreationLeaseState{self: value, service: s, intent: intent, proof: proof, target: target, operation: operation}
+	return value, nil
+}
+func (l *ParentProfileCreationLease) ReceiptLease() *datastore.ParentProfileCreationCacheLease {
+	if l == nil || l.state == nil || l.state.self != l {
+		return nil
+	}
+	return l.state.proof
+}
+func (l *ParentProfileCreationLease) Commit() (*datastore.ParentProfileCreationReceipt, error) {
+	if l == nil || l.state == nil {
+		return nil, datastore.ErrParentProfileCreationChanged
+	}
+	st := l.state
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	if st.self != l || st.closed {
+		return nil, datastore.ErrParentProfileCreationChanged
+	}
+	return st.service.store.CommitParentProfileCreation(st.intent)
+}
+
+// Stage performs every fallible validation and prepares isolated cache/response
+// values before the single datastore receipt consumption point.
+func (l *ParentProfileCreationLease) Stage(r *datastore.ParentProfileCreationReceipt) (models.User, error) {
+	if l == nil || l.state == nil {
+		return models.User{}, datastore.ErrParentProfileCreationChanged
+	}
+	st := l.state
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	if st.self != l || st.closed || st.staged {
+		return models.User{}, datastore.ErrParentProfileCreationChanged
+	}
+	record, err := st.service.store.StageParentProfileCreationUsers(st.proof, r)
+	if err != nil {
+		return models.User{}, err
+	}
+	st.current = cloneUser(record.User)
+	st.confirmed = cloneUser(record.User)
+	st.response = cloneUser(record.User)
+	st.revision = record.Revision
+	st.staged = true
+	return st.response, nil
+}
+func (st *parentProfileCreationLeaseState) completeLocked() {
+	if st.installed || !st.staged || !st.proof.Taken() {
+		return
+	}
+	s := st.service
+	s.users[st.target] = st.current
+	s.persistence.confirmed[st.target] = st.confirmed
+	s.persistence.revisions[st.target] = st.revision
+	st.installed = true
+}
+
+// Complete cannot fail or skip accepted bookkeeping due to late cancellation.
+func (l *ParentProfileCreationLease) Complete() {
+	if l == nil || l.state == nil {
+		return
+	}
+	st := l.state
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	if st.self == l && !st.closed {
+		st.completeLocked()
+	}
+}
+func (l *ParentProfileCreationLease) Quarantine() {
+	if l == nil || l.state == nil {
+		return
+	}
+	st := l.state
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	if st.self == l && !st.closed && !st.proof.Taken() {
+		// The held clean absence lease owns this exact operation marker. Never
+		// overwrite a foreign, unassigned or successor uncertainty marker.
+		if st.service.persistence.unknownTargets[st.target] == nil {
+			st.service.markStorageUnknownLocked([]string{st.target})
+			st.service.persistence.unknownTargets[st.target].creation = st.operation
+		}
+	}
+}
+func (l *ParentProfileCreationLease) Close() {
+	if l == nil || l.state == nil {
+		return
+	}
+	st := l.state
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	if st.self != l || st.closed {
+		return
+	}
+	if st.proof.Retire() {
+		st.completeLocked()
+	}
+	st.closed = true
+	st.service.mu.Unlock()
+}
+
+func (s *Service) hasCreationUnknownLocked() bool {
+	if s.persistence != nil {
+		for _, marker := range s.persistence.unknownTargets {
+			if marker != nil && marker.creation != "" {
+				return true
+			}
+		}
+	}
+	return false
 }

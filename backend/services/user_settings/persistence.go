@@ -86,6 +86,9 @@ func settingsStorageContext() (context.Context, context.CancelFunc) {
 }
 
 func (s *Service) installPGRecordsLocked(records []datastore.UserSettingsRecord) {
+	if s.hasCreationUnknownLocked() {
+		return
+	}
 	s.pg = &settingsPersistence{records: make(map[string]datastore.UserSettingsRecord), confirmed: make(map[string]models.UserSettings), uncertain: make(map[string]bool), unknownMarkers: make(map[string]*userSettingsUnknownMarker)}
 	s.settings = make(map[string]models.UserSettings)
 	for _, r := range records {
@@ -148,6 +151,9 @@ func (s *Service) ResyncUserSettings(ctx context.Context) error {
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if s.hasCreationUnknownLocked() {
+		return datastore.ErrUserSettingsOutcomeUnknown
+	}
 	records, err := s.store.LoadUserSettingsSnapshot(ctx)
 	if err != nil {
 		return err
@@ -157,11 +163,17 @@ func (s *Service) ResyncUserSettings(ctx context.Context) error {
 }
 
 func (s *Service) loadPGLocked() error {
+	if s.hasCreationUnknownLocked() {
+		return datastore.ErrUserSettingsOutcomeUnknown
+	}
 	ctx, cancel := settingsStorageContext()
 	defer cancel()
 	// Existing cleanup is a targeted JSONB path removal, not typed replacement.
 	if _, err := s.store.UserSettings().ClearCleanPostersOverrides(ctx); err != nil {
 		return err
+	}
+	if s.hasCreationUnknownLocked() {
+		return datastore.ErrUserSettingsOutcomeUnknown
 	}
 	records, err := s.store.LoadUserSettingsSnapshot(ctx)
 	if err != nil {
@@ -314,7 +326,10 @@ func (s *Service) deletePGLocked(id string) error {
 	return s.persistPGLocked(ctx, nil, []string{id})
 }
 
-type userSettingsUnknownMarker struct{ identity byte }
+type userSettingsUnknownMarker struct {
+	identity byte
+	creation string
+}
 
 func (s *Service) markUserSettingsUnknownLocked(ids []string) {
 	if s.pg.unknownMarkers == nil {
@@ -322,7 +337,11 @@ func (s *Service) markUserSettingsUnknownLocked(ids []string) {
 	}
 	for _, id := range ids {
 		s.pg.uncertain[id] = true
-		s.pg.unknownMarkers[id] = &userSettingsUnknownMarker{identity: 1}
+		marker := &userSettingsUnknownMarker{identity: 1}
+		if prior := s.pg.unknownMarkers[id]; prior != nil {
+			marker.creation = prior.creation
+		}
+		s.pg.unknownMarkers[id] = marker
 	}
 }
 
@@ -372,6 +391,9 @@ func (s *Service) PrepareUserSettingsRecovery(ctx context.Context, read *datasto
 	if err != nil {
 		return nil, err
 	}
+	if marker := s.pg.unknownMarkers[target]; marker != nil && marker.creation != "" {
+		return nil, datastore.ErrProfileRecoveryChanged
+	}
 	current, present := s.settings[target]
 	confirmed, known := s.pg.confirmed[target]
 	if present != known || !reflect.DeepEqual(current, confirmed) {
@@ -398,6 +420,11 @@ func (s *Service) validateUserSettingsRecoveryLocked(ctx context.Context, ticket
 	}
 	t := ticket.state
 	p := s.pg
+	if p != nil {
+		if marker := p.unknownMarkers[t.target]; marker != nil && marker.creation != "" {
+			return datastore.ErrProfileRecoveryChanged
+		}
+	}
 	if p == nil {
 		return datastore.ErrProfileRecoveryChanged
 	}
@@ -770,4 +797,151 @@ func (s *Service) ApplyStartupKidsProfileDefaults(ctx context.Context, userIDs .
 		return 0, err
 	}
 	return changed, nil
+}
+
+// ParentProfileCreationDefaultsLease participates only for management enable. It holds
+// this service's selected clean projection after the matching Users lease.
+type ParentProfileCreationDefaultsLease struct {
+	state *parentProfileCreationDefaultsLeaseState
+}
+type parentProfileCreationDefaultsLeaseState struct {
+	mu                                 sync.Mutex
+	self                               *ParentProfileCreationDefaultsLease
+	service                            *Service
+	proof                              *datastore.ParentProfileCreationCacheLease
+	target, operation                  string
+	record                             datastore.UserSettingsRecord
+	current, confirmed                 models.UserSettings
+	present, staged, installed, closed bool
+}
+
+func (*ParentProfileCreationDefaultsLease) MarshalJSON() ([]byte, error) { return []byte("null"), nil }
+func (*ParentProfileCreationDefaultsLease) Format(f fmt.State, _ rune) {
+	_, _ = f.Write([]byte("ParentProfileCreationDefaultsLease(opaque)"))
+}
+func (s *Service) AcquireParentProfileCreationDefaultsLease(ctx context.Context, intent *datastore.ParentProfileCreationIntent, users *datastore.ParentProfileCreationCacheLease) (*ParentProfileCreationDefaultsLease, error) {
+	if s == nil || !s.useDB() || ctx == nil {
+		return nil, datastore.ErrParentProfileCreationUnavailable
+	}
+	s.mu.Lock()
+	fail := func(err error) (*ParentProfileCreationDefaultsLease, error) { s.mu.Unlock(); return nil, err }
+	if err := ctx.Err(); err != nil {
+		return fail(err)
+	}
+	target, operation, err := s.store.ParentProfileCreationTarget(ctx, intent)
+	if err != nil {
+		return fail(err)
+	}
+	if s.pg == nil {
+		return fail(datastore.ErrUserSettingsUnavailable)
+	}
+	_, current := s.settings[target]
+	_, confirmed := s.pg.confirmed[target]
+	_, record := s.pg.records[target]
+	if current || confirmed || record || s.pg.uncertain[target] || s.pg.unknownMarkers[target] != nil {
+		return fail(datastore.ErrUserSettingsConflict)
+	}
+	proof, err := s.store.BeginParentProfileCreationSettingsLease(ctx, intent, users)
+	if err != nil {
+		return fail(err)
+	}
+	value := &ParentProfileCreationDefaultsLease{}
+	value.state = &parentProfileCreationDefaultsLeaseState{self: value, service: s, proof: proof, target: target, operation: operation}
+	return value, nil
+}
+func (l *ParentProfileCreationDefaultsLease) ReceiptLease() *datastore.ParentProfileCreationCacheLease {
+	if l == nil || l.state == nil || l.state.self != l {
+		return nil
+	}
+	return l.state.proof
+}
+func (l *ParentProfileCreationDefaultsLease) Stage(r *datastore.ParentProfileCreationReceipt) error {
+	if l == nil || l.state == nil {
+		return datastore.ErrParentProfileCreationChanged
+	}
+	st := l.state
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	if st.self != l || st.closed || st.staged {
+		return datastore.ErrParentProfileCreationChanged
+	}
+	record, err := st.service.store.StageParentProfileCreationSettings(st.proof, r)
+	if err != nil {
+		return err
+	}
+	st.record = record
+	st.present = record.Settings != nil
+	if st.present {
+		st.current = cloneSettingsValue(*record.Settings)
+		st.confirmed = cloneSettingsValue(*record.Settings)
+	}
+	st.staged = true
+	return nil
+}
+func (st *parentProfileCreationDefaultsLeaseState) completeLocked() {
+	if st.installed || !st.staged || !st.proof.Taken() {
+		return
+	}
+	s := st.service
+	s.pg.records[st.target] = st.record
+	if st.present {
+		s.settings[st.target] = st.current
+		s.pg.confirmed[st.target] = st.confirmed
+	} else {
+		delete(s.settings, st.target)
+		delete(s.pg.confirmed, st.target)
+	}
+	st.installed = true
+}
+func (l *ParentProfileCreationDefaultsLease) Complete() {
+	if l == nil || l.state == nil {
+		return
+	}
+	st := l.state
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	if st.self == l && !st.closed {
+		st.completeLocked()
+	}
+}
+func (l *ParentProfileCreationDefaultsLease) Quarantine() {
+	if l == nil || l.state == nil {
+		return
+	}
+	st := l.state
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	if st.self == l && !st.closed && !st.proof.Taken() {
+		if st.service.pg.unknownMarkers[st.target] == nil {
+			st.service.markUserSettingsUnknownLocked([]string{st.target})
+			st.service.pg.unknownMarkers[st.target].creation = st.operation
+		}
+	}
+}
+func (l *ParentProfileCreationDefaultsLease) Close() {
+	if l == nil || l.state == nil {
+		return
+	}
+	st := l.state
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	if st.self != l || st.closed {
+		return
+	}
+	if st.proof.Retire() {
+		st.completeLocked()
+	}
+	st.closed = true
+	st.service.mu.Unlock()
+}
+
+func (s *Service) hasCreationUnknownLocked() bool {
+	if s.pg != nil {
+		for _, marker := range s.pg.unknownMarkers {
+			if marker != nil && marker.creation != "" {
+				return true
+			}
+		}
+	}
+	return false
 }
