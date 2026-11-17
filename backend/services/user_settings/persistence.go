@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"reflect"
 	"sort"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -450,4 +451,113 @@ func (s *Service) InstallUserSettingsRecovery(ctx context.Context, ticket *UserS
 		}
 	}
 	return status, nil
+}
+
+// UserSettingsRecoveryLease is acquired only after the matching Users lease.
+// Its prepared values are fully copied before the single shared PairTake.
+type UserSettingsRecoveryLease struct {
+	state *userSettingsRecoveryLeaseState
+}
+type userSettingsRecoveryLeaseState struct {
+	mu                                      sync.Mutex
+	self                                    *UserSettingsRecoveryLease
+	service                                 *Service
+	ticket                                  *UserSettingsRecoveryTicket
+	proof                                   *datastore.ProfileRecoveryLease
+	record                                  datastore.UserSettingsRecord
+	current, confirmed                      models.UserSettings
+	present, hasSettings, installed, closed bool
+	status                                  datastore.ProfileRecoveryStatus
+}
+
+func (UserSettingsRecoveryLease) MarshalJSON() ([]byte, error) { return []byte("null"), nil }
+func (UserSettingsRecoveryLease) Format(f fmt.State, _ rune) {
+	_, _ = f.Write([]byte("UserSettingsRecoveryLease(opaque)"))
+}
+func (s *Service) AcquireUserSettingsRecoveryLease(ctx context.Context, ticket *UserSettingsRecoveryTicket, snapshot *datastore.ProfileRecoverySnapshot) (*UserSettingsRecoveryLease, error) {
+	if s == nil || !s.useDB() {
+		return nil, datastore.ErrProfileRecoveryUnavailable
+	}
+	s.mu.Lock()
+	if err := s.validateUserSettingsRecoveryLocked(ctx, ticket, snapshot); err != nil {
+		s.mu.Unlock()
+		return nil, err
+	}
+	proof, record, present, err := s.store.BeginUserSettingsRecoveryLease(ctx, ticket.state.slot, snapshot)
+	if err != nil {
+		s.mu.Unlock()
+		return nil, err
+	}
+	lease := &UserSettingsRecoveryLease{}
+	st := &userSettingsRecoveryLeaseState{self: lease, service: s, ticket: ticket, proof: proof, record: record, present: present, hasSettings: record.Settings != nil}
+	if record.Settings != nil {
+		st.current = cloneSettingsValue(*record.Settings)
+		st.confirmed = cloneSettingsValue(*record.Settings)
+	}
+	lease.state = st
+	return lease, nil
+}
+func (l *UserSettingsRecoveryLease) PairLease() *datastore.ProfileRecoveryLease {
+	if l == nil || l.state == nil || l.state.self != l {
+		return nil
+	}
+	return l.state.proof
+}
+func (st *userSettingsRecoveryLeaseState) completeLocked() datastore.ProfileRecoveryStatus {
+	if st.installed {
+		return st.status
+	}
+	if !st.proof.Paired() {
+		return datastore.ProfileRecoveryStatus{PendingUncertainty: true}
+	}
+	s := st.service
+	target := st.ticket.state.target
+	s.pg.records[target] = st.record
+	if st.hasSettings {
+		s.settings[target] = st.current
+		s.pg.confirmed[target] = st.confirmed
+	} else {
+		delete(s.settings, target)
+		delete(s.pg.confirmed, target)
+	}
+	delete(s.pg.uncertain, target)
+	delete(s.pg.unknownMarkers, target)
+	st.status.TargetPresent = st.present
+	for _, unknown := range s.pg.uncertain {
+		if unknown {
+			st.status.PendingUncertainty = true
+			break
+		}
+	}
+	st.ticket.state.closed.Store(true)
+	st.installed = true
+	return st.status
+}
+func (l *UserSettingsRecoveryLease) Complete() datastore.ProfileRecoveryStatus {
+	if l == nil || l.state == nil {
+		return datastore.ProfileRecoveryStatus{PendingUncertainty: true}
+	}
+	st := l.state
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	if st.self != l || st.closed && !st.installed {
+		return datastore.ProfileRecoveryStatus{PendingUncertainty: true}
+	}
+	return st.completeLocked()
+}
+func (l *UserSettingsRecoveryLease) Close() {
+	if l == nil || l.state == nil {
+		return
+	}
+	st := l.state
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	if st.self != l || st.closed {
+		return
+	}
+	if st.proof.Retire() {
+		st.completeLocked()
+	}
+	st.closed = true
+	st.service.mu.Unlock()
 }

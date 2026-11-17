@@ -12,6 +12,7 @@
         <p id="profile-name-display">Loading...</p>
     </div>
     <div class="page-header-actions">
+        <button class="btn btn-secondary btn-sm" id="reload-profile-state" type="button">Reload saved profile state</button>
         <a href="{{.BasePath}}/accounts" class="btn btn-secondary btn-sm">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="width: 16px; height: 16px;">
                 <line x1="19" y1="12" x2="5" y2="12"/><polyline points="12 19 5 12 12 5"/>
@@ -20,6 +21,8 @@
         </a>
     </div>
 </div>
+
+<p id="profile-recovery-status" role="status" aria-live="polite" style="color: var(--text-secondary);"></p>
 
 <div class="grid" style="gap: 1.5rem;">
     <!-- Mode Selection -->
@@ -324,10 +327,16 @@ let listAdditionUncertain = false;
 let ratingPairAction = null;
 let ratingPairGeneration = 0;
 let ratingPairUncertain = false;
+let profileRecoveryAction = null;
+let profileRecoveryGeneration = 0;
+let profileLoadGeneration = 0;
+let profileLoadController = null;
+let usersWriteBlocked = false;
+let profileModeUnsupported = false;
 
 function ratingPairControls() {
     const button = document.getElementById('save-rating-pair');
-    if (button) button.disabled = modePageRetired || modeProfileLoading || ratingPairUncertain || ratingPairAction !== null;
+    if (button) button.disabled = modePageRetired || modeProfileLoading || usersWriteBlocked || profileModeUnsupported || profileRecoveryAction !== null || ratingPairUncertain || ratingPairAction !== null;
 }
 
 function retireRatingPair() {
@@ -364,7 +373,7 @@ function setRatingSelection(select, value) {
 
 function listAdditionControls() {
     const button = document.getElementById('add-allowed-list');
-    if (button) button.disabled = modePageRetired || modeProfileLoading || listAdditionUncertain || listAdditionAction !== null;
+    if (button) button.disabled = modePageRetired || modeProfileLoading || usersWriteBlocked || profileModeUnsupported || profileRecoveryAction !== null || listAdditionUncertain || listAdditionAction !== null;
 }
 
 function retireListAddition() {
@@ -389,7 +398,7 @@ function currentListAddition(action) {
 
 function listRemovalControls() {
     document.querySelectorAll('#lists-container .remove-allowed-list').forEach(button => {
-        button.disabled = modePageRetired || modeProfileLoading || listRemovalUncertain || listRemovalAction !== null;
+        button.disabled = modePageRetired || modeProfileLoading || usersWriteBlocked || profileModeUnsupported || profileRecoveryAction !== null || listRemovalUncertain || listRemovalAction !== null;
     });
 }
 
@@ -418,7 +427,7 @@ function modeSelection() {
 
 function modeControls() {
     const button = document.getElementById('save-mode');
-    if (button) button.disabled = modePageRetired || modeProfileLoading || modeUncertain || modeAction !== null;
+    if (button) button.disabled = modePageRetired || modeProfileLoading || usersWriteBlocked || profileModeUnsupported || profileRecoveryAction !== null || modeUncertain || modeAction !== null;
 }
 
 function retireModeAction() {
@@ -437,11 +446,11 @@ function currentModeAction(action) {
         new URLSearchParams(window.location.search).get('profileId') === profileId && modeSelection() === action.mode;
 }
 
-window.addEventListener('pagehide', () => { modePageRetired = true; modePageGeneration++; retireModeAction(); retireListRemoval(); retireListAddition(); retireRatingPair(); });
+window.addEventListener('pagehide', () => { modePageRetired = true; modePageGeneration++; retireProfileRecovery(); retireModeAction(); retireListRemoval(); retireListAddition(); retireRatingPair(); });
 window.addEventListener('pageshow', event => {
-    if (event.persisted) { modePageRetired = false; modePageGeneration++; retireModeAction(); retireListRemoval(); retireListAddition(); retireRatingPair(); }
+    if (event.persisted) { modePageRetired = false; modePageGeneration++; retireProfileRecovery(); retireModeAction(); retireListRemoval(); retireListAddition(); retireRatingPair(); }
 });
-window.addEventListener('popstate', () => { retireModeAction(); retireListRemoval(); retireListAddition(); retireRatingPair(); });
+window.addEventListener('popstate', () => { retireProfileRecovery(); retireModeAction(); retireListRemoval(); retireListAddition(); retireRatingPair(); });
 
 // Rating mappings for sync
 const movieToTvRating = {
@@ -461,73 +470,187 @@ const tvToMovieRating = {
     'TV-MA': 'R'
 };
 
-async function loadProfile() {
-    retireModeAction();
-    retireListRemoval();
-    retireListAddition();
-    retireRatingPair();
-    modeProfileLoading = true;
+function profileRecoveryControls() {
+    const button = document.getElementById('reload-profile-state');
+    if (button) button.disabled = modePageRetired || modeProfileLoading || profileRecoveryAction !== null;
+}
+
+function allProfileControls() {
     modeControls();
     listRemovalControls();
     listAdditionControls();
     ratingPairControls();
-    const page = modePageGeneration;
-    if (!profileId) {
-        showToast('No profile ID provided', 'error');
-        return;
+    profileRecoveryControls();
+}
+
+function retireProfileRecovery() {
+    profileRecoveryGeneration++;
+    const original = profileRecoveryAction;
+    profileRecoveryAction = null;
+    original?.controller.abort();
+    if (original && !modePageRetired && original.page === modePageGeneration && profile === original.profile &&
+        document.getElementById('profile-recovery-status') === original.status && original.status.isConnected) {
+        original.status.textContent = 'Reload ended before the result was displayed. No save was retried.';
     }
+    allProfileControls();
+}
 
+function recoveryProfileSignature(value) {
+    return JSON.stringify([value?.id, value?.name, value?.isKidsProfile, value?.kidsMode,
+        value?.kidsMaxRating, value?.kidsMaxMovieRating, value?.kidsMaxTVRating, value?.kidsAllowedLists]);
+}
+
+function currentProfileRecovery(action) {
+    return profileRecoveryAction === action && !action.controller.signal.aborted && !modePageRetired && !modeProfileLoading &&
+        action.generation === profileRecoveryGeneration && action.page === modePageGeneration && action.load === profileLoadGeneration &&
+        profile === action.profile && profile?.id === profileId && recoveryProfileSignature(profile) === action.profileSignature &&
+        new URLSearchParams(window.location.search).get('profileId') === profileId && modeSelection() === action.mode &&
+        action.nodes.every(item => document.getElementById(item.id) === item.node && item.node.isConnected &&
+            (!item.input || item.node.value === item.value)) &&
+        action.containment.every(item => item.form.contains(item.input)) &&
+        action.radios.length === document.querySelectorAll('input[name="kidsMode"]').length &&
+        action.radios.every((radio, index) => document.querySelectorAll('input[name="kidsMode"]')[index] === radio &&
+            radio.isConnected && action.modeForm.contains(radio));
+}
+
+function exactRecoveryObject(value, keys) {
+    return value !== null && typeof value === 'object' && !Array.isArray(value) &&
+        Object.keys(value).length === keys.length && keys.every(key => Object.hasOwn(value, key));
+}
+
+function validateProfileRecovery(value) {
+    const fields = ['id', 'name', 'isKidsProfile', 'kidsMode', 'kidsMaxRating', 'kidsMaxMovieRating', 'kidsMaxTVRating', 'kidsAllowedLists'];
+    if (!exactRecoveryObject(value, ['profile', 'recovery']) || !exactRecoveryObject(value.profile, fields) ||
+        !exactRecoveryObject(value.recovery, ['usersWriteBlocked', 'settingsPendingUncertainty'])) return false;
+    const saved = value.profile;
+    return saved.id === profileId && typeof saved.name === 'string' && typeof saved.isKidsProfile === 'boolean' &&
+        ['kidsMode', 'kidsMaxRating', 'kidsMaxMovieRating', 'kidsMaxTVRating'].every(key => typeof saved[key] === 'string') &&
+        Array.isArray(saved.kidsAllowedLists) && saved.kidsAllowedLists.every(item => typeof item === 'string') &&
+        typeof value.recovery.usersWriteBlocked === 'boolean' && typeof value.recovery.settingsPendingUncertainty === 'boolean';
+}
+
+function renderProfileSettings(saved) {
+    document.getElementById('profile-name-display').textContent = 'Configuring: ' + saved.name;
+    const mode = saved.kidsMode || 'rating';
+    let matched = false;
+    document.querySelectorAll('input[name="kidsMode"]').forEach(radio => {
+        radio.checked = radio.value === mode;
+        matched = matched || radio.checked;
+    });
+    profileModeUnsupported = !saved.isKidsProfile || !matched;
+    const movie = saved.kidsMaxMovieRating === undefined ? '' : saved.kidsMaxMovieRating;
+    const tv = saved.kidsMaxTVRating === undefined ? '' : saved.kidsMaxTVRating;
+    if (typeof movie !== 'string' || typeof tv !== 'string') throw new Error('Invalid saved ratings');
+    setRatingSelection(document.getElementById('movieRating'), movie);
+    setRatingSelection(document.getElementById('tvRating'), tv);
+    renderLists();
+    updateSectionVisibility();
+    updateRatingPreview();
+}
+
+async function reloadProfileState() {
+    if (profileRecoveryAction || modePageRetired || modeProfileLoading || !profile || profile.id !== profileId ||
+        typeof window.profileRecoveryFetch !== 'function') return;
+    const ids = ['kids-mode-form', 'rating-section', 'lists-section', 'lists-container', 'reload-profile-state', 'profile-recovery-status',
+        'movieRating', 'tvRating', 'new-list-url'];
+    const nodes = ids.map(id => {
+        const node = document.getElementById(id);
+        const input = ['movieRating', 'tvRating', 'new-list-url'].includes(id);
+        return {id, node, input, value: input ? node?.value : null};
+    });
+    if (nodes.some(item => !item.node?.isConnected)) return;
+    const byId = Object.fromEntries(nodes.map(item => [item.id, item.node]));
+    const containment = [['rating-section', 'movieRating'], ['rating-section', 'tvRating'],
+        ['lists-section', 'new-list-url'], ['lists-section', 'lists-container']]
+        .map(([form, input]) => ({form: byId[form], input: byId[input]}));
+    if (containment.some(item => !item.form.contains(item.input))) return;
+    const radios = [...document.querySelectorAll('input[name="kidsMode"]')];
+    retireModeAction(); retireListRemoval(); retireListAddition(); retireRatingPair();
+    profileLoadController?.abort();
+    const action = {profile, profileSignature: recoveryProfileSignature(profile), mode: modeSelection(), nodes,
+        containment, radios, modeForm: byId['kids-mode-form'], status: byId['profile-recovery-status'],
+        generation: ++profileRecoveryGeneration, page: modePageGeneration, load: ++profileLoadGeneration,
+        controller: new AbortController()};
+    profileRecoveryAction = action;
+    allProfileControls();
+    const status = document.getElementById('profile-recovery-status');
+    status.textContent = 'Reading saved profile state…';
     try {
-        const res = await fetch(basePath + '/api/profiles');
-        if (!res.ok) throw new Error('Failed to load profiles');
-        const profiles = await res.json();
-
-        if (modePageRetired || page !== modePageGeneration || new URLSearchParams(window.location.search).get('profileId') !== profileId) return;
-
-        profile = profiles.find(p => p.id === profileId);
-        if (!profile) {
-            showToast('Profile not found', 'error');
+        const response = await window.profileRecoveryFetch(basePath + '/api/users/' + encodeURIComponent(profileId) + '/state/reload', {
+            method: 'POST', signal: action.controller.signal
+        }, () => currentProfileRecovery(action));
+        if (!currentProfileRecovery(action)) return;
+        if (!response.ok) {
+            status.textContent = response.status === 409 ? 'Profile state changed. Reload again when ready.' :
+                'Saved profile state could not be reloaded. No save was retried.';
             return;
         }
-
-        if (!profile.isKidsProfile) {
-            showToast('This is not a kids profile', 'error');
-            setTimeout(() => window.location.href = basePath + '/accounts', 1500);
-            return;
-        }
-
-        // Update UI
-        document.getElementById('profile-name-display').textContent = 'Configuring: ' + profile.name;
-
-        // Set mode
-        const mode = profile.kidsMode || 'rating';
-        document.querySelector(`input[name="kidsMode"][value="${mode}"]`).checked = true;
-
-        // Display the actual separate values. Saving an empty pair must not
-        // silently materialize the existing generic fallback as new values.
-        const movieRating = profile.kidsMaxMovieRating === undefined ? '' : profile.kidsMaxMovieRating;
-        const tvRating = profile.kidsMaxTVRating === undefined ? '' : profile.kidsMaxTVRating;
-        if (typeof movieRating !== 'string' || typeof tvRating !== 'string') throw new Error('Invalid saved ratings');
-        setRatingSelection(document.getElementById('movieRating'), movieRating);
-        setRatingSelection(document.getElementById('tvRating'), tvRating);
-
-        // Render lists
-        renderLists();
-
-        // Update visibility
-        updateSectionVisibility();
-        updateRatingPreview();
+        const value = await response.json();
+        if (!currentProfileRecovery(action)) return;
+        if (!validateProfileRecovery(value)) throw new Error('Invalid saved profile state');
+        // The one server response contains the jointly adopted safe profile.
+        // No second Profiles GET, password prompt, or Save follows this read.
+        profileRecoveryAction = null;
+        profile = value.profile;
+        usersWriteBlocked = value.recovery.usersWriteBlocked;
         modeUncertain = false;
-        modeProfileLoading = false;
-        modeControls();
         listRemovalUncertain = false;
-        listRemovalControls();
         listAdditionUncertain = false;
-        listAdditionControls();
         ratingPairUncertain = false;
-        ratingPairControls();
-    } catch (err) {
-        showToast('Error: ' + err.message, 'error');
+        renderProfileSettings(profile);
+        status.textContent = profileModeUnsupported ? 'Saved profile state reloaded. This profile cannot be edited here.' :
+            usersWriteBlocked ? 'Saved profile state reloaded. Other profile changes still need recovery.' :
+            value.recovery.settingsPendingUncertainty ? 'Saved profile state reloaded. Other saved settings still need recovery.' :
+            'Saved profile state reloaded.';
+        allProfileControls();
+    } catch (error) {
+        if (currentProfileRecovery(action) && error.name !== 'AbortError') {
+            status.textContent = 'Saved profile state could not be reloaded. No save was retried.';
+        }
+    } finally {
+        if (profileRecoveryAction === action) {
+            const publish = currentProfileRecovery(action);
+            profileRecoveryAction = null;
+            if (publish) allProfileControls();
+        }
+    }
+}
+
+document.getElementById('reload-profile-state').addEventListener('click', reloadProfileState);
+
+async function loadProfile() {
+    retireProfileRecovery();
+    retireModeAction(); retireListRemoval(); retireListAddition(); retireRatingPair();
+    profileLoadController?.abort();
+    const controller = new AbortController();
+    profileLoadController = controller;
+    const generation = ++profileLoadGeneration;
+    modeProfileLoading = true;
+    allProfileControls();
+    const page = modePageGeneration;
+    const current = () => !controller.signal.aborted && generation === profileLoadGeneration &&
+        !modePageRetired && page === modePageGeneration && new URLSearchParams(window.location.search).get('profileId') === profileId;
+    if (!profileId) { showToast('No profile ID provided', 'error'); return; }
+    try {
+        const response = await fetch(basePath + '/api/profiles', {signal: controller.signal});
+        if (!current()) return;
+        if (!response.ok) throw new Error('Failed to load profiles');
+        const profiles = await response.json();
+        if (!current()) return;
+        const saved = profiles.find(item => item.id === profileId);
+        if (!saved) { showToast('Profile not found', 'error'); return; }
+        if (!saved.isKidsProfile) {
+            showToast('This is not a kids profile', 'error');
+            setTimeout(() => { if (current()) window.location.href = basePath + '/accounts'; }, 1500);
+            return;
+        }
+        profile = saved;
+        renderProfileSettings(profile);
+        modeUncertain = false; listRemovalUncertain = false; listAdditionUncertain = false; ratingPairUncertain = false;
+        modeProfileLoading = false;
+        allProfileControls();
+    } catch (error) {
+        if (current() && error.name !== 'AbortError') showToast('Profile settings could not be loaded.', 'error');
     }
 }
 
@@ -610,7 +733,7 @@ async function saveMode() {
         showToast('Please select a mode', 'error');
         return;
     }
-    if (modeAction || modePageRetired || modeProfileLoading || modeUncertain) return;
+    if (profileRecoveryAction || usersWriteBlocked || profileModeUnsupported || modeAction || modePageRetired || modeProfileLoading || modeUncertain) return;
     const form = document.getElementById('kids-mode-form');
     if (!form?.isConnected || profile?.id !== profileId || new URLSearchParams(window.location.search).get('profileId') !== profileId || typeof window.parentModeFetch !== 'function') {
         showToast('Confirmation is unavailable. Reload settings before saving.', 'error');
@@ -666,7 +789,7 @@ async function saveMode() {
 }
 
 async function saveRating() {
-    if (ratingPairAction || ratingPairUncertain || modePageRetired || modeProfileLoading) return;
+    if (profileRecoveryAction || usersWriteBlocked || profileModeUnsupported || ratingPairAction || ratingPairUncertain || modePageRetired || modeProfileLoading) return;
     const form = document.getElementById('rating-section');
     const movie = document.getElementById('movieRating');
     const tv = document.getElementById('tvRating');
@@ -746,7 +869,7 @@ async function addList() {
         showToast('URL must be from mdblist.com', 'error');
         return;
     }
-    if (listAdditionAction || listAdditionUncertain || modePageRetired || modeProfileLoading) return;
+    if (profileRecoveryAction || usersWriteBlocked || profileModeUnsupported || listAdditionAction || listAdditionUncertain || modePageRetired || modeProfileLoading) return;
     const form = document.getElementById('lists-section');
     const button = document.getElementById('add-allowed-list');
     const lists = profile?.kidsAllowedLists;
@@ -809,7 +932,7 @@ async function addList() {
 }
 
 async function removeList(url, row, button, lists) {
-    if (listRemovalAction || listRemovalUncertain || modePageRetired || modeProfileLoading) return;
+    if (profileRecoveryAction || usersWriteBlocked || profileModeUnsupported || listRemovalAction || listRemovalUncertain || modePageRetired || modeProfileLoading) return;
     const container = document.getElementById('lists-container');
     const form = document.getElementById('lists-section');
     if (!row?.isConnected || !container?.contains(row) || !form?.contains(row) || !row.contains(button) ||
@@ -871,12 +994,12 @@ async function removeList(url, row, button, lists) {
 
 // Listen for mode changes
 document.querySelectorAll('input[name="kidsMode"]').forEach(radio => {
-    radio.addEventListener('change', () => { retireModeAction(); retireListRemoval(); retireListAddition(); retireRatingPair(); updateSectionVisibility(); });
+    radio.addEventListener('change', () => { retireProfileRecovery(); retireModeAction(); retireListRemoval(); retireListAddition(); retireRatingPair(); updateSectionVisibility(); });
 });
-document.getElementById('movieRating').addEventListener('change', retireRatingPair);
-document.getElementById('tvRating').addEventListener('change', retireRatingPair);
-document.getElementById('new-list-url').addEventListener('input', retireListAddition);
-document.getElementById('new-list-url').addEventListener('change', retireListAddition);
+document.getElementById('movieRating').addEventListener('change', () => { retireProfileRecovery(); retireRatingPair(); });
+document.getElementById('tvRating').addEventListener('change', () => { retireProfileRecovery(); retireRatingPair(); });
+document.getElementById('new-list-url').addEventListener('input', () => { retireProfileRecovery(); retireListAddition(); });
+document.getElementById('new-list-url').addEventListener('change', () => { retireProfileRecovery(); retireListAddition(); });
 
 function escapeHtml(str) {
     if (!str) return '';

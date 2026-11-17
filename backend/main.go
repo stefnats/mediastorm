@@ -69,6 +69,7 @@ import (
 	"novastream/services/playback"
 	"novastream/services/plex"
 	"novastream/services/prewarm"
+	"novastream/services/profile_recovery"
 	"novastream/services/profileunlock"
 	"novastream/services/realtimesessions"
 	"novastream/services/recordings"
@@ -1222,6 +1223,9 @@ func main() {
 		currentProfilePins = profileunlock.NewPGProfilePins(store, sessionsService)
 	}
 
+	profileSecurityPolicy := api.CachedSecuritySettings(cfgManager, 3*time.Second)
+	profileRecoveryHandler := handlers.NewProfileRecoveryHandler(profile_recovery.NewService(store, userService, userSettingsService, currentProfilePins), profileSecurityPolicy)
+
 	// Recording aliases share the video pipeline; authorize repository ownership
 	// and the current stored-profile PIN before any media cache or file access.
 	if recordingsService != nil {
@@ -1282,8 +1286,9 @@ func main() {
 		watchPartyHandler,
 		settings.Server.HomepageAPIKey,
 		latencyAdmin,
-		api.WithProfileUnlocks(profileUnlockService, api.CachedSecuritySettings(cfgManager, 3*time.Second)),
+		api.WithProfileUnlocks(profileUnlockService, profileSecurityPolicy),
 		api.WithPGProfilePins(currentProfilePins),
+		api.WithProfileRecovery(profileRecoveryHandler),
 	)
 	log.Printf("[startup] phase=primary-api-routes duration=%s", time.Since(startupPhaseStarted))
 	startupPhaseStarted = time.Now()
@@ -1342,6 +1347,7 @@ func main() {
 	adminUIHandler.SetRemoteAccessService(remoteAccessService)
 	adminUIHandler.SetSessionsService(sessionsService)
 	adminUIHandler.SetPGProfilePins(currentProfilePins)
+	registerProfileRecoveryCookieRoutes(r, adminUIHandler, profileRecoveryHandler)
 	adminUIHandler.SetClientsService(clientsService)
 	adminUIHandler.SetClientSettingsService(clientSettingsService)
 	adminUIHandler.SetCalendarService(calendarService)
@@ -3014,4 +3020,15 @@ func registerUsenetFallbackRoutes(r *mux.Router, admin *handlers.AdminUIHandler,
 	r.HandleFunc("/admin/api/usenet/fallback/{queueID}/import-preview", admin.RequireAuth(recordingWebOrigin(fallback.Preview))).Methods(http.MethodPost)
 	r.HandleFunc("/admin/api/usenet/fallback/{queueID}/stage", admin.RequireAuth(fallback.GetManagedCopy)).Methods(http.MethodGet)
 	r.HandleFunc("/admin/api/usenet/fallback/{queueID}/stage", admin.RequireAuth(recordingWebOrigin(fallback.CopyFiles))).Methods(http.MethodPost)
+}
+
+// registerProfileRecoveryCookieRoutes is shared by the actual Main wiring and
+// its route tests. Recovery keeps both existing cookie-auth and origin guards.
+func registerProfileRecoveryCookieRoutes(r *mux.Router, admin *handlers.AdminUIHandler, handler *handlers.ProfileRecoveryHandler) {
+	if r == nil || admin == nil || handler == nil {
+		return
+	}
+	for _, prefix := range []string{"/admin/api", "/account/api"} {
+		r.HandleFunc(prefix+"/users/{userID}/state/reload", recordingWebOrigin(admin.RequireAuth(handler.Cookie))).Methods(http.MethodPost)
+	}
 }

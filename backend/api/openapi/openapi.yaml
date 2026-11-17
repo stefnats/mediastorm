@@ -1516,6 +1516,135 @@ paths:
             application/json:
               schema: {$ref: '#/components/schemas/ParentModeFailure'}
 
+  /api/users/{userId}/state/reload:
+    post:
+      operationId: reloadProfileState
+      summary: Explicitly reload one saved profile state
+      description: |
+        PG-only historical read/adopt of one current owned profile and its
+        settings, with joint local cache installation under both service locks.
+        The request is bodyless and accepts no query overrides, parent intent,
+        account password, desired values or automatic mutation retry.
+        Current full-session, ownership and existing route PIN policy remain
+        required before and after the read. Cookie routes additionally require
+        the existing same-origin POST transport. No PIN or parent grant is issued.
+
+        Every clone/check completes before both original read slots are consumed.
+        Once jointly consumed, both local installations finish even if the
+        request then ends; a late response is suppressed without claiming rollback.
+        This is historical bookkeeping, not a permanent freshness guarantee.
+        It performs no database mutation, defaults, provider work or constructor
+        migration and does not replay the failed save. Missing PG support is 503,
+        with no JSON/legacy fallback.
+
+        usersWriteBlocked preserves the existing global Users uncertainty gate.
+        settingsPendingUncertainty describes remaining settings uncertainty only;
+        it is not a new global write block or an authorization grant. Foreign
+        markers and unsaved local values are preserved. The safe profile is
+        returned directly; no second unbound Profiles read is required.
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/UserID'
+      responses:
+        '200':
+          description: The safely projected profile and separate historical recovery status.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/ProfileStateRecovery'}
+        '400': {$ref: '#/components/responses/Error'}
+        '401': {$ref: '#/components/responses/Error'}
+        '403': {$ref: '#/components/responses/Error'}
+        '404': {$ref: '#/components/responses/Error'}
+        '409': {$ref: '#/components/responses/Error'}
+        '503': {$ref: '#/components/responses/Error'}
+
+  /admin/api/users/{userId}/state/reload:
+    post:
+      operationId: adminReloadProfileState
+      summary: Explicitly reload one saved profile state
+      description: |
+        PG-only historical read/adopt of one current owned profile and its
+        settings, with joint local cache installation under both service locks.
+        The request is bodyless and accepts no query overrides, parent intent,
+        account password, desired values or automatic mutation retry.
+        Current full-session, ownership and existing route PIN policy remain
+        required before and after the read. Cookie routes additionally require
+        the existing same-origin POST transport. No PIN or parent grant is issued.
+
+        Every clone/check completes before both original read slots are consumed.
+        Once jointly consumed, both local installations finish even if the
+        request then ends; a late response is suppressed without claiming rollback.
+        This is historical bookkeeping, not a permanent freshness guarantee.
+        It performs no database mutation, defaults, provider work or constructor
+        migration and does not replay the failed save. Missing PG support is 503,
+        with no JSON/legacy fallback.
+
+        usersWriteBlocked preserves the existing global Users uncertainty gate.
+        settingsPendingUncertainty describes remaining settings uncertainty only;
+        it is not a new global write block or an authorization grant. Foreign
+        markers and unsaved local values are preserved. The safe profile is
+        returned directly; no second unbound Profiles read is required.
+      security:
+        - accountSession: []
+      parameters:
+        - $ref: '#/components/parameters/UserID'
+      responses:
+        '200':
+          description: The safely projected profile and separate historical recovery status.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/ProfileStateRecovery'}
+        '400': {$ref: '#/components/responses/Error'}
+        '401': {$ref: '#/components/responses/Error'}
+        '403': {$ref: '#/components/responses/Error'}
+        '404': {$ref: '#/components/responses/Error'}
+        '409': {$ref: '#/components/responses/Error'}
+        '503': {$ref: '#/components/responses/Error'}
+
+  /account/api/users/{userId}/state/reload:
+    post:
+      operationId: accountReloadProfileState
+      summary: Explicitly reload one saved profile state
+      description: |
+        PG-only historical read/adopt of one current owned profile and its
+        settings, with joint local cache installation under both service locks.
+        The request is bodyless and accepts no query overrides, parent intent,
+        account password, desired values or automatic mutation retry.
+        Current full-session, ownership and existing route PIN policy remain
+        required before and after the read. Cookie routes additionally require
+        the existing same-origin POST transport. No PIN or parent grant is issued.
+
+        Every clone/check completes before both original read slots are consumed.
+        Once jointly consumed, both local installations finish even if the
+        request then ends; a late response is suppressed without claiming rollback.
+        This is historical bookkeeping, not a permanent freshness guarantee.
+        It performs no database mutation, defaults, provider work or constructor
+        migration and does not replay the failed save. Missing PG support is 503,
+        with no JSON/legacy fallback.
+
+        usersWriteBlocked preserves the existing global Users uncertainty gate.
+        settingsPendingUncertainty describes remaining settings uncertainty only;
+        it is not a new global write block or an authorization grant. Foreign
+        markers and unsaved local values are preserved. The safe profile is
+        returned directly; no second unbound Profiles read is required.
+      security:
+        - accountSession: []
+      parameters:
+        - $ref: '#/components/parameters/UserID'
+      responses:
+        '200':
+          description: The safely projected profile and separate historical recovery status.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/ProfileStateRecovery'}
+        '400': {$ref: '#/components/responses/Error'}
+        '401': {$ref: '#/components/responses/Error'}
+        '403': {$ref: '#/components/responses/Error'}
+        '404': {$ref: '#/components/responses/Error'}
+        '409': {$ref: '#/components/responses/Error'}
+        '503': {$ref: '#/components/responses/Error'}
+
   /api/users/{userId}/kids/ratings:
     put:
       operationId: parentRatingPairWithConfirmation
@@ -5804,6 +5933,34 @@ components:
         mode:
           type: string
           enum: ['', rating, content_list]
+    ProfileStateRecovery:
+      type: object
+      additionalProperties: false
+      required: [profile, recovery]
+      properties:
+        profile:
+          type: object
+          additionalProperties: false
+          required: [id, name, isKidsProfile, kidsMode, kidsMaxRating, kidsMaxMovieRating, kidsMaxTVRating, kidsAllowedLists]
+          properties:
+            id: {type: string}
+            name: {type: string}
+            isKidsProfile: {type: boolean}
+            kidsMode: {type: string}
+            kidsMaxRating: {type: string}
+            kidsMaxMovieRating: {type: string}
+            kidsMaxTVRating: {type: string}
+            kidsAllowedLists:
+              type: array
+              items: {type: string}
+        recovery:
+          type: object
+          additionalProperties: false
+          required: [usersWriteBlocked, settingsPendingUncertainty]
+          properties:
+            usersWriteBlocked: {type: boolean}
+            settingsPendingUncertainty: {type: boolean}
+
     ParentModeFailure:
       type: object
       additionalProperties: false

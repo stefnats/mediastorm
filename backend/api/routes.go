@@ -105,6 +105,7 @@ type registerOptions struct {
 	pgPins   *profileunlock.PGProfilePins
 	unlocks  *profileunlock.Service
 	security SecuritySettingsFunc
+	recovery *handlers.ProfileRecoveryHandler
 }
 
 // WithProfileUnlocks enables server-issued profile unlock tokens and, when the
@@ -121,6 +122,12 @@ func WithProfileUnlocks(unlocks *profileunlock.Service, security SecuritySetting
 // registrations omit this option; a selected PG failure never falls back.
 func WithPGProfilePins(current *profileunlock.PGProfilePins) RegisterOption {
 	return func(options *registerOptions) { options.pgPins = current }
+}
+
+// WithProfileRecovery supplies the explicitly selected shared PG recovery path.
+// Omission keeps the new endpoint unavailable, never a legacy cache reload.
+func WithProfileRecovery(handler *handlers.ProfileRecoveryHandler) RegisterOption {
+	return func(options *registerOptions) { options.recovery = handler }
 }
 
 // Register mounts API endpoints onto the provided router.
@@ -326,6 +333,13 @@ func Register(
 	// Profile ownership middleware for user routes
 	profileProtected := protected.PathPrefix("/users").Subrouter()
 	profileProtected.Use(ProfileOwnershipMiddleware(usersSvc, options.pgPins))
+	recoveryHandler := options.recovery
+	if recoveryHandler == nil {
+		recoveryHandler = handlers.NewProfileRecoveryHandler(nil, nil)
+	}
+	profileProtected.HandleFunc("/{userID}/state/reload", recoveryHandler.API).Methods(http.MethodPost)
+	profileProtected.HandleFunc("/{userID}/state/reload", handleOptions).Methods(http.MethodOptions)
+
 	if watchRoomsHandler != nil {
 		profileProtected.HandleFunc("/{userID}/watch-rooms", watchRoomsHandler.Create).Methods(http.MethodPost)
 		profileProtected.HandleFunc("/{userID}/watch-rooms/{roomID}/account-invites", RateLimitHandlerFunc(watchRoomInviteLimiter, watchRoomsHandler.InviteAccount)).Methods(http.MethodPost)
