@@ -95,11 +95,31 @@ func sabSameInfo(a, b os.FileInfo) bool {
 // directory. It reads metadata only, not file payload. It does not reserve space,
 // import/copy/delete data, inspect codecs, identify a title or mint a file grant.
 func (s *Service) PreviewSABImport(ctx context.Context, id int64, settings SABImportPreviewSettings, authorize func(context.Context) error) (SABImportPreview, error) {
+	return s.withSABImportInventory(ctx, id, settings, authorize, 5*time.Second, nil)
+}
+
+type sabInventoryFile struct {
+	name string
+	file *os.File
+	info os.FileInfo
+}
+type sabHeldInventory struct {
+	result     SABImportPreview
+	receipt    *sabFallbackReceipt
+	sourceRoot *os.File
+	files      []sabInventoryFile
+	check      func() error
+	checkFile  func(int) error
+}
+
+// The consumer executes synchronously while all original descriptors and the
+// shared operation slot remain owned. It never receives a public path grant.
+func (s *Service) withSABImportInventory(ctx context.Context, id int64, settings SABImportPreviewSettings, authorize func(context.Context) error, budget time.Duration, consume func(context.Context, *sabHeldInventory) (SABImportPreview, error)) (SABImportPreview, error) {
 	fail := func() (SABImportPreview, error) { return SABImportPreview{}, ErrSABImportPreviewUnavailable }
-	if ctx == nil || ctx.Err() != nil || authorize == nil {
+	if ctx == nil || ctx.Err() != nil || authorize == nil || budget <= 0 || budget > 5*time.Minute {
 		return fail()
 	}
-	ctx, stop := context.WithTimeout(ctx, 5*time.Second)
+	ctx, stop := context.WithTimeout(ctx, budget)
 	defer stop()
 	if authorize(ctx) != nil {
 		return fail()
@@ -255,12 +275,7 @@ func (s *Service) PreviewSABImport(ctx context.Context, id int64, settings SABIm
 		return fail()
 	}
 	sort.Slice(entries, func(i, j int) bool { return entries[i].Name() < entries[j].Name() })
-	type held struct {
-		name string
-		file *os.File
-		info os.FileInfo
-	}
-	heldFiles := make([]held, 0, len(entries))
+	heldFiles := make([]sabInventoryFile, 0, len(entries))
 	defer func() {
 		for _, f := range heldFiles {
 			f.file.Close()
@@ -283,7 +298,7 @@ func (s *Service) PreviewSABImport(ctx context.Context, id int64, settings SABIm
 			return fail()
 		}
 		f := os.NewFile(uintptr(fd), "owned completed regular file")
-		heldFiles = append(heldFiles, held{entry.Name(), f, info})
+		heldFiles = append(heldFiles, sabInventoryFile{entry.Name(), f, info})
 		if check() != nil {
 			return fail()
 		}
@@ -295,52 +310,89 @@ func (s *Service) PreviewSABImport(ctx context.Context, id int64, settings SABIm
 		kind, extension := sabPreviewExtension(entry.Name())
 		result.Files = append(result.Files, SABImportPreviewFile{len(result.Files) + 1, kind, extension, actual.Size()})
 	}
-	// Reopen only directories with anchored no-follow traversal, never payloads.
-	// Confirm both the held and currently named identities before publishing.
-	again, err := openDirectory()
-	if err != nil {
-		return fail()
-	}
-	defer again.Close()
-	if check() != nil {
-		return fail()
-	}
-	after, err := again.Stat()
-	if err != nil || !sabSameInfo(before, after) || check() != nil {
-		return fail()
-	}
-	currentEntries, err := again.ReadDir(sabPreviewMaxEntries + 1)
-	if err != nil && !errors.Is(err, io.EOF) {
-		return fail()
-	}
-	if len(currentEntries) != len(entries) {
-		return fail()
-	}
-	sort.Slice(currentEntries, func(i, j int) bool { return currentEntries[i].Name() < currentEntries[j].Name() })
-	for i, held := range heldFiles {
-		if currentEntries[i].Name() != held.name || check() != nil {
-			return fail()
+	verify := func() error {
+		// Reopen only directories with anchored no-follow traversal, never payloads.
+		// Confirm both the held and currently named identities before publishing.
+		again, err := openDirectory()
+		if err != nil {
+			return ErrSABImportPreviewUnavailable
 		}
-		actual, e := held.file.Stat()
-		if e != nil || !sabSameInfo(held.info, actual) {
-			return fail()
+		defer again.Close()
+		if check() != nil {
+			return ErrSABImportPreviewUnavailable
+		}
+		after, err := again.Stat()
+		if err != nil || !sabSameInfo(before, after) || check() != nil {
+			return ErrSABImportPreviewUnavailable
+		}
+		currentEntries, err := again.ReadDir(sabPreviewMaxEntries + 1)
+		if err != nil && !errors.Is(err, io.EOF) {
+			return ErrSABImportPreviewUnavailable
+		}
+		if len(currentEntries) != len(entries) {
+			return ErrSABImportPreviewUnavailable
+		}
+		sort.Slice(currentEntries, func(i, j int) bool { return currentEntries[i].Name() < currentEntries[j].Name() })
+		for i, held := range heldFiles {
+			if currentEntries[i].Name() != held.name || check() != nil {
+				return ErrSABImportPreviewUnavailable
+			}
+			actual, e := held.file.Stat()
+			if e != nil || !sabSameInfo(held.info, actual) {
+				return ErrSABImportPreviewUnavailable
+			}
+			if check() != nil {
+				return ErrSABImportPreviewUnavailable
+			}
+			named, e := root.Lstat(path.Join(relative, held.name))
+			if e != nil || !named.Mode().IsRegular() || !sabSameInfo(actual, named) {
+				return ErrSABImportPreviewUnavailable
+			}
 		}
 		if check() != nil {
-			return fail()
+			return ErrSABImportPreviewUnavailable
 		}
-		named, e := root.Lstat(path.Join(relative, held.name))
-		if e != nil || !named.Mode().IsRegular() || !sabSameInfo(actual, named) {
-			return fail()
+		rootCurrent, err := os.Lstat(mapping.local)
+		if err != nil || !rootCurrent.IsDir() || !os.SameFile(rootInfo, rootCurrent) || check() != nil {
+			return ErrSABImportPreviewUnavailable
 		}
+		return nil
 	}
-	if check() != nil {
-		return fail()
-	}
-	rootCurrent, err := os.Lstat(mapping.local)
-	if err != nil || !rootCurrent.IsDir() || !os.SameFile(rootInfo, rootCurrent) || check() != nil {
+	if verify() != nil {
 		return fail()
 	}
 	result.EntryCount = len(result.Files)
 	result.ObservedAt = time.Now().UTC()
+	if consume != nil {
+		checkFile := func(i int) error {
+			if i < 0 || i >= len(heldFiles) || check() != nil {
+				return ErrSABImportPreviewUnavailable
+			}
+			rootCurrent, e := os.Lstat(mapping.local)
+			if e != nil || !rootCurrent.IsDir() || !os.SameFile(rootInfo, rootCurrent) {
+				return ErrSABImportPreviewUnavailable
+			}
+			currentDirectory, e := openDirectory()
+			if e != nil {
+				return ErrSABImportPreviewUnavailable
+			}
+			currentInfo, e := currentDirectory.Stat()
+			currentDirectory.Close()
+			if e != nil || !os.SameFile(before, currentInfo) {
+				return ErrSABImportPreviewUnavailable
+			}
+			held := heldFiles[i]
+			actual, e := held.file.Stat()
+			if e != nil || !sabSameInfo(held.info, actual) {
+				return ErrSABImportPreviewUnavailable
+			}
+			named, e := root.Lstat(path.Join(relative, held.name))
+			if e != nil || !named.Mode().IsRegular() || !sabSameInfo(actual, named) || check() != nil {
+				return ErrSABImportPreviewUnavailable
+			}
+			return nil
+		}
+		return consume(ctx, &sabHeldInventory{result, receipt, rootFD, heldFiles, verify, checkFile})
+	}
 	return result, nil
 }
