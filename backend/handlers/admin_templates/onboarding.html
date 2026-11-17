@@ -185,7 +185,7 @@
             </div>
             <div class="card-body">
                 <div class="setup-grid">
-                    <form onsubmit="createProfile(event)" style="grid-column: 1 / -1;">
+                    <form onsubmit="createProfile(event)" data-profile-create style="grid-column: 1 / -1;">
                         <h3 style="font-size: 1rem; margin-bottom: 0.75rem;">Create Profile</h3>
                         <div class="form-group">
                             <label class="form-label">Account</label>
@@ -210,11 +210,18 @@
                             <span class="toggle-slider"></span>
                             <span>Kids profile</span>
                         </label>
+                        <p class="form-hint" data-creation-followup-notice>When parent confirmation is required, this optional PIN is left for a separate edit in Users after creation.</p>
                         <div class="profile-form-actions">
                             <button class="btn btn-primary" type="submit">Create Profile</button>
                         </div>
                     </form>
                 </div>
+                <section id="profile-creation-results" aria-label="Profile creation results" hidden style="margin-top:1rem">
+                    <h3>Profile creation checks</h3>
+                    <p data-profile-creation-status role="status" aria-live="polite"></p>
+                    <div data-creation-records></div>
+                    <p class="form-hint">Checks preserve this form. <a href="{{.BasePath}}/accounts">Open Users</a> to review profiles and set an optional PIN.</p>
+                </section>
                 <div id="accountsSummary" style="margin-top: 1.25rem;"></div>
             </div>
         </section>
@@ -344,6 +351,7 @@ function goToStep(index) {
     showToast('Complete the current stage before continuing', 'info');
     return;
   }
+  if (activeStep !== nextIndex) retireProfileCreationActions();
   activeStep = nextIndex;
   document.querySelectorAll('.onboarding-panel').forEach(panel => {
     panel.classList.toggle('active', Number(panel.dataset.panel) === activeStep);
@@ -812,11 +820,15 @@ async function testMetadata() {
   }
 }
 
+let profileCreationLoadGeneration = 0;
 async function loadAccountsAndProfiles() {
+  retireProfileCreationActions();
+  const load = ++profileCreationLoadGeneration, creationLoad = profileCreationGeneration;
   const [accountData, profileData] = await Promise.all([
     requestJSON(basePath + '/api/accounts'),
     requestJSON(basePath + '/api/profiles')
   ]);
+  if (profileCreationPageRetired || load !== profileCreationLoadGeneration || creationLoad !== profileCreationGeneration) return;
   accounts = accountData.accounts || [];
   profiles = profileData || [];
   const selector = document.getElementById('profileAccountId');
@@ -863,32 +875,255 @@ async function setAccountMaxStreams(accountId, value) {
   showToast('Account stream limit updated');
 }
 
-async function createProfile(event) {
-  event.preventDefault();
-  const accountId = document.getElementById('profileAccountId').value;
-  const name = document.getElementById('profileName').value.trim();
-  const pin = document.getElementById('profilePin').value;
-  if (!accountId || !name) return showToast('Account and profile name are required', 'error');
-  const profile = await requestJSON(basePath + '/api/profiles', {
-    method: 'POST',
-    body: JSON.stringify({
-      accountId,
-      name,
-      color: document.getElementById('profileColor').value,
-      isKidsProfile: document.getElementById('profileKids').checked
-    })
-  });
-  if (pin) {
-    await requestJSON(basePath + '/api/profiles/pin?profileId=' + encodeURIComponent(profile.id), {
-      method: 'PUT',
-      body: JSON.stringify({ pin })
+const profileCreationActorID = {{json .AccountID}};
+
+// These local lifetimes preserve the original form action; they grant no server authority.
+let profileCreationGeneration = 0;
+let profileCreationAction = null;
+let profileCreationReadAction = null;
+let profileCreationPageRetired = false;
+let profileCreationUsersWriteBlocked = false;
+const profileCreationUncertainOperations = new Set();
+const profileCreationRetainedOperations = new Set();
+let profileCreationStore = null;
+let profileCreationMessage = '';
+const profileCreationResults = new Map();
+function getProfileCreationStore() {
+    if (!profileCreationStore) profileCreationStore = window.createProfileCreationClient({actorAccountID: profileCreationActorID, basePath});
+    return profileCreationStore;
+}
+function profileCreationControls() {
+    document.querySelectorAll('form[data-profile-create] button[type="submit"]').forEach(button => {
+        button.disabled = profileCreationPageRetired || !!profileCreationAction || !!profileCreationReadAction ||
+            profileCreationUsersWriteBlocked || profileCreationUncertainOperations.size > 0 || profileCreationRetainedOperations.size > 0 || (typeof profileUsersWriteBlocked !== 'undefined' && profileUsersWriteBlocked);
     });
-  }
-  document.getElementById('profileName').value = '';
-  document.getElementById('profilePin').value = '';
-  document.getElementById('profileKids').checked = false;
-  showToast('Profile created');
-  await loadAccountsAndProfiles();
+    const panel = document.getElementById('profile-creation-results');
+    panel?.querySelectorAll('[data-creation-read],[data-creation-forget]').forEach(button => {
+        button.disabled = profileCreationPageRetired || !!profileCreationAction || !!profileCreationReadAction;
+    });
+    const status = panel?.querySelector('[data-profile-creation-status]');
+    if (status) status.textContent = profileCreationMessage;
+}
+function retireProfileCreationActions() {
+    profileCreationGeneration++;
+    const write = profileCreationAction, read = profileCreationReadAction;
+    profileCreationAction = null;
+    profileCreationReadAction = null;
+    if (write?.operation && write.attempted && !write.settled) {
+        profileCreationUncertainOperations.add(write.operation);
+        profileCreationMessage = 'Creation needs checking. Use Check creation result before creating another profile.';
+    }
+    write?.controller.abort();
+    read?.controller.abort();
+    profileCreationControls();
+}
+function bindProfileCreationForm(form) {
+    if (!form || form.dataset.creationBound) return;
+    form.dataset.creationBound = 'true';
+    // Keep the clicked result button alive when a dirty input blurs first.
+    const edited = () => { retireProfileCreationActions(); };
+    form.addEventListener('input', edited);
+    form.addEventListener('change', edited);
+    profileCreationControls();
+}
+function finishProfileCreationAction(action) {
+    if (profileCreationAction !== action) return;
+    profileCreationAction = null;
+    action.controller.abort();
+    profileCreationControls();
+    renderProfileCreationResults();
+}
+function renderProfileCreationResults(message) {
+    if (message !== undefined) profileCreationMessage = message;
+    const panel = document.getElementById('profile-creation-results');
+    if (!panel) return;
+    let retained = [];
+    try {
+        retained = getProfileCreationStore().list();
+        profileCreationRetainedOperations.clear();
+        retained.forEach(record => profileCreationRetainedOperations.add(record.ref));
+    }
+    catch (_) { profileCreationMessage = 'Pending creation checks cannot be read in this browser. A creation requiring confirmation cannot proceed until browser storage is available.'; }
+    const records = new Map(retained.map(record => [record.ref, record]));
+    profileCreationRetainedOperations.forEach(ref => { if (!records.has(ref)) records.set(ref, {ref}); });
+    profileCreationUncertainOperations.forEach(ref => { if (!records.has(ref)) records.set(ref, {ref}); });
+    profileCreationResults.forEach((result, ref) => { if (!records.has(ref)) records.set(ref, {ref}); });
+    panel.hidden = records.size === 0 && !profileCreationMessage;
+    panel.querySelector('[data-profile-creation-status]').textContent = profileCreationMessage;
+    const rows = panel.querySelector('[data-creation-records]');
+    rows.innerHTML = '';
+    records.forEach(record => {
+        const result = profileCreationResults.get(record.ref);
+        let text = 'An earlier creation has a retained check. Its result has not been checked.';
+        if (result?.outcome === 'created') text = result.profile ? 'Created. Current saved profile: ' + result.profile.name + '.' : 'Creation confirmed. The profile is no longer available to this session.';
+        if (result?.outcome === 'not_created') text = 'This operation did not create a profile. No new creation was started.';
+        if (result?.outcome === 'pending') text = 'Creation is still pending. No creation was retried.';
+        if (result?.outcome === 'changed_or_replaced') text = 'The original profile changed or was replaced. No replacement was adopted.';
+        if (result?.outcome === 'unqualified_or_missing') text = 'The result is unavailable. This does not show whether a profile exists.';
+        if (result?.usersWriteBlocked) text += ' Other profile changes still need recovery.';
+        if (result?.settingsPendingUncertainty) text += ' Other saved settings still need recovery.';
+        const row = document.createElement('div');
+        row.dataset.creationOperation = record.ref;
+        row.style.cssText = 'padding:0.75rem 0;border-top:1px solid var(--border);overflow-wrap:anywhere';
+        const description = document.createElement('p');
+        description.textContent = text;
+        const actions = document.createElement('div');
+        actions.style.cssText = 'display:flex;gap:0.5rem;flex-wrap:wrap';
+        const read = document.createElement('button');
+        read.type = 'button'; read.className = 'btn btn-secondary btn-sm';
+        read.dataset.creationRead = ''; read.textContent = 'Check creation result';
+        read.disabled = profileCreationPageRetired || !!profileCreationAction || !!profileCreationReadAction;
+        read.addEventListener('click', () => readProfileCreationResult(record.ref));
+        const forget = document.createElement('button');
+        forget.type = 'button'; forget.className = 'btn btn-secondary btn-sm';
+        forget.dataset.creationForget = ''; forget.textContent = 'Forget local check';
+        forget.disabled = read.disabled;
+        forget.addEventListener('click', () => forgetProfileCreationResult(record.ref));
+        actions.append(read, forget); row.append(description, actions); rows.appendChild(row);
+    });
+    profileCreationControls();
+}
+async function readProfileCreationResult(operation) {
+    if (profileCreationPageRetired || profileCreationAction || profileCreationReadAction) return;
+    retireProfileCreationActions();
+    const generation = profileCreationGeneration;
+    const panel = document.getElementById('profile-creation-results');
+    const inputs = Array.from(document.querySelectorAll('form[data-profile-create] input,form[data-profile-create] select'));
+    const values = inputs.map(input => [input, input.value, input.checked]);
+    const action = {controller: new AbortController()};
+    action.isCurrent = () => profileCreationReadAction === action && generation === profileCreationGeneration &&
+        !profileCreationPageRetired && !action.controller.signal.aborted && panel.isConnected &&
+        panel === document.getElementById('profile-creation-results') &&
+        values.every(([input,value,checked]) => input.isConnected && input.value === value && input.checked === checked);
+    profileCreationReadAction = action;
+    renderProfileCreationResults('Checking the saved result. No creation is being retried.');
+    try {
+        const response = await window.profileCreationResultReadFetch(getProfileCreationStore(), operation,
+            {isCurrent:action.isCurrent, signal:action.controller.signal});
+        if (!action.isCurrent()) return;
+        const raw = await response.json();
+        if (!action.isCurrent()) return;
+        const result = window.decodeProfileCreationResult(response.status, raw);
+        profileCreationResults.set(operation, result);
+        profileCreationUsersWriteBlocked = result.usersWriteBlocked;
+        let message = 'Creation result checked. Use Refresh or profile editing to review saved profiles; your current form was preserved.';
+        if (result.outcome === 'created' || result.outcome === 'not_created') {
+            profileCreationUncertainOperations.delete(operation);
+            try { getProfileCreationStore().resolve(operation); }
+            catch (_) { message = 'The saved result was checked, but its local check could not be cleared. Your current form was preserved.'; }
+        }
+        renderProfileCreationResults(message);
+    } catch (_) {
+        if (action.isCurrent()) renderProfileCreationResults('Creation result unavailable. No creation was retried. Your current form was preserved.');
+    } finally {
+        if (profileCreationReadAction === action) {
+            profileCreationReadAction = null;
+            action.controller.abort();
+            renderProfileCreationResults();
+        }
+    }
+}
+function forgetProfileCreationResult(operation) {
+    if (profileCreationPageRetired || profileCreationAction || profileCreationReadAction) return;
+    if (!window.confirm('Forget this local check? This does not undo creation or clear server write restrictions. Review saved profiles before creating another.')) return;
+    retireProfileCreationActions();
+    try {
+        getProfileCreationStore().forget(operation);
+        profileCreationResults.delete(operation);
+        profileCreationUncertainOperations.delete(operation);
+        renderProfileCreationResults('Local check forgotten. No profile was changed and no creation was retried.');
+    } catch (_) { renderProfileCreationResults('The local check could not be forgotten. No profile was changed.'); }
+}
+window.addEventListener('pagehide', () => { profileCreationPageRetired = true; retireProfileCreationActions(); });
+
+function captureProfileCreationAction(form) {
+    if (profileCreationAction || profileCreationReadAction || profileCreationPageRetired || profileCreationUsersWriteBlocked || profileCreationUncertainOperations.size > 0 || profileCreationRetainedOperations.size > 0 ||
+        (typeof profileUsersWriteBlocked !== 'undefined' && profileUsersWriteBlocked) || !form?.isConnected) return null;
+    try {
+        if (getProfileCreationStore().list().length) {
+            renderProfileCreationResults('Check or explicitly forget retained creation checks before creating another profile.');
+            return null;
+        }
+    } catch (_) { /* Adult and legacy creation do not require locator storage. */ }
+    const inputs = Array.from(form.querySelectorAll('input,select'));
+    const values = inputs.map(input => [input, input.value, input.checked]);
+    const generation = ++profileCreationGeneration, owner = profiles, households = accounts;
+    const action = {controller:new AbortController(), form, operation:null, attempted:false, settled:false};
+    action.isCurrent = () => profileCreationAction === action && generation === profileCreationGeneration &&
+        !profileCreationPageRetired && !action.controller.signal.aborted && form.isConnected && owner === profiles && households === accounts &&
+        activeStep === 4 && document.querySelector('form[data-profile-create]') === form && inputs.length === form.querySelectorAll('input,select').length &&
+        values.every(([input,value,checked]) => input.isConnected && form.contains(input) && input.value === value && input.checked === checked);
+    profileCreationAction = action;
+    profileCreationControls();
+    return action;
+}
+
+async function createProfile(event) {
+    event.preventDefault();
+    const form = event.target;
+    const owner = document.getElementById('profileAccountId').value;
+    const name = document.getElementById('profileName').value.trim();
+    if (!owner || !name) return showToast('Account and profile name are required', 'error');
+    const action = captureProfileCreationAction(form);
+    if (!action) return;
+    const nameInput = document.getElementById('profileName'), pinInput = document.getElementById('profilePin'), kidsInput = document.getElementById('profileKids');
+    const pin = pinInput.value;
+    const data = {accountId:owner, name, color:document.getElementById('profileColor').value, isKidsProfile:kidsInput.checked};
+    action.ownerID = owner; action.signal = action.controller.signal;
+    action.onLocatorAcknowledged = ref => {
+        action.operation = ref;
+        if (action.isCurrent()) renderProfileCreationResults('Creation check retained before confirmation.');
+    };
+    action.onRetryDispatched = () => { action.attempted = true; };
+    try {
+        const response = await window.parentProfileCreationFetch(getProfileCreationStore(), basePath + '/api/profiles', {
+            method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(data), signal:action.signal
+        }, action);
+        if (!action.isCurrent()) return;
+        if (!response.ok) {
+            if (action.operation && !action.attempted) {
+                renderProfileCreationResults('Confirmation ended before creation was retried. The prepared creation can be checked explicitly.');
+                return;
+            }
+            throw new Error('Creation response unavailable');
+        }
+        const raw = await response.json();
+        if (!action.isCurrent()) return;
+        const profile = window.decodeProfileCreationProfile(raw);
+        const qualified = window.profileCreationResponseIsQualified(response);
+        const responseOperation = window.profileCreationResponseOperation(response);
+        if (qualified && (!action.operation || responseOperation !== action.operation || raw.creationOperation !== action.operation)) {
+            throw new Error('Creation response does not match the original operation');
+        }
+        action.settled = true;
+        if (qualified) {
+            const ref = window.profileCreationResponseOperation(response);
+            profileCreationResults.set(ref, {outcome:'created',profile});
+            try { getProfileCreationStore().resolve(ref); } catch (_) { /* Retain the known result and local check. */ }
+        } else if (pin) {
+            if (!action.isCurrent()) return;
+            const pinResponse = await fetch(basePath + '/api/profiles/pin?profileId=' + encodeURIComponent(profile.id), {
+                method:'PUT', headers:{'Content-Type':'application/json'}, body:JSON.stringify({pin}), signal:action.signal
+            });
+            if (!action.isCurrent()) return;
+            if (!pinResponse.ok) {
+                showToast('Profile created, but PIN was not set. Set it separately in Users.', 'warning');
+                return;
+            }
+        }
+        if (!action.isCurrent()) return;
+        // Clear only the exact original live controls after a known success.
+        nameInput.value = ''; pinInput.value = ''; kidsInput.checked = false;
+        renderProfileCreationResults(qualified ? 'Profile created. Set an optional PIN or other changes separately in Users.' : undefined);
+        showToast('Profile created');
+        await loadAccountsAndProfiles();
+    } catch (_) {
+        if (action.isCurrent()) {
+            if (action.operation && action.attempted && !action.settled) profileCreationUncertainOperations.add(action.operation);
+            renderProfileCreationResults(action.operation ? 'Creation needs checking. Use Check creation result; no creation was retried automatically.' :
+                'Creation response unavailable. Review saved profiles before trying again.');
+        }
+    } finally { finishProfileCreationAction(action); }
 }
 
 function renderReview() {
@@ -919,13 +1154,16 @@ async function completeOnboarding() {
 }
 
 document.addEventListener('DOMContentLoaded', async () => {
+  bindProfileCreationForm(document.querySelector('form[data-profile-create]'));
+  renderProfileCreationResults();
   document.getElementById('serviceMode').value = settings.streaming?.serviceMode || 'hybrid';
   document.getElementById('tmdbApiKey').value = settings.metadata?.tmdbApiKey || '';
   document.getElementById('tvdbApiKey').value = settings.metadata?.tvdbApiKey || '';
   seedSearchSources();
   renderProviderFields();
-  await Promise.all([loadStatus(), loadAccountsAndProfiles()]);
+  // Initial navigation must not overwrite a step selected while loading.
   goToStep(0);
+  await Promise.all([loadStatus(), loadAccountsAndProfiles()]);
 });
 </script>
 {{end}}
