@@ -57,12 +57,25 @@ func TestProfileRecoveryHandlerStrictBodyAndSafeDTO(t *testing.T) {
 				t.Fatal("invalid response envelope")
 			}
 			var profile map[string]json.RawMessage
-			if json.Unmarshal(body["profile"], &profile) != nil || len(profile) != 8 {
+			if json.Unmarshal(body["profile"], &profile) != nil || len(profile) != 10 {
 				t.Fatal("unexpected profile fields exposed")
 			}
-			for _, key := range []string{"id", "name", "isKidsProfile", "kidsMode", "kidsMaxRating", "kidsMaxMovieRating", "kidsMaxTVRating", "kidsAllowedLists"} {
+			for _, key := range []string{"id", "name", "isKidsProfile", "kidsMode", "kidsMaxRating", "kidsMaxMovieRating", "kidsMaxTVRating", "kidsAllowedLists", "allowLiveTakeover", "allowRecordingInterruption"} {
 				if _, ok := profile[key]; !ok {
 					t.Fatal("required DTO field missing", key)
+				}
+			}
+			for _, key := range []string{"allowLiveTakeover", "allowRecordingInterruption"} {
+				var actual bool
+				if string(profile[key]) == "null" || json.Unmarshal(profile[key], &actual) != nil {
+					t.Fatal("required rights fact is not a boolean", key)
+				}
+				expected := f.profile.AllowLiveTakeover
+				if key == "allowRecordingInterruption" {
+					expected = f.profile.AllowRecordingInterruption
+				}
+				if actual != expected {
+					t.Fatal("unexpected rights fact", key, actual)
 				}
 			}
 			var list []string

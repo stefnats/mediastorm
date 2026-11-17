@@ -4,6 +4,7 @@
     const originalFetch = window.fetch.bind(window);
     const passwordHeader = 'X-Account-Password';
     const intentHeader = 'X-Parent-Intent';
+    const profileFlagResponses = new WeakSet();
     let confirmation = null;
     let legacyPrompt = null;
     let intentPrompt = null;
@@ -95,7 +96,8 @@
             const listRemoval = actionType === 'listRemoval' && typeof isCurrent === 'function' && request.method === 'DELETE' && request.body === null && /\/api\/users\/[^/]+\/kids\/lists$/.test(url.pathname) && /^pli_[0-9a-f]{64}$/.test(body.parentIntent);
             const listAddition = actionType === 'listAddition' && typeof isCurrent === 'function' && request.method === 'POST' && request.body !== null && /\/api\/users\/[^/]+\/kids\/lists$/.test(url.pathname) && /^pla_[0-9a-f]{64}$/.test(body.parentIntent);
             const ratingPair = actionType === 'ratingPair' && typeof isCurrent === 'function' && request.method === 'PUT' && request.body !== null && /\/api\/users\/[^/]+\/kids\/ratings$/.test(url.pathname) && /^prp_[0-9a-f]{64}$/.test(body.parentIntent);
-            if (!mode && !listRemoval && !listAddition && !ratingPair) return response;
+            const profileFlag = actionType === 'profileFlag' && typeof isCurrent === 'function' && request.method === 'PUT' && request.body !== null && /\/api\/profiles\/kids$/.test(url.pathname) && /^pkf_[0-9a-f]{64}$/.test(body.parentIntent);
+            if (!mode && !listRemoval && !listAddition && !ratingPair && !profileFlag) return response;
             const generation = pageGeneration;
             if (!current()) throw abortError();
             legacyPrompt?.cancel();
@@ -117,6 +119,7 @@
             // A consumed/expired response is returned as-is, never challenged again.
             const retried = await originalFetch(new Request(request, {headers}));
             if (!current() || generation !== pageGeneration) throw abortError();
+            if (profileFlag) profileFlagResponses.add(retried);
             return retried;
         }
         const password = await confirmPassword();
@@ -135,6 +138,59 @@
     window.parentListRemovalFetch = (input, options, isCurrent) => fetchWithConfirmation(input, options, isCurrent, 'listRemoval');
     window.parentListAdditionFetch = (input, options, isCurrent) => fetchWithConfirmation(input, options, isCurrent, 'listAddition');
     window.parentRatingFetch = (input, options, isCurrent) => fetchWithConfirmation(input, options, isCurrent, 'ratingPair');
+    window.parentProfileFlagFetch = (input, options, isCurrent) => {
+        if (typeof isCurrent !== 'function') return Promise.reject(new TypeError('Original profile action required.'));
+        return fetchWithConfirmation(input, options, isCurrent, 'profileFlag');
+    };
+
+    // Changed/unavailable can follow a known COMMIT and failed local receipt
+    // ACK. Only definite precommit refusals permit another explicit Save.
+    window.profileFlagDefinitelyRefused = (status, value) =>
+        (status === 403 && ['parent_authorization_required', 'forbidden', 'profile_locked'].includes(value?.code)) ||
+        (status === 429 && value?.code === 'rate_limited') ||
+        ([400, 413].includes(status) && value?.code === 'invalid_request');
+    const exactObject = (value, keys) => value !== null && typeof value === 'object' && !Array.isArray(value) &&
+        Object.keys(value).length === keys.length && keys.every(key => Object.hasOwn(value, key));
+    window.validateRecoveredProfile = (value, id) => {
+        const fields = ['id', 'name', 'isKidsProfile', 'kidsMode', 'kidsMaxRating', 'kidsMaxMovieRating', 'kidsMaxTVRating',
+            'kidsAllowedLists', 'allowLiveTakeover', 'allowRecordingInterruption'];
+        return exactObject(value, ['profile', 'recovery']) && exactObject(value.profile, fields) &&
+            exactObject(value.recovery, ['usersWriteBlocked', 'settingsPendingUncertainty']) &&
+            value.profile.id === id && typeof value.profile.name === 'string' && typeof value.profile.isKidsProfile === 'boolean' &&
+            ['kidsMode', 'kidsMaxRating', 'kidsMaxMovieRating', 'kidsMaxTVRating'].every(key => typeof value.profile[key] === 'string') &&
+            Array.isArray(value.profile.kidsAllowedLists) && value.profile.kidsAllowedLists.every(item => typeof item === 'string') &&
+            typeof value.profile.allowLiveTakeover === 'boolean' && typeof value.profile.allowRecordingInterruption === 'boolean' &&
+            typeof value.recovery.usersWriteBlocked === 'boolean' && typeof value.recovery.settingsPendingUncertainty === 'boolean';
+    };
+    // Cookie flag replies are partial. In particular their default privacy and
+    // absent accountId must never overwrite unrelated confirmed profile facts.
+    window.profileFlagProjection = (value, id, desired, response) => {
+        if (!value || value.id !== id || value.isKidsProfile !== desired ||
+            typeof value.allowLiveTakeover !== 'boolean' || typeof value.allowRecordingInterruption !== 'boolean') {
+            throw new TypeError('Invalid saved profile flag.');
+        }
+        const result = {isKidsProfile: desired};
+        if (profileFlagResponses.has(response)) {
+            result.allowLiveTakeover = value.allowLiveTakeover;
+            result.allowRecordingInterruption = value.allowRecordingInterruption;
+        } else if (desired) {
+            // Existing JSON enable always clears both rights. Its serializer
+            // does not populate these fields; JSON disable must preserve prior
+            // cached facts until the existing known-success GET or explicit reload.
+            result.allowLiveTakeover = false;
+            result.allowRecordingInterruption = false;
+        }
+        for (const key of ['kidsMode', 'kidsMaxRating', 'kidsMaxMovieRating', 'kidsMaxTVRating']) {
+            if (Object.hasOwn(value, key) && typeof value[key] !== 'string') throw new TypeError('Invalid saved profile flag.');
+            result[key] = value[key] ?? '';
+        }
+        if (value.kidsAllowedLists !== undefined && value.kidsAllowedLists !== null &&
+            (!Array.isArray(value.kidsAllowedLists) || !value.kidsAllowedLists.every(item => typeof item === 'string'))) {
+            throw new TypeError('Invalid saved profile flag.');
+        }
+        result.kidsAllowedLists = value.kidsAllowedLists?.slice() ?? null;
+        return result;
+    };
     // This is an explicit read/adopt operation, not a parental mutation. It
     // never enters either password promise or retries any response.
     window.profileRecoveryFetch = async (input, options, isCurrent) => {

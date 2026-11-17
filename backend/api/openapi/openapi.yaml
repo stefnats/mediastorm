@@ -1324,6 +1324,233 @@ paths:
         '401':
           $ref: '#/components/responses/Error'
 
+  /api/users/{userId}/kids-profile:
+    put:
+      tags: [profiles]
+      operationId: setKidsProfileWithParentConfirmation
+      summary: Confirm the complete existing Kids profile flag change
+      description: |
+        Preserve the complete existing SetKidsProfile behavior. Always set the
+        flag and updatedAt, including identical values. Enabling disables live
+        takeover/recording interruption and sets rating/G only if the original
+        mode is empty. Disabling clears mode/generic rating/allowed lists and
+        retains existing permission booleans. Separate movie/TV ratings, share,
+        PIN, privacy and other fields are untouched.
+
+        API flag writes never read or default Settings. The existing decoder
+        performs one Decode with unknown fields rejected, case-insensitive names
+        and existing bool null/duplicate/trailing behavior. Missing/root-null or
+        initially null selects false; a duplicate true followed by null retains
+        true. No new bool-presence requirement or child/default policy is added.
+
+        PostgreSQL requires fresh original account credentials, including a master.
+        The first 403 parent_authorization_required supplies pkf_ plus 64 lowercase
+        hexadecimal characters in parentIntent. Retry the exact original method,
+        path, RawPath, raw query and body with exactly one X-Parent-Intent and the
+        existing X-Account-Password. The one-shot intent binds the original full
+        session/client/actor/owner/target row, PIN epochs, body and server entry.
+        Its deadline is at most 30 seconds, capped by original authority expiry;
+        response receipt and a different retry context cannot renew it.
+
+        Wrong password consumes the intent. Invalid/expired/changed/replayed
+        intent returns 409; it never produces an automatic replacement challenge
+        or falls back to another action. PG accepts at most 16384 body bytes.
+        Unknown COMMIT or lost/canceled responses must not trigger automatic Save
+        or rollback claims; explicit existing state reload reconciles saved facts.
+        This changes no creation, PIN, playback, age or delivery permission.
+        JSON without PG retains its previous guard/master behavior and body policy.
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/UserID'
+        - $ref: '#/components/parameters/ParentKidsFlagIntent'
+        - $ref: '#/components/parameters/ParentAccountPassword'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/ParentKidsFlagRequest'}
+      responses:
+        '200':
+          description: Confirmed targeted flag/Kids facts and actual stored permission booleans.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Profile'}
+        '400': {$ref: '#/components/responses/Error'}
+        '401': {$ref: '#/components/responses/Error'}
+        '403': {$ref: '#/components/responses/ParentKidsFlagForbidden'}
+        '404': {$ref: '#/components/responses/Error'}
+        '409':
+          description: Original confirmation changed, expired or consumed; no automatic retry.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/ParentModeFailure'}
+        '413': {$ref: '#/components/responses/Error'}
+        '429': {$ref: '#/components/responses/Error'}
+        '503':
+          description: Unavailable or outcome unknown; explicitly reload saved state before another action.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/ParentModeFailure'}
+
+  /admin/api/profiles/kids:
+    put:
+      tags: [profiles]
+      operationId: setAdminKidsProfileWithParentConfirmation
+      summary: Confirm the complete existing Kids profile flag change
+      description: |
+        Preserve the complete existing SetKidsProfile behavior. Always set the
+        flag and updatedAt, including identical values. Enabling disables live
+        takeover/recording interruption and sets rating/G only if the original
+        mode is empty. Disabling clears mode/generic rating/allowed lists and
+        retains existing permission booleans. Separate movie/TV ratings, share,
+        PIN, privacy and other fields are untouched.
+
+        Only management enable participates in Settings: set nil SimpleMode
+        true, preserve explicit false/true and unknown raw values. User/defaults
+        are committed in one PG transaction and both confirmed caches are ACKed.
+        Management false has no Settings read/default or Settings Unknown marker.
+        The response is a partial Cookie DTO, not a complete saved profile.
+        Merge only confirmed flag/Kids/rights facts; omitted accountId, privacy
+        and other fields are not newly confirmed by their serializer defaults.
+        The management decoder uses one Decode and accepts unknown fields, but
+        the existing cookie ownership middleware first requires one complete JSON
+        body and rejects trailing JSON. Name casing and bool null/duplicate
+        semantics follow the existing decoder, not a new enum or normalization.
+
+        PostgreSQL requires fresh original account credentials, including a master.
+        The first 403 parent_authorization_required supplies pkf_ plus 64 lowercase
+        hexadecimal characters in parentIntent. Retry the exact original method,
+        path, RawPath, raw query and body with exactly one X-Parent-Intent and the
+        existing X-Account-Password. The one-shot intent binds the original full
+        session/client/actor/owner/target row, PIN epochs, body and server entry.
+        Its deadline is at most 30 seconds, capped by original authority expiry;
+        response receipt and a different retry context cannot renew it.
+
+        Wrong password consumes the intent. Invalid/expired/changed/replayed
+        intent returns 409; it never produces an automatic replacement challenge
+        or falls back to another action. PG accepts at most 16384 body bytes.
+        Unknown COMMIT or lost/canceled responses must not trigger automatic Save
+        or rollback claims; explicit existing state reload reconciles saved facts.
+        This changes no creation, PIN, playback, age or delivery permission.
+        JSON without PG retains its previous guard/master behavior and body policy.
+      security:
+        - accountSession: []
+      parameters:
+        - name: profileId
+          in: query
+          required: true
+          description: Existing selected profile; preserve exact original query bytes on retry.
+          schema: {type: string, minLength: 1}
+        - $ref: '#/components/parameters/ParentKidsFlagIntent'
+        - $ref: '#/components/parameters/ParentAccountPassword'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/ParentKidsFlagRequest'}
+      responses:
+        '200':
+          description: Confirmed targeted flag/Kids facts and actual stored permission booleans.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/ParentKidsFlagCookieProfile'}
+        '400': {$ref: '#/components/responses/Error'}
+        '401': {$ref: '#/components/responses/Error'}
+        '403': {$ref: '#/components/responses/ParentKidsFlagForbidden'}
+        '404': {$ref: '#/components/responses/Error'}
+        '409':
+          description: Original confirmation changed, expired or consumed; no automatic retry.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/ParentModeFailure'}
+        '413': {$ref: '#/components/responses/Error'}
+        '429': {$ref: '#/components/responses/Error'}
+        '503':
+          description: Unavailable or outcome unknown; explicitly reload saved state before another action.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/ParentModeFailure'}
+
+  /account/api/profiles/kids:
+    put:
+      tags: [profiles]
+      operationId: setAccountKidsProfileWithParentConfirmation
+      summary: Confirm the complete existing Kids profile flag change
+      description: |
+        Preserve the complete existing SetKidsProfile behavior. Always set the
+        flag and updatedAt, including identical values. Enabling disables live
+        takeover/recording interruption and sets rating/G only if the original
+        mode is empty. Disabling clears mode/generic rating/allowed lists and
+        retains existing permission booleans. Separate movie/TV ratings, share,
+        PIN, privacy and other fields are untouched.
+
+        Only management enable participates in Settings: set nil SimpleMode
+        true, preserve explicit false/true and unknown raw values. User/defaults
+        are committed in one PG transaction and both confirmed caches are ACKed.
+        Management false has no Settings read/default or Settings Unknown marker.
+        The response is a partial Cookie DTO, not a complete saved profile.
+        Merge only confirmed flag/Kids/rights facts; omitted accountId, privacy
+        and other fields are not newly confirmed by their serializer defaults.
+        The management decoder uses one Decode and accepts unknown fields, but
+        the existing cookie ownership middleware first requires one complete JSON
+        body and rejects trailing JSON. Name casing and bool null/duplicate
+        semantics follow the existing decoder, not a new enum or normalization.
+
+        PostgreSQL requires fresh original account credentials, including a master.
+        The first 403 parent_authorization_required supplies pkf_ plus 64 lowercase
+        hexadecimal characters in parentIntent. Retry the exact original method,
+        path, RawPath, raw query and body with exactly one X-Parent-Intent and the
+        existing X-Account-Password. The one-shot intent binds the original full
+        session/client/actor/owner/target row, PIN epochs, body and server entry.
+        Its deadline is at most 30 seconds, capped by original authority expiry;
+        response receipt and a different retry context cannot renew it.
+
+        Wrong password consumes the intent. Invalid/expired/changed/replayed
+        intent returns 409; it never produces an automatic replacement challenge
+        or falls back to another action. PG accepts at most 16384 body bytes.
+        Unknown COMMIT or lost/canceled responses must not trigger automatic Save
+        or rollback claims; explicit existing state reload reconciles saved facts.
+        This changes no creation, PIN, playback, age or delivery permission.
+        JSON without PG retains its previous guard/master behavior and body policy.
+      security:
+        - accountSession: []
+      parameters:
+        - name: profileId
+          in: query
+          required: true
+          description: Existing selected profile; preserve exact original query bytes on retry.
+          schema: {type: string, minLength: 1}
+        - $ref: '#/components/parameters/ParentKidsFlagIntent'
+        - $ref: '#/components/parameters/ParentAccountPassword'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/ParentKidsFlagRequest'}
+      responses:
+        '200':
+          description: Confirmed targeted flag/Kids facts and actual stored permission booleans.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/ParentKidsFlagCookieProfile'}
+        '400': {$ref: '#/components/responses/Error'}
+        '401': {$ref: '#/components/responses/Error'}
+        '403': {$ref: '#/components/responses/ParentKidsFlagForbidden'}
+        '404': {$ref: '#/components/responses/Error'}
+        '409':
+          description: Original confirmation changed, expired or consumed; no automatic retry.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/ParentModeFailure'}
+        '413': {$ref: '#/components/responses/Error'}
+        '429': {$ref: '#/components/responses/Error'}
+        '503':
+          description: Unavailable or outcome unknown; explicitly reload saved state before another action.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/ParentModeFailure'}
+
   /api/users/{userId}/kids/rating:
     put:
       operationId: parentRatingGenericWithConfirmation
@@ -5012,6 +5239,11 @@ components:
       description: Session token as a query parameter; only accepted on media URLs such as `/api/video/stream`.
 
   parameters:
+    ParentKidsFlagIntent:
+      name: X-Parent-Intent
+      in: header
+      description: Exactly one original flag intent, isolated from all other actions and API/management entries.
+      schema: {type: string, pattern: '^pkf_[0-9a-f]{64}$'}
     ParentRatingGenericIntent:
       name: X-Parent-Intent
       in: header
@@ -5223,6 +5455,20 @@ components:
         type: string
 
   responses:
+    ParentKidsFlagForbidden:
+      description: First PG flag challenge, wrong credentials or existing ownership/PIN denial. No replacement intent on retry.
+      content:
+        application/json:
+          schema:
+            type: object
+            required: [error]
+            properties:
+              error: {type: string}
+              code: {type: string}
+              profileId: {type: string}
+              parentIntent: {type: string, pattern: '^pkf_[0-9a-f]{64}$'}
+        text/plain:
+          schema: {type: string}
     ParentRatingGenericForbidden:
       description: First PG challenge, wrong credentials or existing ownership/PIN denial; retries never create replacement intents.
       content:
@@ -5933,6 +6179,31 @@ components:
         mode:
           type: string
           enum: ['', rating, content_list]
+    ParentKidsFlagRequest:
+      type: object
+      nullable: true
+      additionalProperties: true
+      description: One existing bool Decode. Missing/null initially selects false; duplicate true then null retains true. Field casing is accepted. Actual API rejects unknown fields; Cookie decoder permits them, with its existing whole-body middleware boundary.
+      properties:
+        isKidsProfile: {type: boolean, nullable: true}
+    ParentKidsFlagCookieProfile:
+      type: object
+      additionalProperties: true
+      required: [id, name, isKidsProfile, allowLiveTakeover, allowRecordingInterruption]
+      description: Partial management projection. Only these flag/Kids/rights facts are confirmed; preserve existing accountId, privacy and other unrelated fields when merging. Empty Kids strings/lists may be omitted by this serializer.
+      properties:
+        id: {type: string}
+        name: {type: string}
+        isKidsProfile: {type: boolean}
+        allowLiveTakeover: {type: boolean}
+        allowRecordingInterruption: {type: boolean}
+        kidsMode: {type: string}
+        kidsMaxRating: {type: string}
+        kidsMaxMovieRating: {type: string}
+        kidsMaxTVRating: {type: string}
+        kidsAllowedLists:
+          type: array
+          items: {type: string}
     ProfileStateRecovery:
       type: object
       additionalProperties: false
@@ -5941,11 +6212,13 @@ components:
         profile:
           type: object
           additionalProperties: false
-          required: [id, name, isKidsProfile, kidsMode, kidsMaxRating, kidsMaxMovieRating, kidsMaxTVRating, kidsAllowedLists]
+          required: [id, name, isKidsProfile, kidsMode, kidsMaxRating, kidsMaxMovieRating, kidsMaxTVRating, kidsAllowedLists, allowLiveTakeover, allowRecordingInterruption]
           properties:
             id: {type: string}
             name: {type: string}
             isKidsProfile: {type: boolean}
+            allowLiveTakeover: {type: boolean}
+            allowRecordingInterruption: {type: boolean}
             kidsMode: {type: string}
             kidsMaxRating: {type: string}
             kidsMaxMovieRating: {type: string}
