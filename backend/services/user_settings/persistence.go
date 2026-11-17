@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"reflect"
 	"sort"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -689,4 +690,84 @@ func (l *ParentKidsFlagDefaultsLease) Close() {
 	}
 	st.closed = true
 	st.service.mu.Unlock()
+}
+
+// ApplyStartupKidsProfileDefaults uses the initial startup ID cut only as a
+// candidate list. The datastore checks the current User Kids state and original
+// Settings revision together. This PG-only operation neither rebases targets nor
+// flushes unrelated dirty settings; generic and JSON defaults keep their policy.
+func (s *Service) ApplyStartupKidsProfileDefaults(ctx context.Context, userIDs ...string) (int, error) {
+	if ctx == nil || !s.useDB() {
+		return 0, datastore.ErrUserSettingsUnavailable
+	}
+	if err := ctx.Err(); err != nil {
+		return 0, err
+	}
+	// Retain the existing PG storage budget without renewing a shorter caller
+	// deadline. Mutex acquisition itself is not actively cancellable.
+	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+	ids := []string{}
+	seen := map[string]bool{}
+	for _, raw := range userIDs {
+		id := strings.TrimSpace(raw)
+		if id != "" && !seen[id] {
+			ids = append(ids, id)
+			seen[id] = true
+		}
+	}
+	sort.Strings(ids)
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if err := ctx.Err(); err != nil {
+		return 0, err
+	}
+	if s.pg == nil {
+		return 0, datastore.ErrUserSettingsUnavailable
+	}
+	expected := make([]datastore.UserSettingsRevision, len(ids))
+	for i, id := range ids {
+		if err := s.pgTargetErrorLocked(id); err != nil {
+			return 0, err
+		}
+		record, ok := s.pg.records[id]
+		if !ok {
+			return 0, datastore.ErrUserSettingsConflict
+		}
+		before, confirmed := s.pg.confirmed[id]
+		after, present := s.settings[id]
+		if confirmed != present || !reflect.DeepEqual(before, after) {
+			return 0, datastore.ErrUserSettingsConflict
+		}
+		expected[i] = record.Revision
+	}
+	receipt, changed, participants, err := s.store.CommitKidsProfileDefaults(ctx, expected)
+	if err != nil {
+		if errors.Is(err, datastore.ErrUserSettingsOutcomeUnknown) {
+			s.markUserSettingsUnknownLocked(participants)
+		}
+		return 0, err
+	}
+	if receipt == nil {
+		return 0, ctx.Err()
+	}
+	defer receipt.Close()
+	accepted := make([]datastore.UserSettingsRevision, len(participants))
+	for i, id := range participants {
+		accepted[i] = s.pg.records[id].Revision
+	}
+	records, err := s.store.AcceptUserSettingsCommit(ctx, receipt, accepted)
+	if err != nil {
+		s.markUserSettingsUnknownLocked(participants)
+		return 0, datastore.ErrUserSettingsOutcomeUnknown
+	}
+	// Complete the known historical ACK even if cancellation follows COMMIT.
+	// Report cancellation afterwards, without claiming a database rollback.
+	for _, record := range records {
+		s.installPGRecordLocked(record)
+	}
+	if err := ctx.Err(); err != nil {
+		return 0, err
+	}
+	return changed, nil
 }
