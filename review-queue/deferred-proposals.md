@@ -1991,3 +1991,13 @@ The test-only branch `test/native-cached-watching-contract` and combined `featur
 The matching native consumer is complete locally with 2,151 JVM tests and both APKs. Its newest branch has not been published. The native evidence covers actual helper/transport seams, source wiring and built APKs; it does not execute full authenticated Android send, Compose input or a physical device. Backend authentication in this new contract test is injected over a synthetic owner, and separate registered API/PIN coverage remains separate.
 
 No upstream pull request, comment, production activation or private provider/playlist access is included. The initial reverse fixture compile error and exact source snapshot are retained; it is not a product failure.
+
+## Fork-only persistent profile unlock revocations
+
+Profile and session revocation now increments a durable generation and removes existing grants in one PostgreSQL transaction, including empty grant sets. A separate uninstalled one-shot reader checks the current grant, original session, actor/owner/profile rows, PIN fingerprint, deadlines and both generations from one coherent snapshot. Equal-value row updates and revoke/recreate changes retire the prior observation.
+
+The component `feature/profile-unlock-revocations` and combined `feature/integrated-requirements` point to `9cfaa6343470591d870a784b85539e43f5d76403`. The four-file change contains three production files, including migration 077. Targeted validation passes 345 normal events with eight existing optional skips, 162 repeated race events, 243 API events and both builds. The 54 new PostgreSQL events overlap the normal run. Full DataStore startup/restart and a real lost COMMIT acknowledgment are exercised.
+
+The combined clean source passes 10,944 test events in 106 packages with 38 optional skips. Ten isolated PostgreSQL opt-ins and five unchanged native request exports run together; the built server carries that same revision.
+
+Public PIN issuance, legacy Rebind and cached Validate are unchanged. No public caller adopts the new current-state reader, and an old issuer can still write after revoke. Generation-bound issuance and request-context validation are follow-up work; this foundation is not a family or media access grant. The first synthetic lock-observer failures, corrected observer-only source and exact raw snapshots are preserved without a product failure claim. No production activation, real provider/playlist access or upstream PR is included.
