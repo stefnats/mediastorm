@@ -312,6 +312,34 @@ let modePageGeneration = 0;
 let modePageRetired = false;
 let modeProfileLoading = true;
 let modeUncertain = false;
+let listRemovalAction = null;
+let listRemovalGeneration = 0;
+let listRemovalUncertain = false;
+
+function listRemovalControls() {
+    document.querySelectorAll('#lists-container .remove-allowed-list').forEach(button => {
+        button.disabled = modePageRetired || modeProfileLoading || listRemovalUncertain || listRemovalAction !== null;
+    });
+}
+
+function retireListRemoval() {
+    listRemovalGeneration++;
+    const original = listRemovalAction;
+    listRemovalAction = null;
+    original?.controller.abort();
+    listRemovalControls();
+}
+
+function currentListRemoval(action) {
+    return listRemovalAction === action && !action.controller.signal.aborted && !modePageRetired && !modeProfileLoading &&
+        action.generation === listRemovalGeneration && action.page === modePageGeneration &&
+        profile === action.profile && profile?.id === profileId && profile.kidsAllowedLists === action.lists &&
+        action.lists.length === action.snapshot.length && action.lists.every((url, index) => url === action.snapshot[index]) &&
+        document.getElementById('lists-container') === action.container && action.container.contains(action.row) &&
+        action.row.isConnected && action.row.contains(action.button) && document.getElementById('lists-section') === action.form &&
+        action.form.contains(action.row) && modeSelection() === action.mode &&
+        new URLSearchParams(window.location.search).get('profileId') === profileId;
+}
 
 function modeSelection() {
     return document.querySelector('input[name="kidsMode"]:checked')?.value || '';
@@ -338,11 +366,11 @@ function currentModeAction(action) {
         new URLSearchParams(window.location.search).get('profileId') === profileId && modeSelection() === action.mode;
 }
 
-window.addEventListener('pagehide', () => { modePageRetired = true; modePageGeneration++; retireModeAction(); });
+window.addEventListener('pagehide', () => { modePageRetired = true; modePageGeneration++; retireModeAction(); retireListRemoval(); });
 window.addEventListener('pageshow', event => {
-    if (event.persisted) { modePageRetired = false; modePageGeneration++; retireModeAction(); }
+    if (event.persisted) { modePageRetired = false; modePageGeneration++; retireModeAction(); retireListRemoval(); }
 });
-window.addEventListener('popstate', retireModeAction);
+window.addEventListener('popstate', () => { retireModeAction(); retireListRemoval(); });
 
 // Rating mappings for sync
 const movieToTvRating = {
@@ -364,8 +392,10 @@ const tvToMovieRating = {
 
 async function loadProfile() {
     retireModeAction();
+    retireListRemoval();
     modeProfileLoading = true;
     modeControls();
+    listRemovalControls();
     const page = modePageGeneration;
     if (!profileId) {
         showToast('No profile ID provided', 'error');
@@ -413,6 +443,8 @@ async function loadProfile() {
         modeUncertain = false;
         modeProfileLoading = false;
         modeControls();
+        listRemovalUncertain = false;
+        listRemovalControls();
     } catch (err) {
         showToast('Error: ' + err.message, 'error');
     }
@@ -440,31 +472,54 @@ function updateRatingPreview() {
 }
 
 function renderLists() {
+    retireListRemoval();
     const container = document.getElementById('lists-container');
     const lists = profile?.kidsAllowedLists || [];
+    container.replaceChildren();
+    if (!Array.isArray(lists) || lists.some(url => typeof url !== 'string')) {
+        listRemovalUncertain = true;
+        container.textContent = 'Allowed lists could not be loaded. Reload settings.';
+        return;
+    }
 
     if (lists.length === 0) {
         container.innerHTML = '<p style="color: var(--text-muted); font-size: 0.875rem; padding: 0.5rem;">No lists added yet.</p>';
         return;
     }
 
-    container.innerHTML = lists.map((url, index) => `
-        <div class="list-item">
+    lists.forEach(url => {
+        const row = document.createElement('div');
+        row.className = 'list-item';
+        row.innerHTML = `
             <svg viewBox="0 0 24 24" fill="none" stroke="var(--accent)" stroke-width="2" style="width: 20px; height: 20px; flex-shrink: 0;">
                 <line x1="8" y1="6" x2="21" y2="6"/><line x1="8" y1="12" x2="21" y2="12"/><line x1="8" y1="18" x2="21" y2="18"/>
                 <line x1="3" y1="6" x2="3.01" y2="6"/><line x1="3" y1="12" x2="3.01" y2="12"/><line x1="3" y1="18" x2="3.01" y2="18"/>
             </svg>
             <div class="list-item-url">
-                <a href="${escapeHtml(url)}" target="_blank" rel="noopener">${escapeHtml(url)}</a>
+                <a target="_blank" rel="noopener"></a>
             </div>
-            <button class="btn btn-danger btn-sm" onclick="removeList('${escapeHtml(url)}')">
+            <button class="btn btn-danger btn-sm remove-allowed-list" type="button">
                 <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="width: 14px; height: 14px;">
                     <polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/>
                 </svg>
                 Remove
             </button>
-        </div>
-    `).join('');
+        `;
+        const link = row.querySelector('a');
+        // Link safety is separate from the stored deletion identity. Invalid
+        // and non-HTTP values stay visible and removable as their original text.
+        try {
+            const target = new URL(url);
+            if (target.protocol === 'http:' || target.protocol === 'https:') link.setAttribute('href', url);
+        } catch (_) { /* Preserve invalid stored values as non-link text. */ }
+        link.textContent = url;
+        const button = row.querySelector('button');
+        // Stored text is never inserted into JavaScript or an HTML attribute
+        // template. The actual row retains its original URL in this closure.
+        button.addEventListener('click', () => removeList(url, row, button, lists));
+        container.appendChild(row);
+    });
+    listRemovalControls();
 }
 
 async function saveMode() {
@@ -589,27 +644,70 @@ async function addList() {
     }
 }
 
-async function removeList(url) {
-    if (!confirm('Remove this list?')) return;
+async function removeList(url, row, button, lists) {
+    if (listRemovalAction || listRemovalUncertain || modePageRetired || modeProfileLoading) return;
+    const container = document.getElementById('lists-container');
+    const form = document.getElementById('lists-section');
+    if (!row?.isConnected || !container?.contains(row) || !form?.contains(row) || !row.contains(button) ||
+        profile?.id !== profileId || profile.kidsAllowedLists !== lists || !lists.includes(url) ||
+        new URLSearchParams(window.location.search).get('profileId') !== profileId || typeof window.parentListRemovalFetch !== 'function') return;
+    const action = {profile, lists, row, button, container, form, url, mode: modeSelection(), snapshot: Object.freeze([...lists]),
+        generation: ++listRemovalGeneration, page: modePageGeneration, controller: new AbortController()};
+    listRemovalAction = action;
+    listRemovalControls();
 
     try {
-        const res = await fetch(basePath + '/api/users/' + profileId + '/kids/lists?url=' + encodeURIComponent(url), {
-            method: 'DELETE'
-        });
-        if (!res.ok) throw new Error(await res.text());
+        // Keep the existing visible deletion question in both PG and JSON
+        // modes. Neither it nor the later password dialog can adopt a new row.
+        if (!confirm('Remove this list?') || !currentListRemoval(action)) return;
+        const res = await window.parentListRemovalFetch(basePath + '/api/users/' + encodeURIComponent(profileId) + '/kids/lists?url=' + encodeURIComponent(url), {
+            method: 'DELETE', signal: action.controller.signal
+        }, () => currentListRemoval(action));
+        if (!currentListRemoval(action)) return;
+        if (!res.ok) {
+            const error = await res.json().catch(() => null);
+            if (!currentListRemoval(action)) return;
+            if (error?.code === 'parent_confirmation_outcome_unknown') {
+                listRemovalUncertain = true;
+                showToast('The result is not known. Reload settings before trying again.', 'error');
+            } else if (error?.code === 'parent_confirmation_changed') {
+                showToast('Confirmation expired or the request changed. Save again.', 'error');
+            } else if (res.status === 429) {
+                showToast('Too many confirmation attempts. Wait before removing again.', 'error');
+            } else {
+                showToast('Confirmation was not completed. Remove again when ready.', 'error');
+            }
+            return;
+        }
 
         const updatedProfile = await res.json();
-        profile.kidsAllowedLists = updatedProfile.kidsAllowedLists;
+        if (!currentListRemoval(action)) return;
+        const updated = updatedProfile && Object.hasOwn(updatedProfile, 'kidsAllowedLists') ? updatedProfile.kidsAllowedLists : [];
+        // Match Go's existing strings.TrimSpace only for checking the returned
+        // projection. The request still sends the unmodified stored URL once.
+        const identity = url.replace(/^[\u0009-\u000d\u0020\u0085\u00a0\u1680\u2000-\u200a\u2028\u2029\u202f\u205f\u3000]+|[\u0009-\u000d\u0020\u0085\u00a0\u1680\u2000-\u200a\u2028\u2029\u202f\u205f\u3000]+$/g, '');
+        const expected = action.snapshot.filter(value => value !== identity);
+        if (updatedProfile?.id !== profileId || !Array.isArray(updated) || updated.length !== expected.length ||
+            updated.some((value, index) => typeof value !== 'string' || value !== expected[index])) throw new Error('Unconfirmed list response');
+        action.profile.kidsAllowedLists = updated;
         renderLists();
         showToast('List removed');
     } catch (err) {
-        showToast('Error: ' + err.message, 'error');
+        if (!currentListRemoval(action) || err.name === 'AbortError') return;
+        listRemovalUncertain = true;
+        showToast('The result could not be confirmed. Reload settings before trying again.', 'error');
+    } finally {
+        if (listRemovalAction === action) {
+            const publish = currentListRemoval(action);
+            listRemovalAction = null;
+            if (publish) listRemovalControls();
+        }
     }
 }
 
 // Listen for mode changes
 document.querySelectorAll('input[name="kidsMode"]').forEach(radio => {
-    radio.addEventListener('change', () => { retireModeAction(); updateSectionVisibility(); });
+    radio.addEventListener('change', () => { retireModeAction(); retireListRemoval(); updateSectionVisibility(); });
 });
 
 function escapeHtml(str) {

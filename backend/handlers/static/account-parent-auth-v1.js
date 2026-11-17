@@ -76,7 +76,7 @@
     const abortError = () => Object.assign(new Error('The original mode action ended.'), {name: 'AbortError'});
     const passwordValue = password => 'base64:' + btoa(Array.from(new TextEncoder().encode(password), byte => String.fromCharCode(byte)).join(''));
 
-    async function fetchWithConfirmation(input, options, isCurrent) {
+    async function fetchWithConfirmation(input, options, isCurrent, actionType) {
         const request = new Request(input, options);
         const current = () => !request.signal.aborted && (!isCurrent || isCurrent());
         if (isCurrent && !current()) throw abortError();
@@ -88,9 +88,12 @@
         const body = await response.clone().json().catch(() => null);
         if (body?.code !== 'parent_authorization_required') return response;
         if (Object.hasOwn(body, 'parentIntent')) {
-            // Only this exact original mode request may consume the challenge.
+            // Only the exact original action type may consume its challenge.
             // A malformed PG challenge cannot downgrade to legacy confirmation.
-            if (request.method !== 'PUT' || !/\/api\/users\/[^/]+\/kids\/mode$/.test(url.pathname) || typeof body.parentIntent !== 'string' || !/^pmi_[0-9a-f]{64}$/.test(body.parentIntent)) return response;
+            if (typeof body.parentIntent !== 'string') return response;
+            const mode = actionType !== 'listRemoval' && request.method === 'PUT' && /\/api\/users\/[^/]+\/kids\/mode$/.test(url.pathname) && /^pmi_[0-9a-f]{64}$/.test(body.parentIntent);
+            const listRemoval = actionType === 'listRemoval' && typeof isCurrent === 'function' && request.method === 'DELETE' && request.body === null && /\/api\/users\/[^/]+\/kids\/lists$/.test(url.pathname) && /^pli_[0-9a-f]{64}$/.test(body.parentIntent);
+            if (!mode && !listRemoval) return response;
             const generation = pageGeneration;
             if (!current()) throw abortError();
             legacyPrompt?.cancel();
@@ -127,5 +130,6 @@
     // The actual mode form supplies its original instance/profile/mode/action
     // predicate; this UI check is bookkeeping, never a server authorization proof.
     window.parentModeFetch = (input, options, isCurrent) => fetchWithConfirmation(input, options, isCurrent);
+    window.parentListRemovalFetch = (input, options, isCurrent) => fetchWithConfirmation(input, options, isCurrent, 'listRemoval');
     window.addEventListener?.('pagehide', () => { pageGeneration++; intentPrompt?.cancel(); });
 })();
