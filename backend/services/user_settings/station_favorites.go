@@ -24,12 +24,26 @@ func (s *Service) SetFavoriteStation(userID, stationID string, favorite bool) ([
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if s.useDB() {
+		ctx, cancel := settingsStorageContext()
+		defer cancel()
+		if err := s.ensurePGTargetLocked(ctx, userID); err != nil {
+			return nil, err
+		}
+	}
 	previous, existed := s.settings[userID]
 	ids := make(map[string]bool, len(previous.LiveTV.FavoriteStationIDs))
 	for _, id := range previous.LiveTV.FavoriteStationIDs {
 		ids[id] = true
 	}
 	if ids[stationID] == favorite {
+		if s.useDB() {
+			ctx, cancel := settingsStorageContext()
+			defer cancel()
+			if err := s.persistPGLocked(ctx, []string{userID}, nil); err != nil {
+				return nil, err
+			}
+		}
 		return append([]string{}, previous.LiveTV.FavoriteStationIDs...), nil
 	}
 	if favorite && len(ids) >= models.MaxFavoriteStations {
@@ -53,9 +67,9 @@ func (s *Service) SetFavoriteStation(userID, stationID string, favorite bool) ([
 		s.settings[userID] = updated
 	}
 	if err := s.saveLocked(); err != nil {
-		if existed {
+		if !s.useDB() && existed {
 			s.settings[userID] = previous
-		} else {
+		} else if !s.useDB() {
 			delete(s.settings, userID)
 		}
 		return nil, err

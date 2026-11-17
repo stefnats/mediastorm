@@ -1,7 +1,6 @@
 package user_settings
 
 import (
-	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -29,6 +28,7 @@ type Service struct {
 	path     string
 	store    *datastore.DataStore
 	settings map[string]models.UserSettings
+	pg       *settingsPersistence
 }
 
 // useDB returns true when the service is backed by PostgreSQL.
@@ -137,11 +137,27 @@ func (s *Service) Get(userID string) (*models.UserSettings, error) {
 		return nil, ErrUserIDRequired
 	}
 
-	s.mu.RLock()
-	defer s.mu.RUnlock()
+	if s.useDB() {
+		s.mu.Lock()
+		defer s.mu.Unlock()
+		ctx, cancel := settingsStorageContext()
+		defer cancel()
+		if err := s.ensurePGTargetLocked(ctx, userID); err != nil && !errors.Is(err, datastore.ErrUserSettingsConflict) {
+			return nil, err
+		}
+	} else {
+		s.mu.RLock()
+		defer s.mu.RUnlock()
+	}
 
+	if err := s.pgTargetErrorLocked(userID); err != nil {
+		return nil, err
+	}
 	if settings, ok := s.settings[userID]; ok {
 		copy := settings
+		if s.useDB() {
+			copy = cloneSettingsValue(settings)
+		}
 		copy.LiveTV.FavoriteStationIDs = append([]string(nil), settings.LiveTV.FavoriteStationIDs...)
 		copy.SportsPreferences = append(json.RawMessage(nil), settings.SportsPreferences...)
 		return &copy, nil
@@ -170,6 +186,9 @@ func (s *Service) ApplyKidsProfileDefaults(userIDs ...string) (int, error) {
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if s.useDB() {
+		return s.applyPGKidsDefaultsLocked(cleaned)
+	}
 
 	changed := 0
 	for _, userID := range cleaned {
@@ -226,10 +245,29 @@ func (s *Service) GetWithDefaults(userID string, defaults models.UserSettings) (
 		return models.UserSettings{}, ErrUserIDRequired
 	}
 
-	s.mu.RLock()
-	defer s.mu.RUnlock()
+	if s.useDB() {
+		s.mu.Lock()
+		defer s.mu.Unlock()
+		ctx, cancel := settingsStorageContext()
+		defer cancel()
+		if err := s.ensurePGTargetLocked(ctx, userID); err != nil && !errors.Is(err, datastore.ErrUserSettingsConflict) {
+			return models.UserSettings{}, err
+		}
+	} else {
+		s.mu.RLock()
+		defer s.mu.RUnlock()
+	}
 
+	if err := s.pgTargetErrorLocked(userID); err != nil {
+		return models.UserSettings{}, err
+	}
+	if s.useDB() {
+		defaults = cloneSettingsValue(defaults)
+	}
 	if settings, ok := s.settings[userID]; ok {
+		if s.useDB() {
+			settings = cloneSettingsValue(settings)
+		}
 		var base config.RecommendationSettings
 		if defaults.Recommendations != nil {
 			base = *defaults.Recommendations
@@ -534,12 +572,18 @@ func (s *Service) GetWithDefaults(userID string, defaults models.UserSettings) (
 		} else if *settings.HomeShelves.HomeHeroScale > 1.0 {
 			settings.HomeShelves.HomeHeroScale = models.FloatPtr(1.0)
 		}
+		if s.useDB() {
+			settings = cloneSettingsValue(settings)
+		}
 		return settings, nil
 	}
 
 	// Sanitize defaults too
 	defaults.Playback.PreferredAudioLanguage = defaultPreferredAudioLanguage(defaults.Playback.PreferredAudioLanguage)
 	defaults.Playback.PreferredSubtitleLanguage = sanitizeLanguageCode(defaults.Playback.PreferredSubtitleLanguage)
+	if s.useDB() {
+		defaults = cloneSettingsValue(defaults)
+	}
 	return defaults, nil
 }
 
@@ -708,6 +752,13 @@ func (s *Service) Update(userID string, settings models.UserSettings) error {
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if s.useDB() {
+		ctx, cancel := settingsStorageContext()
+		defer cancel()
+		if err := s.ensurePGTargetLocked(ctx, userID); err != nil {
+			return err
+		}
+	}
 
 	// If settings are empty, delete the entry instead of saving
 	// General settings PUTs (including older clients) cannot replace sports data.
@@ -733,6 +784,11 @@ func (s *Service) Update(userID string, settings models.UserSettings) error {
 		s.settings[userID] = settings
 	}
 
+	if s.useDB() {
+		ctx, cancel := settingsStorageContext()
+		defer cancel()
+		return s.persistPGLocked(ctx, []string{userID}, nil)
+	}
 	return s.saveLocked()
 }
 
@@ -997,6 +1053,9 @@ func (s *Service) Delete(userID string) error {
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if s.useDB() {
+		return s.deletePGLocked(userID)
+	}
 
 	if _, exists := s.settings[userID]; !exists {
 		return nil
@@ -1039,60 +1098,7 @@ func (s *Service) load() error {
 	defer s.mu.Unlock()
 
 	if s.useDB() {
-		if cleared, err := s.store.UserSettings().ClearCleanPostersOverrides(context.Background()); err != nil {
-			log.Printf("[user-settings] warning: failed to clear clean posters overrides: %v", err)
-		} else if cleared > 0 {
-			log.Printf("[user-settings] cleared clean posters overrides for %d users", cleared)
-		}
-
-		settings, err := s.store.UserSettings().List(context.Background())
-		if err != nil {
-			return fmt.Errorf("load user settings from db: %w", err)
-		}
-		s.settings = settings
-		if s.settings == nil {
-			s.settings = make(map[string]models.UserSettings)
-		}
-
-		// Apply migrations to DB-loaded settings
-		needsSave := false
-		for userID, us := range s.settings {
-			changed := false
-			if !us.Display.NavigationTabVisibilityIncludesSports {
-				if tabs, tabsChanged := models.AddMissingSportsNavigationTab(us.Display.NavigationTabVisibility); tabsChanged {
-					us.Display.NavigationTabVisibility = tabs
-				}
-				us.Display.NavigationTabVisibilityIncludesSports = true
-				changed = true
-			}
-			if reconcileProfileHomeShelves(&us) {
-				changed = true
-			}
-			for i := range us.HomeShelves.Shelves {
-				id := us.HomeShelves.Shelves[i].ID
-				if (id == "trending-movies" || id == "trending-tv") && us.HomeShelves.Shelves[i].HideUnreleased {
-					us.HomeShelves.Shelves[i].HideUnreleased = false
-					changed = true
-				}
-			}
-			if changed {
-				s.settings[userID] = us
-				needsSave = true
-			}
-		}
-
-		for userID, us := range s.settings {
-			log.Printf("[user-settings] load: user=%q subMode=%q audioLang=%q subLang=%q",
-				userID, us.Playback.PreferredSubtitleMode, us.Playback.PreferredAudioLanguage, us.Playback.PreferredSubtitleLanguage)
-		}
-
-		if needsSave {
-			log.Printf("[user-settings] persisting migrated user settings to db")
-			if err := s.syncToDB(); err != nil {
-				log.Printf("[user-settings] warning: failed to persist migration: %v", err)
-			}
-		}
-		return nil
+		return s.loadPGLocked()
 	}
 
 	// Read the whole file and release it before a migration rewrites it:
@@ -1252,48 +1258,11 @@ func (s *Service) saveLocked() error {
 	return nil
 }
 
-// syncToDB writes the full in-memory user settings state to PostgreSQL.
+// syncToDB writes only changed, originally observed PostgreSQL targets.
 func (s *Service) syncToDB() error {
-	ctx := context.Background()
-	return s.store.WithTx(ctx, func(tx *datastore.Tx) error {
-		// Get existing DB state to detect deletes
-		existing, err := tx.UserSettings().List(ctx)
-		if err != nil {
-			return err
-		}
-		dbIDs := make(map[string]bool, len(existing))
-		for id := range existing {
-			dbIDs[id] = true
-		}
-		// A deleted profile's row cascades away in the DB but stays in memory; upserting it
-		// would fail the users foreign key and with it every later save, so it is dropped.
-		users, err := tx.Users().List(ctx)
-		if err != nil {
-			return err
-		}
-		userIDs := make(map[string]bool, len(users))
-		for _, user := range users {
-			userIDs[user.ID] = true
-		}
-		for _, userID := range dropOrphanedSettings(s.settings, userIDs) {
-			log.Printf("[user-settings] dropping settings for deleted profile %q", userID)
-		}
-		// Upsert all in-memory settings
-		for userID, us := range s.settings {
-			settings := us
-			if err := tx.UserSettings().Upsert(ctx, userID, &settings); err != nil {
-				return err
-			}
-			delete(dbIDs, userID)
-		}
-		// Delete settings removed from memory
-		for id := range dbIDs {
-			if err := tx.UserSettings().Delete(ctx, id); err != nil {
-				return err
-			}
-		}
-		return nil
-	})
+	ctx, cancel := settingsStorageContext()
+	defer cancel()
+	return s.persistPGLocked(ctx, nil, nil)
 }
 
 // dropOrphanedSettings removes settings whose profile no longer exists and

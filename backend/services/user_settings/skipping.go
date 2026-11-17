@@ -22,6 +22,13 @@ func (s *Service) UpdateSkipping(userID string, patch SkipPreferences) error {
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if s.useDB() {
+		ctx, cancel := settingsStorageContext()
+		defer cancel()
+		if err := s.ensurePGTargetLocked(ctx, userID); err != nil {
+			return err
+		}
+	}
 	previous, existed := s.settings[userID]
 	updated := previous
 	if patch.NextEpisode != nil {
@@ -37,10 +44,18 @@ func (s *Service) UpdateSkipping(userID string, patch SkipPreferences) error {
 		updated.Playback.CreditsAutoSkip = models.BoolPtr(*patch.Credits)
 	}
 	s.settings[userID] = updated
-	if err := s.saveLocked(); err != nil {
-		if existed {
+	var err error
+	if s.useDB() {
+		ctx, cancel := settingsStorageContext()
+		defer cancel()
+		err = s.persistPGLocked(ctx, []string{userID}, nil)
+	} else {
+		err = s.saveLocked()
+	}
+	if err != nil {
+		if !s.useDB() && existed {
 			s.settings[userID] = previous
-		} else {
+		} else if !s.useDB() {
 			delete(s.settings, userID)
 		}
 		return err
