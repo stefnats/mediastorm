@@ -135,5 +135,25 @@
     window.parentListRemovalFetch = (input, options, isCurrent) => fetchWithConfirmation(input, options, isCurrent, 'listRemoval');
     window.parentListAdditionFetch = (input, options, isCurrent) => fetchWithConfirmation(input, options, isCurrent, 'listAddition');
     window.parentRatingFetch = (input, options, isCurrent) => fetchWithConfirmation(input, options, isCurrent, 'ratingPair');
+    // This is an explicit read/adopt operation, not a parental mutation. It
+    // never enters either password promise or retries any response.
+    window.profileRecoveryFetch = async (input, options, isCurrent) => {
+        const request = new Request(input, options);
+        const url = new URL(request.url);
+        const generation = pageGeneration;
+        if (typeof isCurrent !== 'function' || request.method !== 'POST' || request.body !== null ||
+            url.origin !== window.location.origin || url.username || url.password || url.search || url.hash ||
+            !/\/api\/users\/[^/]+\/state\/reload$/.test(url.pathname) ||
+            request.headers.has(passwordHeader) || request.headers.has(intentHeader)) {
+            throw new TypeError('Invalid profile recovery request.');
+        }
+        const current = () => generation === pageGeneration && !request.signal.aborted && isCurrent();
+        if (!current()) throw abortError();
+        const response = await originalFetch(new Request(request, {
+            credentials: 'same-origin', mode: 'same-origin', redirect: 'error', cache: 'no-store'
+        }));
+        if (!current()) throw abortError();
+        return response;
+    };
     window.addEventListener?.('pagehide', () => { pageGeneration++; intentPrompt?.cancel(); });
 })();

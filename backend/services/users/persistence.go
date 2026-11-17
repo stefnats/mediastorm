@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"reflect"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -744,4 +745,124 @@ func (s *Service) InstallStorageRecovery(ctx context.Context, ticket *StorageRec
 	status.TargetPresent = present
 	status.PendingUncertainty = s.persistence.uncertain
 	return status, nil
+}
+
+// StorageRecoveryLease owns this service's mutex until Close. The coordinator
+// acquires Users before UserSettings and closes in reverse order. It exposes no
+// mutex, and ordinary recovery Install cannot bypass its reserved datastore slot.
+type StorageRecoveryLease struct{ state *storageRecoveryLeaseState }
+type storageRecoveryLeaseState struct {
+	mu                         sync.Mutex
+	self                       *StorageRecoveryLease
+	service                    *Service
+	ticket                     *StorageRecoveryTicket
+	proof                      *datastore.ProfileRecoveryLease
+	current, confirmed         models.User
+	revision                   datastore.UserRevision
+	present, installed, closed bool
+	status                     datastore.ProfileRecoveryStatus
+}
+
+func (StorageRecoveryLease) MarshalJSON() ([]byte, error) { return []byte("null"), nil }
+func (StorageRecoveryLease) Format(f fmt.State, _ rune) {
+	_, _ = f.Write([]byte("StorageRecoveryLease(opaque)"))
+}
+func (s *Service) AcquireStorageRecoveryLease(ctx context.Context, ticket *StorageRecoveryTicket, snapshot *datastore.ProfileRecoverySnapshot) (*StorageRecoveryLease, error) {
+	if s == nil || !s.useDB() {
+		return nil, datastore.ErrProfileRecoveryUnavailable
+	}
+	s.mu.Lock()
+	if err := s.validateStorageRecoveryLocked(ctx, ticket, snapshot); err != nil {
+		s.mu.Unlock()
+		return nil, err
+	}
+	proof, record, present, err := s.store.BeginUsersRecoveryLease(ctx, ticket.state.slot, snapshot)
+	if err != nil {
+		s.mu.Unlock()
+		return nil, err
+	}
+	lease := &StorageRecoveryLease{}
+	lease.state = &storageRecoveryLeaseState{self: lease, service: s, ticket: ticket, proof: proof, current: cloneUser(record.User), confirmed: cloneUser(record.User), revision: record.Revision, present: present}
+	return lease, nil
+}
+func (l *StorageRecoveryLease) PairLease() *datastore.ProfileRecoveryLease {
+	if l == nil || l.state == nil || l.state.self != l {
+		return nil
+	}
+	return l.state.proof
+}
+
+// Profile is a private server-side prepared value. HTTP uses an explicit safe
+// DTO and must never serialize this full model, its credentials or revision.
+func (l *StorageRecoveryLease) Profile() (models.User, bool, error) {
+	if l == nil || l.state == nil {
+		return models.User{}, false, datastore.ErrProfileRecoveryChanged
+	}
+	st := l.state
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	if st.self != l || st.closed {
+		return models.User{}, false, datastore.ErrProfileRecoveryChanged
+	}
+	return cloneUser(st.current), st.present, nil
+}
+func (st *storageRecoveryLeaseState) completeLocked() datastore.ProfileRecoveryStatus {
+	if st.installed {
+		return st.status
+	}
+	if !st.proof.Paired() {
+		return datastore.ProfileRecoveryStatus{PendingUncertainty: true}
+	}
+	s := st.service
+	target := st.ticket.state.target
+	if st.present {
+		s.users[target] = st.current
+		s.persistence.confirmed[target] = st.confirmed
+	} else {
+		delete(s.users, target)
+		delete(s.persistence.confirmed, target)
+	}
+	s.persistence.revisions[target] = st.revision
+	if st.ticket.state.marker != nil {
+		delete(s.persistence.unknownTargets, target)
+	}
+	if !s.persistence.unknownUnscoped && s.persistence.unknownTargets != nil && len(s.persistence.unknownTargets) == 0 {
+		s.persistence.uncertain = false
+	}
+	st.status = datastore.ProfileRecoveryStatus{TargetPresent: st.present, PendingUncertainty: s.persistence.uncertain}
+	st.ticket.state.closed.Store(true)
+	st.installed = true
+	return st.status
+}
+
+// Complete has no context check, clone, query or fallible work after PairTake.
+func (l *StorageRecoveryLease) Complete() datastore.ProfileRecoveryStatus {
+	if l == nil || l.state == nil {
+		return datastore.ProfileRecoveryStatus{PendingUncertainty: true}
+	}
+	st := l.state
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	if st.self != l || st.closed && !st.installed {
+		return datastore.ProfileRecoveryStatus{PendingUncertainty: true}
+	}
+	return st.completeLocked()
+}
+func (l *StorageRecoveryLease) Close() {
+	if l == nil || l.state == nil {
+		return
+	}
+	st := l.state
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	if st.self != l || st.closed {
+		return
+	}
+	// Pair consumption is irreversible local bookkeeping. Even late cancellation
+	// or ordinary unwinding completes this owner's prepared ACK before unlocking.
+	if st.proof.Retire() {
+		st.completeLocked()
+	}
+	st.closed = true
+	st.service.mu.Unlock()
 }

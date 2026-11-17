@@ -308,6 +308,7 @@ type ProfileRecoverySlot struct {
 	self         *ProfileRecoverySlot
 	kind         uint8
 	used, closed bool
+	lease        *ProfileRecoveryLease
 }
 type ProfileRecoveryStatus struct {
 	TargetPresent      bool
@@ -323,6 +324,7 @@ type profileRecoveryReadState struct {
 	read, closed bool
 	slots        [2]*ProfileRecoverySlot
 	snapshot     *ProfileRecoverySnapshot
+	leases       [2]*ProfileRecoveryLease
 }
 
 func (ProfileRecoveryRead) MarshalJSON() ([]byte, error)     { return []byte("null"), nil }
@@ -540,10 +542,140 @@ func checkRecoverySlotLocked(ds *DataStore, ctx context.Context, slot *ProfileRe
 		return ErrProfileRecoveryChanged
 	}
 	s := slot.state
-	if s.ds != ds || s.ctx != ctx || s.snapshot != value || !s.read || slot.used || slot.closed || slot.kind > 1 || s.slots[slot.kind] != slot {
+	if s.ds != ds || s.ctx != ctx || s.snapshot != value || !s.read || slot.used || slot.closed || slot.lease != nil || slot.kind > 1 || s.slots[slot.kind] != slot {
 		return ErrProfileRecoveryChanged
 	}
 	return recoveryContextError(s)
+}
+
+// ProfileRecoveryLease proves only preparation and pair consumption for a
+// cache owner. Paired is historical completion state, never an authorization.
+type ProfileRecoveryLease struct {
+	state          *profileRecoveryReadState
+	self           *ProfileRecoveryLease
+	slot           *ProfileRecoverySlot
+	closed, paired bool
+}
+
+func (ProfileRecoveryLease) MarshalJSON() ([]byte, error) { return []byte("null"), nil }
+func (ProfileRecoveryLease) Format(f fmt.State, _ rune) {
+	_, _ = f.Write([]byte("ProfileRecoveryLease(opaque)"))
+}
+
+// Retire closes before-pair consumption and reports an already consumed pair
+// under the same state lock. Owners cannot miss a concurrent consumption while
+// deciding whether Close must finish their prepared cache bookkeeping.
+func (l *ProfileRecoveryLease) Retire() bool {
+	if l == nil || l.state == nil {
+		return false
+	}
+	s := l.state
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if l.self != l {
+		return false
+	}
+	l.closed = true
+	return l.paired
+}
+func (l *ProfileRecoveryLease) Close() { _ = l.Retire() }
+
+func (l *ProfileRecoveryLease) Paired() bool {
+	if l == nil || l.state == nil {
+		return false
+	}
+	s := l.state
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	// Once consumed, close/cancellation must not prevent the already prepared
+	// cache bookkeeping from completing under its owners' original locks.
+	return l.self == l && l.slot != nil && l.slot.kind < 2 && s.leases[l.slot.kind] == l && l.paired
+}
+func (ds *DataStore) BeginUsersRecoveryLease(ctx context.Context, slot *ProfileRecoverySlot, value *ProfileRecoverySnapshot) (*ProfileRecoveryLease, UserWriteRecord, bool, error) {
+	var empty UserWriteRecord
+	if slot == nil || slot.state == nil {
+		return nil, empty, false, ErrProfileRecoveryChanged
+	}
+	s := slot.state
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if err := checkRecoverySlotLocked(ds, ctx, slot, value); err != nil {
+		return nil, empty, false, err
+	}
+	if slot.kind != 0 || s.leases[0] != nil || s.leases[1] != nil {
+		return nil, empty, false, ErrProfileRecoveryChanged
+	}
+	record := value.user
+	if record.User.KidsAllowedLists != nil {
+		record.User.KidsAllowedLists = append([]string{}, record.User.KidsAllowedLists...)
+	}
+	if err := recoveryContextError(s); err != nil {
+		return nil, empty, false, err
+	}
+	lease := &ProfileRecoveryLease{state: s, slot: slot}
+	lease.self = lease
+	s.leases[0] = lease
+	slot.lease = lease
+	return lease, record, value.present, nil
+}
+func (ds *DataStore) BeginUserSettingsRecoveryLease(ctx context.Context, slot *ProfileRecoverySlot, value *ProfileRecoverySnapshot) (*ProfileRecoveryLease, UserSettingsRecord, bool, error) {
+	var empty UserSettingsRecord
+	if slot == nil || slot.state == nil {
+		return nil, empty, false, ErrProfileRecoveryChanged
+	}
+	s := slot.state
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if err := checkRecoverySlotLocked(ds, ctx, slot, value); err != nil {
+		return nil, empty, false, err
+	}
+	if slot.kind != 1 || s.leases[1] != nil || s.leases[0] == nil || s.leases[0].closed || s.leases[0].paired {
+		return nil, empty, false, ErrProfileRecoveryChanged
+	}
+	record := value.settings
+	if record.Settings != nil {
+		copy, err := cloneSettings(*record.Settings)
+		if err != nil {
+			return nil, empty, false, ErrProfileRecoveryUnavailable
+		}
+		record.Settings = &copy
+	}
+	if err := recoveryContextError(s); err != nil {
+		return nil, empty, false, err
+	}
+	lease := &ProfileRecoveryLease{state: s, slot: slot}
+	lease.self = lease
+	s.leases[1] = lease
+	slot.lease = lease
+	return lease, record, value.present, nil
+}
+
+// TakeProfileRecoveryPair is the sole consumption point. Both cache owners
+// already hold their locks and prepared all fallible copies. No individual
+// slot can be consumed after leasing. Later cancellation cannot undo this point.
+func (ds *DataStore) TakeProfileRecoveryPair(ctx context.Context, users, settings *ProfileRecoveryLease, value *ProfileRecoverySnapshot) error {
+	if users == nil || settings == nil || users.state == nil || users.state != settings.state {
+		return ErrProfileRecoveryChanged
+	}
+	s := users.state
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.ds != ds || s.ctx != ctx || value == nil || value.self != value || value.state != s || s.snapshot != value {
+		return ErrProfileRecoveryChanged
+	}
+	for index, lease := range []*ProfileRecoveryLease{users, settings} {
+		if lease.self != lease || lease.closed || lease.paired || s.leases[index] != lease || lease.slot == nil || lease.slot.kind != uint8(index) || s.slots[index] != lease.slot || lease.slot.lease != lease || lease.slot.closed || lease.slot.used {
+			return ErrProfileRecoveryChanged
+		}
+	}
+	if err := recoveryContextError(s); err != nil {
+		return err
+	}
+	users.slot.used = true
+	settings.slot.used = true
+	users.paired = true
+	settings.paired = true
+	return nil
 }
 func (ds *DataStore) ValidateProfileRecoverySlot(ctx context.Context, slot *ProfileRecoverySlot, value *ProfileRecoverySnapshot) error {
 	if slot == nil || slot.state == nil {
