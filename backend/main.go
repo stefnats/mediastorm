@@ -2937,4 +2937,6 @@ func registerUsenetFallbackRoutes(r *mux.Router, admin *handlers.AdminUIHandler,
 	r.HandleFunc("/admin/api/usenet/fallback/{queueID}", admin.RequireAuth(fallback.Get)).Methods(http.MethodGet)
 	r.HandleFunc("/admin/api/usenet/fallback/{queueID}/refresh", admin.RequireAuth(recordingWebOrigin(fallback.Refresh))).Methods(http.MethodPost)
 	r.HandleFunc("/admin/api/usenet/fallback/{queueID}/import-preview", admin.RequireAuth(recordingWebOrigin(fallback.Preview))).Methods(http.MethodPost)
+	r.HandleFunc("/admin/api/usenet/fallback/{queueID}/stage", admin.RequireAuth(fallback.GetManagedCopy)).Methods(http.MethodGet)
+	r.HandleFunc("/admin/api/usenet/fallback/{queueID}/stage", admin.RequireAuth(recordingWebOrigin(fallback.CopyFiles))).Methods(http.MethodPost)
 }

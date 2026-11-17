@@ -588,6 +588,9 @@ type ImportSettings struct {
 
 // SABnzbdSettings defines SABnzbd fallback configuration
 type SABnzbdSettings struct {
+	// Explicit managed-copy target and logical byte budget. Empty/zero disables copies.
+	ImportStageTargetRoot string `json:"importStageTargetRoot,omitempty"`
+	ImportStageMaxBytes   int64  `json:"importStageMaxBytes,omitempty"`
 	// Explicit private remote-to-local completed-directory mapping. Empty disables preview.
 	ImportPreviewRemoteRoot string `json:"importPreviewRemoteRoot,omitempty"`
 	ImportPreviewLocalRoot  string `json:"importPreviewLocalRoot,omitempty"`

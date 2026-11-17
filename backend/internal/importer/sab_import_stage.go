@@ -7,8 +7,10 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"novastream/config"
 	"os"
 	"path"
+	"reflect"
 	"strings"
 	"syscall"
 	"time"
@@ -18,7 +20,7 @@ import (
 
 var ErrSABImportStageUnavailable = errors.New("managed staging unavailable")
 
-// This internal, uninstalled seam has no HTTP/configuration/worker consumer.
+// Only an explicit authorized master request may enter managed copying.
 // Only a trusted server supplies the private target policy and the original
 // current-master/session authorization callback. A preview DTO is not authority.
 type SABImportStagePolicy struct {
@@ -31,6 +33,7 @@ type SABImportStageStatus struct {
 	State         string
 	ObservedBytes int64
 	Files         []database.SABStageFile
+	ObservedAt    time.Time
 }
 
 func stageHash(value string) string {
@@ -147,7 +150,11 @@ func (s *Service) stageSABImportWithRepository(ctx context.Context, id int64, so
 	if e != nil {
 		return fail()
 	}
-	early.Close()
+	defer func() {
+		if early != nil {
+			early.Close()
+		}
+	}()
 	namespace, e := stageNamespace(rootInfo)
 	if e != nil || ctx.Err() != nil || authorize(ctx) != nil {
 		return fail()
@@ -165,8 +172,54 @@ func (s *Service) stageSABImportWithRepository(ctx context.Context, id int64, so
 		return fail()
 	}
 	if prior != nil {
+		check := func() error {
+			if ctx.Err() != nil || authorize(ctx) != nil {
+				return ErrSABImportStageUnavailable
+			}
+			p, e := stageTarget(ctx, target)
+			if e != nil || p != policy {
+				return ErrSABImportStageUnavailable
+			}
+			current, e := sabPreviewConfig(ctx, source)
+			if e != nil || current != mapping {
+				return ErrSABImportStageUnavailable
+			}
+			_, _, r, e := s.fallbackItem(ctx, id)
+			if e != nil || r == nil || !reflect.DeepEqual(r, receipt) {
+				return ErrSABImportStageUnavailable
+			}
+			named, e := os.Lstat(policy.TargetRoot)
+			if e != nil || !named.IsDir() || named.Mode() != rootInfo.Mode() || !os.SameFile(rootInfo, named) {
+				return ErrSABImportStageUnavailable
+			}
+			held, e := early.Stat()
+			if e != nil || !os.SameFile(rootInfo, held) || ctx.Err() != nil || authorize(ctx) != nil {
+				return ErrSABImportStageUnavailable
+			}
+			return nil
+		}
+		if check() != nil {
+			return fail()
+		}
+		binder, ok := repo.(interface {
+			BindObservedPath(context.Context, string, string) error
+		})
+		if !ok {
+			return fail()
+		}
+		if e := binder.BindObservedPath(ctx, stageHash(policy.TargetRoot), namespace); e != nil {
+			if errors.Is(e, database.ErrSABStageOutcomeUnknown) {
+				return SABImportStageStatus{QueueID: id, State: "outcome_unknown"}, e
+			}
+			return fail()
+		}
+		if check() != nil {
+			return fail()
+		}
 		return SABImportStageStatus{}, database.ErrSABStageExists
 	}
+	early.Close()
+	early = nil
 	var claimed *database.SABStageRecord
 	var result SABImportStageStatus
 	_, e = s.withSABImportInventory(ctx, id, source, authorize, 5*time.Minute, func(work context.Context, inventory *sabHeldInventory) (SABImportPreview, error) {
@@ -314,7 +367,7 @@ func (s *Service) stageSABImportWithRepository(ctx context.Context, id int64, so
 		if checkDirectory() != nil || inventory.check() != nil {
 			return abort()
 		}
-		result = SABImportStageStatus{id, "staged_copy", inventory.result.ObservedBytes, files}
+		result = SABImportStageStatus{QueueID: id, State: "staged_copy", ObservedBytes: inventory.result.ObservedBytes, Files: files, ObservedAt: time.Now().UTC()}
 		return inventory.result, nil
 	})
 	if e != nil {
@@ -430,4 +483,122 @@ func stageCopyWithWriter(ctx context.Context, directory *os.File, index int, sou
 		return fail()
 	}
 	return &sabCopiedFile{database.SABStageFile{Ordinal: index + 1, Bytes: written, SHA256: hex.EncodeToString(digest.Sum(nil))}, named, info}, nil
+}
+
+// SABManagedCopyView is a saved observation, never a current-file/playback proof.
+// Unknown namespaces omit counts: an alias can already contain charged work.
+type SABManagedCopyView struct {
+	QueueID      int64      `json:"queueId"`
+	State        string     `json:"state"`
+	Configured   bool       `json:"configured"`
+	Reason       string     `json:"reason,omitempty"`
+	ChargedBytes *int64     `json:"chargedBytes,omitempty"`
+	FileCount    *int       `json:"fileCount,omitempty"`
+	ObservedAt   *time.Time `json:"observedAt,omitempty"`
+}
+
+func (s *Service) GetSABManagedCopy(ctx context.Context, id int64, source SABImportPreviewSettings, target SABImportStageSettings, authorize func(context.Context) error) (SABManagedCopyView, error) {
+	fail := func() (SABManagedCopyView, error) { return SABManagedCopyView{}, ErrSABImportStageUnavailable }
+	if s == nil || s.database == nil || s.database.Connection() == nil || ctx == nil || ctx.Err() != nil || authorize == nil || source == nil || target == nil || id <= 0 {
+		return fail()
+	}
+	ctx, stop := context.WithTimeout(ctx, 5*time.Second)
+	defer stop()
+	if authorize(ctx) != nil {
+		return fail()
+	}
+	p, e := target(ctx)
+	if e != nil || ctx.Err() != nil || authorize(ctx) != nil {
+		return fail()
+	}
+	cfg, e := source(ctx)
+	if e != nil || ctx.Err() != nil || authorize(ctx) != nil {
+		return fail()
+	}
+	view := SABManagedCopyView{QueueID: id, State: "unknown", Reason: "not_configured"}
+	_, _, receipt, e := s.fallbackItem(ctx, id)
+	if e != nil {
+		return SABManagedCopyView{}, e
+	}
+	if receipt == nil {
+		return fail()
+	}
+	same := func() bool {
+		if ctx.Err() != nil || authorize(ctx) != nil {
+			return false
+		}
+		now, e := target(ctx)
+		if e != nil || now != p {
+			return false
+		}
+		current, e := source(ctx)
+		if e != nil || !reflect.DeepEqual(current, cfg) || ctx.Err() != nil || authorize(ctx) != nil {
+			return false
+		}
+		// This last receipt read follows all caller callbacks; a callback returning
+		// from blocked authority/config work cannot publish a different attempt.
+		_, _, currentReceipt, receiptError := s.fallbackItem(ctx, id)
+		return receiptError == nil && currentReceipt != nil && reflect.DeepEqual(currentReceipt, receipt) && ctx.Err() == nil
+	}
+	// Syntax/configuration checks only: no Stat, Root.Open, directory enumeration,
+	// file payload, engine construction, status HTTP or provenance renewal.
+	_, targetError := stageTarget(ctx, func(context.Context) (SABImportStagePolicy, error) { return p, nil })
+	mapping, sourceError := sabPreviewConfig(ctx, func(context.Context) (config.SABnzbdSettings, error) { return cfg, nil })
+	if targetError != nil || sourceError != nil {
+		if !same() {
+			return fail()
+		}
+		return view, nil
+	}
+	view.Configured = true
+	if mapping.source != receipt.Source {
+		view.Reason = "configuration_changed"
+		if !same() {
+			return fail()
+		}
+		return view, nil
+	}
+	repo := database.NewSABStageRepository(s.database.Connection())
+	record, known, e := repo.FindAtConfiguredPath(ctx, stageHash(p.TargetRoot), id, receipt.Attempt, receipt.Source)
+	if e != nil || !same() {
+		return fail()
+	}
+	if !known {
+		view.Reason = "namespace_unobserved"
+		return view, nil
+	}
+	if record == nil {
+		zero := int64(0)
+		count := 0
+		view.State = "not_recorded"
+		view.Reason = ""
+		view.ChargedBytes = &zero
+		view.FileCount = &count
+		return view, nil
+	}
+	if record.QueueID != id || record.ExpectedBytes < 0 || record.ExpectedBytes > sabPreviewMaxBytes || record.FileCount < 1 || record.FileCount > sabPreviewMaxEntries {
+		return fail()
+	}
+	at, e := time.Parse(time.RFC3339Nano, record.UpdatedAt)
+	if e != nil || at.IsZero() || at.After(time.Now()) {
+		return fail()
+	}
+	at = at.UTC()
+	switch record.State {
+	case "copied":
+		view.State = "copy_recorded"
+		view.Reason = ""
+	case "pending", "failed_partial":
+		view.State = "reconciliation_required"
+		view.Reason = "attempt_unconfirmed"
+	default:
+		return fail()
+	}
+	view.ChargedBytes = &record.ExpectedBytes
+	view.FileCount = &record.FileCount
+	view.ObservedAt = &at
+	if !same() {
+		return fail()
+	}
+	return view, nil
 }

@@ -257,6 +257,79 @@ paths:
         '409': {description: Original backend or credentials changed.}
         '429': {description: Shared operation or receipt refresh busy.}
         '503': {description: Mapping/completion/complete local inventory unavailable.}
+  /admin/api/usenet/fallback/{queueID}/stage:
+    get:
+      operationId: getSABManagedCopy
+      summary: View a saved local copy observation
+      description: |
+        Actual current full-session master authority is checked before and after
+        DB/settings reads, with the original claim/account/session/request expiry
+        and at most five seconds. No SAB status query, media Stat/Open, payload
+        read, copy, provider/metadata warm, worker, import or playback work occurs.
+        A known saved path binding is historical, not a fresh filesystem proof.
+        An unobserved configured path returns unknown/namespace_unobserved without
+        zero counts: an alias may already share an existing charged namespace.
+        Pending and failed attempts require later explicit reconciliation; there
+        is no automatic retry, cleanup, charge release or ready-to-play state.
+      parameters:
+        - {$ref: '#/components/parameters/SABFallbackQueueID'}
+      responses:
+        '200':
+          description: Safe saved observation, not current file or free-space proof.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/SABManagedCopy'}
+        '400': {description: Noncanonical ID or unexpected query/body.}
+        '403': {description: Original full master/session authority missing or changed.}
+        '404': {description: Original queue item missing.}
+        '503': {description: Settings/SQL/receipt/observation unavailable.}
+    post:
+      operationId: copySABManagedFiles
+      summary: Explicitly copy completed files to configured managed storage
+      description: |
+        Empty body and no query. Existing same-origin cookie/Sec-Fetch wrapper
+        and actual current full-session/master reader bind the original request,
+        session, account and config. At most five minutes, without detach or a
+        background worker. Current server-only sabnzbd.importStageTargetRoot and
+        positive sabnzbd.importStageMaxBytes are required; empty/zero defaults off.
+        The root is redacted on settings/HTML readback and preserved on mask save.
+        No client path, namespace, quota ID, ordinal or preview result is a grant.
+
+        The completed original SAB receipt/backend/credentials are rechecked.
+        Fresh held regular source FDs copy fixed bytes to exclusively created
+        opaque destination names with fsync and exact-byte hashes. Source/target
+        roots must be physically separate. Root/file identities, original
+        authority/config/receipt and fixed sizes are guarded throughout the copy.
+        Two shared operations and a 1 MiB buffer per copy remain owned until real
+        IO and FD cleanup return. Context gates do not promise syscall interruption.
+
+        Logical quota counts all pending, failed-partial, copied and uncertain
+        attempts until a later explicit verified reconciliation. It is not a
+        physical reservation or one global quota across separate configured roots.
+        Existing attempts never copy again, including after unknown/restart.
+        An existing-attempt explicit POST may bind an actually observed alias
+        path to its held root namespace without copying or changing any charge.
+        It never overwrites an old path binding; unknown commits are not retried.
+
+        An interrupted/error response may follow partial or completed file/SQL
+        changes. View saved copy to inspect the recorded outcome. Download/copy
+        completion is not a catalogue match, imported/stream-ready/file/age grant.
+        No library scan, extraction, source deletion, Arr, polling, automatic
+        recovery, cleanup or playback is added.
+      parameters:
+        - {$ref: '#/components/parameters/SABFallbackQueueID'}
+      responses:
+        '200':
+          description: Safe recorded copy observation, not permission to play.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/SABManagedCopy'}
+        '400': {description: Noncanonical ID or unexpected query/body.}
+        '403': {description: Original full master/session/origin authority missing or changed.}
+        '404': {description: Original queue item missing.}
+        '409': {description: "Existing attempt, logical budget exceeded or changed source."}
+        '429': {description: Shared bounded operation is busy.}
+        '503': {description: Disabled/unavailable or uncertain copy outcome; never auto-retry.}
   /api/library/libraries/{libraryID}/groups:
     get:
       operationId: listLibraryGroups
@@ -3446,6 +3519,58 @@ components:
           type: string
           description: Opaque observation identifier, never a file/access capability.
         observedBytes: {type: integer, format: int64, minimum: 1}
+
+    SABManagedCopy:
+      type: object
+      additionalProperties: false
+      required: [queueId, state, configured]
+      properties:
+        queueId: {type: integer, format: int64, minimum: 1}
+        state: {type: string, enum: [unknown, not_recorded, copy_recorded, reconciliation_required]}
+        configured:
+          type: boolean
+          description: Syntactic server configuration only, never current root/file proof.
+        reason: {type: string, enum: [not_configured, namespace_unobserved, configuration_changed, attempt_unconfirmed]}
+        chargedBytes:
+          type: integer
+          format: int64
+          minimum: 0
+          maximum: 1099511627776
+          description: This attempt's full logical charge, not actual occupied/free bytes.
+        fileCount: {type: integer, minimum: 0, maximum: 128}
+        observedAt: {type: string, format: date-time}
+      oneOf:
+        - required: [reason]
+          properties:
+            state: {enum: [unknown]}
+            reason: {enum: [not_configured, namespace_unobserved, configuration_changed]}
+          not:
+            anyOf:
+              - required: [chargedBytes]
+              - required: [fileCount]
+              - required: [observedAt]
+        - required: [chargedBytes, fileCount]
+          properties:
+            state: {enum: [not_recorded]}
+            configured: {enum: [true]}
+            chargedBytes: {enum: [0]}
+            fileCount: {enum: [0]}
+          not:
+            anyOf:
+              - required: [reason]
+              - required: [observedAt]
+        - required: [chargedBytes, fileCount, observedAt]
+          properties:
+            state: {enum: [copy_recorded]}
+            configured: {enum: [true]}
+            fileCount: {minimum: 1}
+          not: {required: [reason]}
+        - required: [chargedBytes, fileCount, observedAt, reason]
+          properties:
+            state: {enum: [reconciliation_required]}
+            configured: {enum: [true]}
+            fileCount: {minimum: 1}
+            reason: {enum: [attempt_unconfirmed]}
 
     SABImportPreview:
       type: object

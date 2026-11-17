@@ -30,6 +30,7 @@ type SABStageRecord struct {
 	ExpectedBytes int64
 	FileCount     int
 	State         string
+	UpdatedAt     string
 }
 type SABStageFile struct {
 	Ordinal int    `json:"ordinal"`
@@ -79,7 +80,7 @@ func (r *SABStageRepository) Find(ctx context.Context, queueID int64, attempt, s
 		return nil, ErrSABStageUnavailable
 	}
 	var value SABStageRecord
-	e := r.db.QueryRowContext(ctx, `SELECT operation_id,queue_id,expected_bytes,file_count,state FROM sab_import_stages WHERE queue_id=? AND receipt_attempt=? AND source_hash=? AND namespace=?`, queueID, attempt, source, namespace).Scan(&value.OperationID, &value.QueueID, &value.ExpectedBytes, &value.FileCount, &value.State)
+	e := r.db.QueryRowContext(ctx, `SELECT operation_id,queue_id,expected_bytes,file_count,state,updated_at FROM sab_import_stages WHERE queue_id=? AND receipt_attempt=? AND source_hash=? AND namespace=?`, queueID, attempt, source, namespace).Scan(&value.OperationID, &value.QueueID, &value.ExpectedBytes, &value.FileCount, &value.State, &value.UpdatedAt)
 	if errors.Is(e, sql.ErrNoRows) {
 		return nil, nil
 	}
@@ -89,7 +90,7 @@ func (r *SABStageRepository) Find(ctx context.Context, queueID int64, attempt, s
 	return &value, nil
 }
 func (r *SABStageRepository) Claim(ctx context.Context, c SABStageClaim, quota int64) (SABStageRecord, error) {
-	value := SABStageRecord{c.OperationID, c.QueueID, c.ExpectedBytes, c.FileCount, "pending"}
+	value := SABStageRecord{OperationID: c.OperationID, QueueID: c.QueueID, ExpectedBytes: c.ExpectedBytes, FileCount: c.FileCount, State: "pending"}
 	if r == nil || r.db == nil || ctx.Err() != nil || quota <= 0 || c.ExpectedBytes < 0 || c.ExpectedBytes > quota || c.FileCount < 1 || c.FileCount > 128 || !stageHex(c.OperationID, 32) || !stageHex(c.ReceiptAttempt, 32) || !stageHex(c.SourceHash, 64) || !stageHex(c.Namespace, 64) || !stageHex(c.PathHash, 64) || c.QueueID <= 0 || c.ExpectedMetadata == "" {
 		return SABStageRecord{}, ErrSABStageUnavailable
 	}
@@ -187,6 +188,48 @@ func (r *SABStageRepository) Finish(ctx context.Context, operationID, state stri
 	}
 	n, e := result.RowsAffected()
 	if e != nil || n != 1 {
+		return ErrSABStageUnavailable
+	}
+	return r.commit(ctx, tx)
+}
+
+// FindAtConfiguredPath reads only durable path binding and operation projection.
+// An unobserved path is not proof of a new physical namespace or zero charges.
+func (r *SABStageRepository) FindAtConfiguredPath(ctx context.Context, pathHash string, queueID int64, attempt, source string) (*SABStageRecord, bool, error) {
+	if r == nil || r.db == nil || ctx.Err() != nil || !stageHex(pathHash, 64) {
+		return nil, false, ErrSABStageUnavailable
+	}
+	var namespace string
+	e := r.db.QueryRowContext(ctx, `SELECT namespace FROM sab_import_stage_roots WHERE path_hash=?`, pathHash).Scan(&namespace)
+	if errors.Is(e, sql.ErrNoRows) {
+		return nil, false, nil
+	}
+	if e != nil || !stageHex(namespace, 64) {
+		return nil, false, ErrSABStageUnavailable
+	}
+	value, e := r.Find(ctx, queueID, attempt, source, namespace)
+	if e != nil {
+		return nil, false, e
+	}
+	return value, true, nil
+}
+
+// BindObservedPath is used only after an explicit operation observed a held
+// physical root. It never replaces an old binding or changes any charge.
+func (r *SABStageRepository) BindObservedPath(ctx context.Context, pathHash, namespace string) error {
+	if r == nil || r.db == nil || ctx.Err() != nil || !stageHex(pathHash, 64) || !stageHex(namespace, 64) {
+		return ErrSABStageUnavailable
+	}
+	tx, e := r.db.BeginTx(ctx, nil)
+	if e != nil {
+		return ErrSABStageUnavailable
+	}
+	defer tx.Rollback()
+	if _, e = tx.ExecContext(ctx, `INSERT INTO sab_import_stage_roots(path_hash,namespace) VALUES (?,?) ON CONFLICT(path_hash) DO NOTHING`, pathHash, namespace); e != nil {
+		return ErrSABStageUnavailable
+	}
+	var current string
+	if e = tx.QueryRowContext(ctx, `SELECT namespace FROM sab_import_stage_roots WHERE path_hash=?`, pathHash).Scan(&current); e != nil || current != namespace {
 		return ErrSABStageUnavailable
 	}
 	return r.commit(ctx, tx)
