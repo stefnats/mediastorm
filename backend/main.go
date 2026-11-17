@@ -99,6 +99,30 @@ import (
 	"novastream/services/reminders"
 )
 
+// The cached Kids list only selects startup candidates. The PostgreSQL port
+// must check their current persisted policy before applying any defaults.
+func applyStartupKidsDefaults(ctx context.Context, candidates []models.User, postgres bool, guarded func(context.Context, ...string) (int, error), legacy func(...string) (int, error)) (int, error) {
+	var ids []string
+	for _, user := range candidates {
+		if user.IsKidsProfile {
+			ids = append(ids, user.ID)
+		}
+	}
+	if len(ids) == 0 {
+		return 0, nil
+	}
+	if postgres {
+		if guarded == nil {
+			return 0, errors.New("guarded startup kids defaults unavailable")
+		}
+		return guarded(ctx, ids...)
+	}
+	if legacy == nil {
+		return 0, errors.New("startup kids defaults unavailable")
+	}
+	return legacy(ids...)
+}
+
 func main() {
 	log.SetOutput(slogutil.NewRedactingWriter(os.Stderr))
 	if len(os.Args) > 1 && os.Args[1] == "recover-account" {
@@ -554,18 +578,11 @@ func main() {
 	if err != nil {
 		log.Fatalf("failed to initialise user settings: %v", err)
 	}
-	var kidsProfileIDs []string
-	for _, user := range userService.ListAll() {
-		if user.IsKidsProfile {
-			kidsProfileIDs = append(kidsProfileIDs, user.ID)
-		}
-	}
-	if len(kidsProfileIDs) > 0 {
-		if changed, err := userSettingsService.ApplyKidsProfileDefaults(kidsProfileIDs...); err != nil {
-			log.Printf("failed to apply kids profile defaults: %v", err)
-		} else if changed > 0 {
-			log.Printf("enabled M.O.M. Mode by default for %d kids profile(s)", changed)
-		}
+	if changed, err := applyStartupKidsDefaults(context.Background(), userService.ListAll(), store != nil,
+		userSettingsService.ApplyStartupKidsProfileDefaults, userSettingsService.ApplyKidsProfileDefaults); err != nil {
+		log.Printf("failed to apply kids profile defaults: %v", err)
+	} else if changed > 0 {
+		log.Printf("enabled M.O.M. Mode by default for %d kids profile(s)", changed)
 	}
 	userSettingsHandler := handlers.NewUserSettingsHandler(userSettingsService, userService, cfgManager)
 
