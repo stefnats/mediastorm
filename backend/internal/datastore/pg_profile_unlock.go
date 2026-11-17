@@ -50,18 +50,15 @@ func (r *pgProfileUnlockRepo) List(ctx context.Context) ([]models.ProfileUnlock,
 	return result, rows.Err()
 }
 
+// Revocation records a durable generation even when no grants currently exist.
+// Legacy Create/Issue/Rebind do not consume this fence; they remain separate
+// compatibility paths until a generation-bound issuer is explicitly installed.
 func (r *pgProfileUnlockRepo) DeleteBySession(ctx context.Context, sessionHash string) error {
-	if _, err := r.pool.Exec(ctx, `DELETE FROM profile_unlocks WHERE session_hash = $1`, sessionHash); err != nil {
-		return fmt.Errorf("delete profile unlocks by session: %w", err)
-	}
-	return nil
+	return revokeProfileUnlocks(ctx, r.pool, "session", sessionHash)
 }
 
 func (r *pgProfileUnlockRepo) DeleteByProfile(ctx context.Context, profileID string) error {
-	if _, err := r.pool.Exec(ctx, `DELETE FROM profile_unlocks WHERE profile_id = $1`, profileID); err != nil {
-		return fmt.Errorf("delete profile unlocks by profile: %w", err)
-	}
-	return nil
+	return revokeProfileUnlocks(ctx, r.pool, "profile", profileID)
 }
 
 func (r *pgProfileUnlockRepo) RebindSession(ctx context.Context, oldSessionHash, newSessionHash string, sessionExpiresAt time.Time) error {
