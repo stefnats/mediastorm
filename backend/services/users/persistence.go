@@ -314,3 +314,93 @@ func (s *Service) CommitParentListRemoval(ctx context.Context, targetID string, 
 	}
 	return cloneUser(record.User), nil
 }
+
+// CommitParentListAdd advances only the exact confirmed target projection. A known
+// server commit may remain after cancellation; unknown outcomes quarantine all
+// later local writes until the existing explicit storage resync.
+func (s *Service) CommitParentListAdd(ctx context.Context, targetID string, intent *datastore.ParentListWriteIntent) (models.User, error) {
+	if s == nil || !s.useDB() || ctx == nil || ctx.Err() != nil {
+		return models.User{}, datastore.ErrParentListWriteUnavailable
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.ensurePersistenceLocked()
+	if s.persistence.uncertain {
+		return models.User{}, ErrPersistenceUncertain
+	}
+	current, known := s.users[targetID]
+	confirmed, present := s.persistence.confirmed[targetID]
+	revision, exists := s.persistence.revisions[targetID]
+	if !known || !present || !exists || !reflect.DeepEqual(current, confirmed) {
+		return models.User{}, datastore.ErrUserWriteConflict
+	}
+	if selected, err := s.store.ParentListAddTarget(ctx, intent, revision); err != nil || selected != targetID {
+		if err != nil {
+			return models.User{}, err
+		}
+		return models.User{}, datastore.ErrUserWriteConflict
+	}
+	receipt, err := s.store.CommitParentListAdd(intent)
+	if err != nil {
+		if errors.Is(err, datastore.ErrParentListWriteUnknown) {
+			s.persistence.uncertain = true
+		}
+		return models.User{}, err
+	}
+	record, err := s.store.AcknowledgeParentListAdd(ctx, intent, receipt, revision)
+	if err != nil {
+		return models.User{}, err
+	}
+	s.users[targetID] = cloneUser(record.User)
+	s.persistence.confirmed[targetID] = cloneUser(record.User)
+	s.persistence.revisions[targetID] = record.Revision
+	if err = ctx.Err(); err != nil {
+		return models.User{}, err
+	}
+	return cloneUser(record.User), nil
+}
+
+// CommitParentListReplace advances only the exact confirmed target projection. A known
+// server commit may remain after cancellation; unknown outcomes quarantine all
+// later local writes until the existing explicit storage resync.
+func (s *Service) CommitParentListReplace(ctx context.Context, targetID string, intent *datastore.ParentListWriteIntent) (models.User, error) {
+	if s == nil || !s.useDB() || ctx == nil || ctx.Err() != nil {
+		return models.User{}, datastore.ErrParentListWriteUnavailable
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.ensurePersistenceLocked()
+	if s.persistence.uncertain {
+		return models.User{}, ErrPersistenceUncertain
+	}
+	current, known := s.users[targetID]
+	confirmed, present := s.persistence.confirmed[targetID]
+	revision, exists := s.persistence.revisions[targetID]
+	if !known || !present || !exists || !reflect.DeepEqual(current, confirmed) {
+		return models.User{}, datastore.ErrUserWriteConflict
+	}
+	if selected, err := s.store.ParentListReplaceTarget(ctx, intent, revision); err != nil || selected != targetID {
+		if err != nil {
+			return models.User{}, err
+		}
+		return models.User{}, datastore.ErrUserWriteConflict
+	}
+	receipt, err := s.store.CommitParentListReplace(intent)
+	if err != nil {
+		if errors.Is(err, datastore.ErrParentListWriteUnknown) {
+			s.persistence.uncertain = true
+		}
+		return models.User{}, err
+	}
+	record, err := s.store.AcknowledgeParentListReplace(ctx, intent, receipt, revision)
+	if err != nil {
+		return models.User{}, err
+	}
+	s.users[targetID] = cloneUser(record.User)
+	s.persistence.confirmed[targetID] = cloneUser(record.User)
+	s.persistence.revisions[targetID] = record.Revision
+	if err = ctx.Err(); err != nil {
+		return models.User{}, err
+	}
+	return cloneUser(record.User), nil
+}

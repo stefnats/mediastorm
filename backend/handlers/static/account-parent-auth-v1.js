@@ -91,9 +91,10 @@
             // Only the exact original action type may consume its challenge.
             // A malformed PG challenge cannot downgrade to legacy confirmation.
             if (typeof body.parentIntent !== 'string') return response;
-            const mode = actionType !== 'listRemoval' && request.method === 'PUT' && /\/api\/users\/[^/]+\/kids\/mode$/.test(url.pathname) && /^pmi_[0-9a-f]{64}$/.test(body.parentIntent);
+            const mode = actionType === undefined && request.method === 'PUT' && /\/api\/users\/[^/]+\/kids\/mode$/.test(url.pathname) && /^pmi_[0-9a-f]{64}$/.test(body.parentIntent);
             const listRemoval = actionType === 'listRemoval' && typeof isCurrent === 'function' && request.method === 'DELETE' && request.body === null && /\/api\/users\/[^/]+\/kids\/lists$/.test(url.pathname) && /^pli_[0-9a-f]{64}$/.test(body.parentIntent);
-            if (!mode && !listRemoval) return response;
+            const listAddition = actionType === 'listAddition' && typeof isCurrent === 'function' && request.method === 'POST' && request.body !== null && /\/api\/users\/[^/]+\/kids\/lists$/.test(url.pathname) && /^pla_[0-9a-f]{64}$/.test(body.parentIntent);
+            if (!mode && !listRemoval && !listAddition) return response;
             const generation = pageGeneration;
             if (!current()) throw abortError();
             legacyPrompt?.cancel();
@@ -131,5 +132,6 @@
     // predicate; this UI check is bookkeeping, never a server authorization proof.
     window.parentModeFetch = (input, options, isCurrent) => fetchWithConfirmation(input, options, isCurrent);
     window.parentListRemovalFetch = (input, options, isCurrent) => fetchWithConfirmation(input, options, isCurrent, 'listRemoval');
+    window.parentListAdditionFetch = (input, options, isCurrent) => fetchWithConfirmation(input, options, isCurrent, 'listAddition');
     window.addEventListener?.('pagehide', () => { pageGeneration++; intentPrompt?.cancel(); });
 })();

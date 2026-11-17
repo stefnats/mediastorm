@@ -1325,6 +1325,141 @@ paths:
           $ref: '#/components/responses/Error'
 
   /api/users/{userId}/kids/lists:
+    post:
+      operationId: parentListAddWithConfirmation
+      summary: Append one allowed-list identity after fresh confirmation
+      description: |
+        The selected url string receives the existing Go strings.TrimSpace;
+        empty is invalid. An exactly existing identity returns 200 without any
+        target UPDATE, updatedAt change or Save. A new identity is appended once;
+        other entries, duplicates and order are preserved.
+
+        Existing Go decoding is retained: DisallowUnknownFields and exactly
+        one Decode, case-insensitive known field names, duplicate-field/null
+        behavior and no new trailing-value/EOF check. Unknown fields and type
+        errors still fail. String null after a previous duplicate string does
+        not overwrite that string; this is not a generic last-value-wins map.
+        The schema allows property-name casing; the real decoder enforces known
+        fields. There is no URL parsing, alias normalization or provider fetch.
+
+        PG privately captures at most 16384 original body bytes and binds those
+        exact bytes plus selected values and the resulting desired array to
+        the original full target row/list snapshot, session/client/actor/owner,
+        PIN/generations, method and complete raw path/query. An equivalent value
+        encoded with different bytes is not the original retry. JSON legacy
+        decoding is unchanged. PG snapshot/registry bounds fail closed.
+
+        First 403 parent_authorization_required carries a pla_ intent. Retry
+        exactly once with X-Parent-Intent and X-Account-Password; a master also
+        needs the fresh password. Mode/removal/other-write intents are isolated.
+        Original deadlines cap the one-shot at 30 seconds, never renewed by
+        receipt. Wrong credentials consume it. Changed/expired/consumed proof
+        returns 409; unknown COMMIT returns 503 and requires settings reload,
+        never blind retry. A lost or canceled reply does not roll back a write.
+
+        No isKidsProfile/mode/rating, playback grant or runtime policy changes;
+        no explicit stream stop, session/token revocation or provider work.
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/UserID'
+        - $ref: '#/components/parameters/ParentListAddIntent'
+        - $ref: '#/components/parameters/ParentAccountPassword'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/ParentListAddRequest'}
+      responses:
+        '200':
+          description: Confirmed profile result, including the existing operation-specific no-op semantics.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Profile'}
+        '400': {$ref: '#/components/responses/Error'}
+        '401': {$ref: '#/components/responses/Error'}
+        '403': {$ref: '#/components/responses/ParentListAddForbidden'}
+        '404': {$ref: '#/components/responses/Error'}
+        '409':
+          description: Original confirmation changed; a new explicit action is required.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/ParentModeFailure'}
+        '413': {$ref: '#/components/responses/Error'}
+        '429': {$ref: '#/components/responses/Error'}
+        '503':
+          description: Unavailable or commit outcome unknown; no automatic retry.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/ParentModeFailure'}
+    put:
+      operationId: parentListReplaceWithConfirmation
+      summary: Replace allowed-list settings after fresh confirmation
+      description: |
+        The selected lists value receives the existing element-wise Go
+        strings.TrimSpace and empty-string removal. Order and duplicates stay.
+        Missing/null lists, root null and an empty array clear the list. Null
+        string elements become empty and are removed. PUT always updates the
+        target and updatedAt, including an identical resulting array.
+
+        Existing Go decoding is retained: DisallowUnknownFields and exactly
+        one Decode, case-insensitive known field names, duplicate-field/null
+        behavior and no new trailing-value/EOF check. Unknown fields and type
+        errors still fail. String null after a previous duplicate string does
+        not overwrite that string; this is not a generic last-value-wins map.
+        The schema allows property-name casing; the real decoder enforces known
+        fields. There is no URL parsing, alias normalization or provider fetch.
+
+        PG privately captures at most 16384 original body bytes and binds those
+        exact bytes plus selected values and the resulting desired array to
+        the original full target row/list snapshot, session/client/actor/owner,
+        PIN/generations, method and complete raw path/query. An equivalent value
+        encoded with different bytes is not the original retry. JSON legacy
+        decoding is unchanged. PG snapshot/registry bounds fail closed.
+
+        First 403 parent_authorization_required carries a plw_ intent. Retry
+        exactly once with X-Parent-Intent and X-Account-Password; a master also
+        needs the fresh password. Mode/removal/other-write intents are isolated.
+        Original deadlines cap the one-shot at 30 seconds, never renewed by
+        receipt. Wrong credentials consume it. Changed/expired/consumed proof
+        returns 409; unknown COMMIT returns 503 and requires settings reload,
+        never blind retry. A lost or canceled reply does not roll back a write.
+
+        No isKidsProfile/mode/rating, playback grant or runtime policy changes;
+        no explicit stream stop, session/token revocation or provider work.
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/UserID'
+        - $ref: '#/components/parameters/ParentListReplaceIntent'
+        - $ref: '#/components/parameters/ParentAccountPassword'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/ParentListReplaceRequest'}
+      responses:
+        '200':
+          description: Confirmed profile result, including the existing operation-specific no-op semantics.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Profile'}
+        '400': {$ref: '#/components/responses/Error'}
+        '401': {$ref: '#/components/responses/Error'}
+        '403': {$ref: '#/components/responses/ParentListReplaceForbidden'}
+        '404': {$ref: '#/components/responses/Error'}
+        '409':
+          description: Original confirmation changed; a new explicit action is required.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/ParentModeFailure'}
+        '413': {$ref: '#/components/responses/Error'}
+        '429': {$ref: '#/components/responses/Error'}
+        '503':
+          description: Unavailable or commit outcome unknown; no automatic retry.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/ParentModeFailure'}
     delete:
       operationId: removeAllowedListWithParentConfirmation
       summary: Remove an exact stored allowed-list identity after fresh confirmation
@@ -1390,6 +1525,141 @@ paths:
               schema: {$ref: '#/components/schemas/ParentModeFailure'}
 
   /admin/api/users/{userId}/kids/lists:
+    post:
+      operationId: parentAdminListAddWithConfirmation
+      summary: Append one allowed-list identity after fresh confirmation
+      description: |
+        The selected url string receives the existing Go strings.TrimSpace;
+        empty is invalid. An exactly existing identity returns 200 without any
+        target UPDATE, updatedAt change or Save. A new identity is appended once;
+        other entries, duplicates and order are preserved.
+
+        Existing Go decoding is retained: DisallowUnknownFields and exactly
+        one Decode, case-insensitive known field names, duplicate-field/null
+        behavior and no new trailing-value/EOF check. Unknown fields and type
+        errors still fail. String null after a previous duplicate string does
+        not overwrite that string; this is not a generic last-value-wins map.
+        The schema allows property-name casing; the real decoder enforces known
+        fields. There is no URL parsing, alias normalization or provider fetch.
+
+        PG privately captures at most 16384 original body bytes and binds those
+        exact bytes plus selected values and the resulting desired array to
+        the original full target row/list snapshot, session/client/actor/owner,
+        PIN/generations, method and complete raw path/query. An equivalent value
+        encoded with different bytes is not the original retry. JSON legacy
+        decoding is unchanged. PG snapshot/registry bounds fail closed.
+
+        First 403 parent_authorization_required carries a pla_ intent. Retry
+        exactly once with X-Parent-Intent and X-Account-Password; a master also
+        needs the fresh password. Mode/removal/other-write intents are isolated.
+        Original deadlines cap the one-shot at 30 seconds, never renewed by
+        receipt. Wrong credentials consume it. Changed/expired/consumed proof
+        returns 409; unknown COMMIT returns 503 and requires settings reload,
+        never blind retry. A lost or canceled reply does not roll back a write.
+
+        No isKidsProfile/mode/rating, playback grant or runtime policy changes;
+        no explicit stream stop, session/token revocation or provider work.
+      security:
+        - accountSession: []
+      parameters:
+        - $ref: '#/components/parameters/UserID'
+        - $ref: '#/components/parameters/ParentListAddIntent'
+        - $ref: '#/components/parameters/ParentAccountPassword'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/ParentListAddRequest'}
+      responses:
+        '200':
+          description: Confirmed profile result, including the existing operation-specific no-op semantics.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Profile'}
+        '400': {$ref: '#/components/responses/Error'}
+        '401': {$ref: '#/components/responses/Error'}
+        '403': {$ref: '#/components/responses/ParentListAddForbidden'}
+        '404': {$ref: '#/components/responses/Error'}
+        '409':
+          description: Original confirmation changed; a new explicit action is required.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/ParentModeFailure'}
+        '413': {$ref: '#/components/responses/Error'}
+        '429': {$ref: '#/components/responses/Error'}
+        '503':
+          description: Unavailable or commit outcome unknown; no automatic retry.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/ParentModeFailure'}
+    put:
+      operationId: parentAdminListReplaceWithConfirmation
+      summary: Replace allowed-list settings after fresh confirmation
+      description: |
+        The selected lists value receives the existing element-wise Go
+        strings.TrimSpace and empty-string removal. Order and duplicates stay.
+        Missing/null lists, root null and an empty array clear the list. Null
+        string elements become empty and are removed. PUT always updates the
+        target and updatedAt, including an identical resulting array.
+
+        Existing Go decoding is retained: DisallowUnknownFields and exactly
+        one Decode, case-insensitive known field names, duplicate-field/null
+        behavior and no new trailing-value/EOF check. Unknown fields and type
+        errors still fail. String null after a previous duplicate string does
+        not overwrite that string; this is not a generic last-value-wins map.
+        The schema allows property-name casing; the real decoder enforces known
+        fields. There is no URL parsing, alias normalization or provider fetch.
+
+        PG privately captures at most 16384 original body bytes and binds those
+        exact bytes plus selected values and the resulting desired array to
+        the original full target row/list snapshot, session/client/actor/owner,
+        PIN/generations, method and complete raw path/query. An equivalent value
+        encoded with different bytes is not the original retry. JSON legacy
+        decoding is unchanged. PG snapshot/registry bounds fail closed.
+
+        First 403 parent_authorization_required carries a plw_ intent. Retry
+        exactly once with X-Parent-Intent and X-Account-Password; a master also
+        needs the fresh password. Mode/removal/other-write intents are isolated.
+        Original deadlines cap the one-shot at 30 seconds, never renewed by
+        receipt. Wrong credentials consume it. Changed/expired/consumed proof
+        returns 409; unknown COMMIT returns 503 and requires settings reload,
+        never blind retry. A lost or canceled reply does not roll back a write.
+
+        No isKidsProfile/mode/rating, playback grant or runtime policy changes;
+        no explicit stream stop, session/token revocation or provider work.
+      security:
+        - accountSession: []
+      parameters:
+        - $ref: '#/components/parameters/UserID'
+        - $ref: '#/components/parameters/ParentListReplaceIntent'
+        - $ref: '#/components/parameters/ParentAccountPassword'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/ParentListReplaceRequest'}
+      responses:
+        '200':
+          description: Confirmed profile result, including the existing operation-specific no-op semantics.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Profile'}
+        '400': {$ref: '#/components/responses/Error'}
+        '401': {$ref: '#/components/responses/Error'}
+        '403': {$ref: '#/components/responses/ParentListReplaceForbidden'}
+        '404': {$ref: '#/components/responses/Error'}
+        '409':
+          description: Original confirmation changed; a new explicit action is required.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/ParentModeFailure'}
+        '413': {$ref: '#/components/responses/Error'}
+        '429': {$ref: '#/components/responses/Error'}
+        '503':
+          description: Unavailable or commit outcome unknown; no automatic retry.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/ParentModeFailure'}
     delete:
       operationId: removeAdminAllowedListWithParentConfirmation
       summary: Remove an exact stored allowed-list identity after fresh confirmation
@@ -1455,6 +1725,141 @@ paths:
               schema: {$ref: '#/components/schemas/ParentModeFailure'}
 
   /account/api/users/{userId}/kids/lists:
+    post:
+      operationId: parentAccountListAddWithConfirmation
+      summary: Append one allowed-list identity after fresh confirmation
+      description: |
+        The selected url string receives the existing Go strings.TrimSpace;
+        empty is invalid. An exactly existing identity returns 200 without any
+        target UPDATE, updatedAt change or Save. A new identity is appended once;
+        other entries, duplicates and order are preserved.
+
+        Existing Go decoding is retained: DisallowUnknownFields and exactly
+        one Decode, case-insensitive known field names, duplicate-field/null
+        behavior and no new trailing-value/EOF check. Unknown fields and type
+        errors still fail. String null after a previous duplicate string does
+        not overwrite that string; this is not a generic last-value-wins map.
+        The schema allows property-name casing; the real decoder enforces known
+        fields. There is no URL parsing, alias normalization or provider fetch.
+
+        PG privately captures at most 16384 original body bytes and binds those
+        exact bytes plus selected values and the resulting desired array to
+        the original full target row/list snapshot, session/client/actor/owner,
+        PIN/generations, method and complete raw path/query. An equivalent value
+        encoded with different bytes is not the original retry. JSON legacy
+        decoding is unchanged. PG snapshot/registry bounds fail closed.
+
+        First 403 parent_authorization_required carries a pla_ intent. Retry
+        exactly once with X-Parent-Intent and X-Account-Password; a master also
+        needs the fresh password. Mode/removal/other-write intents are isolated.
+        Original deadlines cap the one-shot at 30 seconds, never renewed by
+        receipt. Wrong credentials consume it. Changed/expired/consumed proof
+        returns 409; unknown COMMIT returns 503 and requires settings reload,
+        never blind retry. A lost or canceled reply does not roll back a write.
+
+        No isKidsProfile/mode/rating, playback grant or runtime policy changes;
+        no explicit stream stop, session/token revocation or provider work.
+      security:
+        - accountSession: []
+      parameters:
+        - $ref: '#/components/parameters/UserID'
+        - $ref: '#/components/parameters/ParentListAddIntent'
+        - $ref: '#/components/parameters/ParentAccountPassword'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/ParentListAddRequest'}
+      responses:
+        '200':
+          description: Confirmed profile result, including the existing operation-specific no-op semantics.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Profile'}
+        '400': {$ref: '#/components/responses/Error'}
+        '401': {$ref: '#/components/responses/Error'}
+        '403': {$ref: '#/components/responses/ParentListAddForbidden'}
+        '404': {$ref: '#/components/responses/Error'}
+        '409':
+          description: Original confirmation changed; a new explicit action is required.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/ParentModeFailure'}
+        '413': {$ref: '#/components/responses/Error'}
+        '429': {$ref: '#/components/responses/Error'}
+        '503':
+          description: Unavailable or commit outcome unknown; no automatic retry.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/ParentModeFailure'}
+    put:
+      operationId: parentAccountListReplaceWithConfirmation
+      summary: Replace allowed-list settings after fresh confirmation
+      description: |
+        The selected lists value receives the existing element-wise Go
+        strings.TrimSpace and empty-string removal. Order and duplicates stay.
+        Missing/null lists, root null and an empty array clear the list. Null
+        string elements become empty and are removed. PUT always updates the
+        target and updatedAt, including an identical resulting array.
+
+        Existing Go decoding is retained: DisallowUnknownFields and exactly
+        one Decode, case-insensitive known field names, duplicate-field/null
+        behavior and no new trailing-value/EOF check. Unknown fields and type
+        errors still fail. String null after a previous duplicate string does
+        not overwrite that string; this is not a generic last-value-wins map.
+        The schema allows property-name casing; the real decoder enforces known
+        fields. There is no URL parsing, alias normalization or provider fetch.
+
+        PG privately captures at most 16384 original body bytes and binds those
+        exact bytes plus selected values and the resulting desired array to
+        the original full target row/list snapshot, session/client/actor/owner,
+        PIN/generations, method and complete raw path/query. An equivalent value
+        encoded with different bytes is not the original retry. JSON legacy
+        decoding is unchanged. PG snapshot/registry bounds fail closed.
+
+        First 403 parent_authorization_required carries a plw_ intent. Retry
+        exactly once with X-Parent-Intent and X-Account-Password; a master also
+        needs the fresh password. Mode/removal/other-write intents are isolated.
+        Original deadlines cap the one-shot at 30 seconds, never renewed by
+        receipt. Wrong credentials consume it. Changed/expired/consumed proof
+        returns 409; unknown COMMIT returns 503 and requires settings reload,
+        never blind retry. A lost or canceled reply does not roll back a write.
+
+        No isKidsProfile/mode/rating, playback grant or runtime policy changes;
+        no explicit stream stop, session/token revocation or provider work.
+      security:
+        - accountSession: []
+      parameters:
+        - $ref: '#/components/parameters/UserID'
+        - $ref: '#/components/parameters/ParentListReplaceIntent'
+        - $ref: '#/components/parameters/ParentAccountPassword'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/ParentListReplaceRequest'}
+      responses:
+        '200':
+          description: Confirmed profile result, including the existing operation-specific no-op semantics.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Profile'}
+        '400': {$ref: '#/components/responses/Error'}
+        '401': {$ref: '#/components/responses/Error'}
+        '403': {$ref: '#/components/responses/ParentListReplaceForbidden'}
+        '404': {$ref: '#/components/responses/Error'}
+        '409':
+          description: Original confirmation changed; a new explicit action is required.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/ParentModeFailure'}
+        '413': {$ref: '#/components/responses/Error'}
+        '429': {$ref: '#/components/responses/Error'}
+        '503':
+          description: Unavailable or commit outcome unknown; no automatic retry.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/ParentModeFailure'}
     delete:
       operationId: removeAccountAllowedListWithParentConfirmation
       summary: Remove an exact stored allowed-list identity after fresh confirmation
@@ -3695,6 +4100,16 @@ components:
       description: Session token as a query parameter; only accepted on media URLs such as `/api/video/stream`.
 
   parameters:
+    ParentListAddIntent:
+      name: X-Parent-Intent
+      in: header
+      description: Exactly one original operation-specific opaque confirmation; not valid for another list or mode action.
+      schema: {type: string, pattern: '^pla_[0-9a-f]{64}$'}
+    ParentListReplaceIntent:
+      name: X-Parent-Intent
+      in: header
+      description: Exactly one original operation-specific opaque confirmation; not valid for another list or mode action.
+      schema: {type: string, pattern: '^plw_[0-9a-f]{64}$'}
     ParentListRemovalIntent:
       name: X-Parent-Intent
       in: header
@@ -3876,6 +4291,34 @@ components:
         type: string
 
   responses:
+    ParentListAddForbidden:
+      description: First PG operation-specific challenge, wrong credentials, or existing ownership/PIN denial; no replacement on retry.
+      content:
+        application/json:
+          schema:
+            type: object
+            required: [error]
+            properties:
+              error: {type: string}
+              code: {type: string}
+              profileId: {type: string}
+              parentIntent: {type: string, pattern: '^pla_[0-9a-f]{64}$'}
+        text/plain:
+          schema: {type: string}
+    ParentListReplaceForbidden:
+      description: First PG operation-specific challenge, wrong credentials, or existing ownership/PIN denial; no replacement on retry.
+      content:
+        application/json:
+          schema:
+            type: object
+            required: [error]
+            properties:
+              error: {type: string}
+              code: {type: string}
+              profileId: {type: string}
+              parentIntent: {type: string, pattern: '^plw_[0-9a-f]{64}$'}
+        text/plain:
+          schema: {type: string}
     ParentListRemovalForbidden:
       description: First PG removal challenge, wrong password, or existing ownership/PIN denial; no challenge replacement on retry.
       content:
@@ -4459,6 +4902,24 @@ components:
           type: integer
         atLimit:
           type: boolean
+
+    ParentListAddRequest:
+      type: object
+      nullable: true
+      additionalProperties: true
+      description: Existing case-insensitive url field decoding; missing or initially null selects empty and is rejected. Real decoder rejects unknown fields.
+      properties:
+        url: {type: string, nullable: true}
+    ParentListReplaceRequest:
+      type: object
+      nullable: true
+      additionalProperties: true
+      description: Existing case-insensitive lists field decoding; missing/null clears. Real decoder rejects unknown fields.
+      properties:
+        lists:
+          type: array
+          nullable: true
+          items: {type: string, nullable: true}
 
     ParentModeRequest:
       type: object

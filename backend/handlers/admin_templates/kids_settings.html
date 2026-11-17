@@ -142,7 +142,7 @@
 
             <div style="display: flex; gap: 0.5rem; flex-wrap: wrap;">
                 <input type="url" id="new-list-url" class="form-input" placeholder="https://mdblist.com/lists/..." style="flex: 1; min-width: 250px;">
-                <button class="btn btn-secondary" onclick="addList()">
+                <button class="btn btn-secondary" id="add-allowed-list" onclick="addList()">
                     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="width: 16px; height: 16px;">
                         <line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/>
                     </svg>
@@ -315,6 +315,34 @@ let modeUncertain = false;
 let listRemovalAction = null;
 let listRemovalGeneration = 0;
 let listRemovalUncertain = false;
+let listAdditionAction = null;
+let listAdditionGeneration = 0;
+let listAdditionUncertain = false;
+
+function listAdditionControls() {
+    const button = document.getElementById('add-allowed-list');
+    if (button) button.disabled = modePageRetired || modeProfileLoading || listAdditionUncertain || listAdditionAction !== null;
+}
+
+function retireListAddition() {
+    listAdditionGeneration++;
+    const original = listAdditionAction;
+    listAdditionAction = null;
+    original?.controller.abort();
+    listAdditionControls();
+}
+
+function currentListAddition(action) {
+    const lists = profile?.kidsAllowedLists;
+    return listAdditionAction === action && !action.controller.signal.aborted && !modePageRetired && !modeProfileLoading &&
+        action.generation === listAdditionGeneration && action.page === modePageGeneration &&
+        profile === action.profile && profile?.id === profileId && lists === action.lists &&
+        (lists === undefined || (Array.isArray(lists) && lists.length === action.snapshot.length && lists.every((value, index) => value === action.snapshot[index]))) &&
+        document.getElementById('new-list-url') === action.input && action.input.isConnected && action.input.value === action.value &&
+        document.getElementById('add-allowed-list') === action.button && action.button.isConnected &&
+        document.getElementById('lists-section') === action.form && action.form.contains(action.input) && action.form.contains(action.button) &&
+        modeSelection() === action.mode && new URLSearchParams(window.location.search).get('profileId') === profileId;
+}
 
 function listRemovalControls() {
     document.querySelectorAll('#lists-container .remove-allowed-list').forEach(button => {
@@ -366,11 +394,11 @@ function currentModeAction(action) {
         new URLSearchParams(window.location.search).get('profileId') === profileId && modeSelection() === action.mode;
 }
 
-window.addEventListener('pagehide', () => { modePageRetired = true; modePageGeneration++; retireModeAction(); retireListRemoval(); });
+window.addEventListener('pagehide', () => { modePageRetired = true; modePageGeneration++; retireModeAction(); retireListRemoval(); retireListAddition(); });
 window.addEventListener('pageshow', event => {
-    if (event.persisted) { modePageRetired = false; modePageGeneration++; retireModeAction(); retireListRemoval(); }
+    if (event.persisted) { modePageRetired = false; modePageGeneration++; retireModeAction(); retireListRemoval(); retireListAddition(); }
 });
-window.addEventListener('popstate', () => { retireModeAction(); retireListRemoval(); });
+window.addEventListener('popstate', () => { retireModeAction(); retireListRemoval(); retireListAddition(); });
 
 // Rating mappings for sync
 const movieToTvRating = {
@@ -393,9 +421,11 @@ const tvToMovieRating = {
 async function loadProfile() {
     retireModeAction();
     retireListRemoval();
+    retireListAddition();
     modeProfileLoading = true;
     modeControls();
     listRemovalControls();
+    listAdditionControls();
     const page = modePageGeneration;
     if (!profileId) {
         showToast('No profile ID provided', 'error');
@@ -445,6 +475,8 @@ async function loadProfile() {
         modeControls();
         listRemovalUncertain = false;
         listRemovalControls();
+        listAdditionUncertain = false;
+        listAdditionControls();
     } catch (err) {
         showToast('Error: ' + err.message, 'error');
     }
@@ -473,6 +505,7 @@ function updateRatingPreview() {
 
 function renderLists() {
     retireListRemoval();
+    retireListAddition();
     const container = document.getElementById('lists-container');
     const lists = profile?.kidsAllowedLists || [];
     container.replaceChildren();
@@ -614,7 +647,9 @@ async function saveRating() {
 
 async function addList() {
     const input = document.getElementById('new-list-url');
-    const url = input.value.trim();
+    const value = input?.value;
+    if (typeof value !== 'string') return;
+    const url = value.trim();
 
     if (!url) {
         showToast('Please enter a URL', 'error');
@@ -625,22 +660,65 @@ async function addList() {
         showToast('URL must be from mdblist.com', 'error');
         return;
     }
+    if (listAdditionAction || listAdditionUncertain || modePageRetired || modeProfileLoading) return;
+    const form = document.getElementById('lists-section');
+    const button = document.getElementById('add-allowed-list');
+    const lists = profile?.kidsAllowedLists;
+    if (!input.isConnected || !button?.isConnected || !form?.contains(input) || !form.contains(button) ||
+        profile?.id !== profileId || (lists !== undefined && (!Array.isArray(lists) || lists.some(item => typeof item !== 'string'))) ||
+        new URLSearchParams(window.location.search).get('profileId') !== profileId || typeof window.parentListAdditionFetch !== 'function') return;
+    const action = {input, button, form, profile, lists, value, url, mode: modeSelection(), snapshot: Object.freeze([...(lists || [])]),
+        body: JSON.stringify({url}), generation: ++listAdditionGeneration, page: modePageGeneration, controller: new AbortController()};
+    listAdditionAction = action;
+    listAdditionControls();
 
     try {
-        const res = await fetch(basePath + '/api/users/' + profileId + '/kids/lists', {
+        const res = await window.parentListAdditionFetch(basePath + '/api/users/' + encodeURIComponent(profileId) + '/kids/lists', {
             method: 'POST',
             headers: {'Content-Type': 'application/json'},
-            body: JSON.stringify({ url: url })
-        });
-        if (!res.ok) throw new Error(await res.text());
+            body: action.body,
+            signal: action.controller.signal
+        }, () => currentListAddition(action));
+        if (!currentListAddition(action)) return;
+        if (!res.ok) {
+            const error = await res.json().catch(() => null);
+            if (!currentListAddition(action)) return;
+            if (error?.code === 'parent_confirmation_outcome_unknown') {
+                listAdditionUncertain = true;
+                showToast('The result is not known. Reload settings before trying again.', 'error');
+            } else if (error?.code === 'parent_confirmation_changed') {
+                showToast('Confirmation expired or the request changed. Save again.', 'error');
+            } else if (res.status === 429) {
+                showToast('Too many confirmation attempts. Wait before adding again.', 'error');
+            } else {
+                showToast('Confirmation was not completed. Add again when ready.', 'error');
+            }
+            return;
+        }
 
         const updatedProfile = await res.json();
-        profile.kidsAllowedLists = updatedProfile.kidsAllowedLists;
-        input.value = '';
+        if (!currentListAddition(action)) return;
+        const updated = updatedProfile && Object.hasOwn(updatedProfile, 'kidsAllowedLists') ? updatedProfile.kidsAllowedLists : [];
+        // The request body is already frozen. Match the existing Go trim only
+        // to verify the reply, never to rewrite or normalize the original URL.
+        const identity = url.replace(/^[\u0009-\u000d\u0020\u0085\u00a0\u1680\u2000-\u200a\u2028\u2029\u202f\u205f\u3000]+|[\u0009-\u000d\u0020\u0085\u00a0\u1680\u2000-\u200a\u2028\u2029\u202f\u205f\u3000]+$/g, '');
+        const expected = action.snapshot.includes(identity) ? action.snapshot : [...action.snapshot, identity];
+        if (updatedProfile?.id !== profileId || !Array.isArray(updated) || updated.length !== expected.length ||
+            updated.some((item, index) => typeof item !== 'string' || item !== expected[index])) throw new Error('Unconfirmed addition response');
+        action.profile.kidsAllowedLists = updated;
+        action.input.value = '';
         renderLists();
         showToast('List added');
     } catch (err) {
-        showToast('Error: ' + err.message, 'error');
+        if (!currentListAddition(action) || err.name === 'AbortError') return;
+        listAdditionUncertain = true;
+        showToast('The result could not be confirmed. Reload settings before trying again.', 'error');
+    } finally {
+        if (listAdditionAction === action) {
+            const publish = currentListAddition(action);
+            listAdditionAction = null;
+            if (publish) listAdditionControls();
+        }
     }
 }
 
@@ -707,8 +785,10 @@ async function removeList(url, row, button, lists) {
 
 // Listen for mode changes
 document.querySelectorAll('input[name="kidsMode"]').forEach(radio => {
-    radio.addEventListener('change', () => { retireModeAction(); retireListRemoval(); updateSectionVisibility(); });
+    radio.addEventListener('change', () => { retireModeAction(); retireListRemoval(); retireListAddition(); updateSectionVisibility(); });
 });
+document.getElementById('new-list-url').addEventListener('input', retireListAddition);
+document.getElementById('new-list-url').addEventListener('change', retireListAddition);
 
 function escapeHtml(str) {
     if (!str) return '';
