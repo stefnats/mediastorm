@@ -1324,6 +1324,201 @@ paths:
         '401':
           $ref: '#/components/responses/Error'
 
+  /api/users/{userId}/kids/lists:
+    delete:
+      operationId: removeAllowedListWithParentConfirmation
+      summary: Remove an exact stored allowed-list identity after fresh confirmation
+      description: |
+        This is the existing bodyless DELETE. Identity is the first url query
+        value after the existing Go query decoding and strings.TrimSpace; there
+        is no additional unescape, URL canonicalization, alias or redirect lookup.
+        All exactly equal stored occurrences are removed; other entries retain
+        their original order. A nonempty originally absent identity retains the
+        existing idempotent 200 and updatedAt write after fresh confirmation.
+
+        PostgreSQL requires the current account password even for a master.
+        First 403 parent_authorization_required includes parentIntent with the
+        pli_ prefix. Retry the original bodyless DELETE and complete raw path/
+        query with exactly one X-Parent-Intent plus X-Account-Password. Mode pmi_
+        intents cannot authorize removal. Original session/client/actor/owner,
+        full target row, complete list array, PIN state and revocation epochs
+        remain bound. Concurrent changes, including add/remove ABA, return 409;
+        there is no rebasing onto a later list or automatic replacement intent.
+
+        The private one-shot expires at most 30 seconds after original capture,
+        bounded by the original authority deadlines, not response receipt. A
+        wrong password consumes it. Unknown commit outcome returns 503; reload
+        settings before another explicit action. A lost/canceled reply does not
+        undo an already committed change. JSON mode without PG retains its
+        existing contract and returns no parentIntent.
+
+        Only kidsAllowedLists and updatedAt change. There is no provider read,
+        new playback policy, explicit stream stop or token/session revocation.
+        Existing runtime guards remain independent; immediate stream termination
+        or continued playback is not promised by this mutation.
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/UserID'
+        - $ref: '#/components/parameters/ParentListRemovalIntent'
+        - $ref: '#/components/parameters/ParentAccountPassword'
+        - name: url
+          in: query
+          required: true
+          description: The original stored text, query-encoded once. First decoded value is trimmed only by the existing server rule.
+          schema: {type: string, minLength: 1}
+      responses:
+        '200':
+          description: The targeted stored profile after confirmed removal or idempotent absence.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Profile'}
+        '400': {$ref: '#/components/responses/Error'}
+        '401': {$ref: '#/components/responses/Error'}
+        '403': {$ref: '#/components/responses/ParentListRemovalForbidden'}
+        '404': {$ref: '#/components/responses/Error'}
+        '409':
+          description: Original confirmation expired, consumed or changed; require a new explicit action.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/ParentModeFailure'}
+        '429': {$ref: '#/components/responses/Error'}
+        '503':
+          description: Confirmation unavailable or commit outcome unknown; never automatically retry.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/ParentModeFailure'}
+
+  /admin/api/users/{userId}/kids/lists:
+    delete:
+      operationId: removeAdminAllowedListWithParentConfirmation
+      summary: Remove an exact stored allowed-list identity after fresh confirmation
+      description: |
+        This is the existing bodyless DELETE. Identity is the first url query
+        value after the existing Go query decoding and strings.TrimSpace; there
+        is no additional unescape, URL canonicalization, alias or redirect lookup.
+        All exactly equal stored occurrences are removed; other entries retain
+        their original order. A nonempty originally absent identity retains the
+        existing idempotent 200 and updatedAt write after fresh confirmation.
+
+        PostgreSQL requires the current account password even for a master.
+        First 403 parent_authorization_required includes parentIntent with the
+        pli_ prefix. Retry the original bodyless DELETE and complete raw path/
+        query with exactly one X-Parent-Intent plus X-Account-Password. Mode pmi_
+        intents cannot authorize removal. Original session/client/actor/owner,
+        full target row, complete list array, PIN state and revocation epochs
+        remain bound. Concurrent changes, including add/remove ABA, return 409;
+        there is no rebasing onto a later list or automatic replacement intent.
+
+        The private one-shot expires at most 30 seconds after original capture,
+        bounded by the original authority deadlines, not response receipt. A
+        wrong password consumes it. Unknown commit outcome returns 503; reload
+        settings before another explicit action. A lost/canceled reply does not
+        undo an already committed change. JSON mode without PG retains its
+        existing contract and returns no parentIntent.
+
+        Only kidsAllowedLists and updatedAt change. There is no provider read,
+        new playback policy, explicit stream stop or token/session revocation.
+        Existing runtime guards remain independent; immediate stream termination
+        or continued playback is not promised by this mutation.
+      security:
+        - accountSession: []
+      parameters:
+        - $ref: '#/components/parameters/UserID'
+        - $ref: '#/components/parameters/ParentListRemovalIntent'
+        - $ref: '#/components/parameters/ParentAccountPassword'
+        - name: url
+          in: query
+          required: true
+          description: The original stored text, query-encoded once. First decoded value is trimmed only by the existing server rule.
+          schema: {type: string, minLength: 1}
+      responses:
+        '200':
+          description: The targeted stored profile after confirmed removal or idempotent absence.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Profile'}
+        '400': {$ref: '#/components/responses/Error'}
+        '401': {$ref: '#/components/responses/Error'}
+        '403': {$ref: '#/components/responses/ParentListRemovalForbidden'}
+        '404': {$ref: '#/components/responses/Error'}
+        '409':
+          description: Original confirmation expired, consumed or changed; require a new explicit action.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/ParentModeFailure'}
+        '429': {$ref: '#/components/responses/Error'}
+        '503':
+          description: Confirmation unavailable or commit outcome unknown; never automatically retry.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/ParentModeFailure'}
+
+  /account/api/users/{userId}/kids/lists:
+    delete:
+      operationId: removeAccountAllowedListWithParentConfirmation
+      summary: Remove an exact stored allowed-list identity after fresh confirmation
+      description: |
+        This is the existing bodyless DELETE. Identity is the first url query
+        value after the existing Go query decoding and strings.TrimSpace; there
+        is no additional unescape, URL canonicalization, alias or redirect lookup.
+        All exactly equal stored occurrences are removed; other entries retain
+        their original order. A nonempty originally absent identity retains the
+        existing idempotent 200 and updatedAt write after fresh confirmation.
+
+        PostgreSQL requires the current account password even for a master.
+        First 403 parent_authorization_required includes parentIntent with the
+        pli_ prefix. Retry the original bodyless DELETE and complete raw path/
+        query with exactly one X-Parent-Intent plus X-Account-Password. Mode pmi_
+        intents cannot authorize removal. Original session/client/actor/owner,
+        full target row, complete list array, PIN state and revocation epochs
+        remain bound. Concurrent changes, including add/remove ABA, return 409;
+        there is no rebasing onto a later list or automatic replacement intent.
+
+        The private one-shot expires at most 30 seconds after original capture,
+        bounded by the original authority deadlines, not response receipt. A
+        wrong password consumes it. Unknown commit outcome returns 503; reload
+        settings before another explicit action. A lost/canceled reply does not
+        undo an already committed change. JSON mode without PG retains its
+        existing contract and returns no parentIntent.
+
+        Only kidsAllowedLists and updatedAt change. There is no provider read,
+        new playback policy, explicit stream stop or token/session revocation.
+        Existing runtime guards remain independent; immediate stream termination
+        or continued playback is not promised by this mutation.
+      security:
+        - accountSession: []
+      parameters:
+        - $ref: '#/components/parameters/UserID'
+        - $ref: '#/components/parameters/ParentListRemovalIntent'
+        - $ref: '#/components/parameters/ParentAccountPassword'
+        - name: url
+          in: query
+          required: true
+          description: The original stored text, query-encoded once. First decoded value is trimmed only by the existing server rule.
+          schema: {type: string, minLength: 1}
+      responses:
+        '200':
+          description: The targeted stored profile after confirmed removal or idempotent absence.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Profile'}
+        '400': {$ref: '#/components/responses/Error'}
+        '401': {$ref: '#/components/responses/Error'}
+        '403': {$ref: '#/components/responses/ParentListRemovalForbidden'}
+        '404': {$ref: '#/components/responses/Error'}
+        '409':
+          description: Original confirmation expired, consumed or changed; require a new explicit action.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/ParentModeFailure'}
+        '429': {$ref: '#/components/responses/Error'}
+        '503':
+          description: Confirmation unavailable or commit outcome unknown; never automatically retry.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/ParentModeFailure'}
+
   /api/users/{userId}/kids/mode:
     put:
       operationId: setKidsModeWithParentConfirmation
@@ -3500,6 +3695,13 @@ components:
       description: Session token as a query parameter; only accepted on media URLs such as `/api/video/stream`.
 
   parameters:
+    ParentListRemovalIntent:
+      name: X-Parent-Intent
+      in: header
+      description: Exactly one original one-shot allowed-list removal confirmation; cannot authorize a mode change.
+      schema:
+        type: string
+        pattern: '^pli_[0-9a-f]{64}$'
     ParentModeIntent:
       name: X-Parent-Intent
       in: header
@@ -3674,6 +3876,22 @@ components:
         type: string
 
   responses:
+    ParentListRemovalForbidden:
+      description: First PG removal challenge, wrong password, or existing ownership/PIN denial; no challenge replacement on retry.
+      content:
+        application/json:
+          schema:
+            type: object
+            required: [error]
+            properties:
+              error: {type: string}
+              code: {type: string}
+              profileId: {type: string}
+              parentIntent:
+                type: string
+                pattern: '^pli_[0-9a-f]{64}$'
+        text/plain:
+          schema: {type: string}
     ParentModeForbidden:
       description: First PostgreSQL confirmation challenge, wrong password, or existing ownership/PIN denial. A retry never creates a replacement intent.
       content:

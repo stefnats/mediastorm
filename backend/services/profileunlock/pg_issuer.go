@@ -333,16 +333,37 @@ const parentModeMaximumActorEntries = 8
 const parentModeMaximumBytes = 4 << 20
 
 type ParentModeIntent = datastore.ParentModeIntent
+type parentConfirmationAction uint8
+
+const (
+	parentConfirmationMode parentConfirmationAction = iota + 1
+	parentConfirmationListRemoval
+)
+
 type parentModeEntry struct {
+	action   parentConfirmationAction
 	intent   *ParentModeIntent
+	removal  *ParentListRemovalIntent
 	actor    string
 	bytes    int
 	deadline time.Time
 	timer    *time.Timer
 }
 
+func (entry *parentModeEntry) close() {
+	if entry.intent != nil {
+		entry.intent.Close()
+	}
+	if entry.removal != nil {
+		entry.removal.Close()
+	}
+}
+
 func parentModeTokenKey(token string) (string, bool) {
-	if len(token) != 68 || !strings.HasPrefix(token, "pmi_") {
+	return parentConfirmationTokenKey(token, "pmi_")
+}
+func parentConfirmationTokenKey(token, prefix string) (string, bool) {
+	if len(token) != 68 || !strings.HasPrefix(token, prefix) {
 		return "", false
 	}
 	raw, err := hex.DecodeString(token[4:])
@@ -365,48 +386,66 @@ func (v *PGProfilePins) ParentModeChallenge(r *http.Request, target, mode string
 		intent.Close()
 		return "", err
 	}
+	return v.registerParentConfirmation(r, "pmi_", &parentModeEntry{action: parentConfirmationMode, intent: intent, actor: actor, bytes: size, deadline: deadline})
+}
+
+// Both typed actions share one bounded registry; neither can spend a second
+// per-account budget or reinterpret a slot belonging to the other action.
+func (v *PGProfilePins) registerParentConfirmation(r *http.Request, prefix string, entry *parentModeEntry) (string, error) {
 	var random [32]byte
-	if _, err = rand.Read(random[:]); err != nil {
-		intent.Close()
+	if _, err := rand.Read(random[:]); err != nil {
+		entry.close()
 		return "", datastore.ErrParentModeUnavailable
 	}
-	token := "pmi_" + hex.EncodeToString(random[:])
-	key, _ := parentModeTokenKey(token)
+	token := prefix + hex.EncodeToString(random[:])
+	key, _ := parentConfirmationTokenKey(token, prefix)
 	v.parentModeMu.Lock()
 	defer v.parentModeMu.Unlock()
 	if v.parentModes == nil {
 		v.parentModes = map[string]*parentModeEntry{}
 	}
 	count := 0
-	for existingKey, entry := range v.parentModes {
-		if !entry.deadline.After(time.Now()) {
+	for existingKey, existing := range v.parentModes {
+		if !existing.deadline.After(time.Now()) {
 			delete(v.parentModes, existingKey)
-			v.parentModeBytes -= entry.bytes
-			entry.timer.Stop()
-			entry.intent.Close()
+			v.parentModeBytes -= existing.bytes
+			existing.timer.Stop()
+			existing.close()
 			continue
 		}
-		if entry.actor == actor {
+		if existing.actor == entry.actor {
 			count++
 		}
 	}
-	if len(v.parentModes) >= parentModeMaximumEntries || count >= parentModeMaximumActorEntries || size > parentModeMaximumBytes-v.parentModeBytes || v.parentModes[key] != nil || r.Context().Err() != nil || !deadline.After(time.Now()) {
-		intent.Close()
+	if len(v.parentModes) >= parentModeMaximumEntries || count >= parentModeMaximumActorEntries || entry.bytes > parentModeMaximumBytes-v.parentModeBytes || v.parentModes[key] != nil || r.Context().Err() != nil || !entry.deadline.After(time.Now()) {
+		entry.close()
 		return "", datastore.ErrParentModeUnavailable
 	}
-	entry := &parentModeEntry{intent: intent, actor: actor, bytes: size, deadline: deadline}
 	v.parentModes[key] = entry
-	v.parentModeBytes += size
-	entry.timer = time.AfterFunc(time.Until(deadline), func() {
+	v.parentModeBytes += entry.bytes
+	entry.timer = time.AfterFunc(time.Until(entry.deadline), func() {
 		v.parentModeMu.Lock()
 		defer v.parentModeMu.Unlock()
 		if v.parentModes[key] == entry {
 			delete(v.parentModes, key)
 			v.parentModeBytes -= entry.bytes
-			entry.intent.Close()
+			entry.close()
 		}
 	})
 	return token, nil
+}
+
+func (v *PGProfilePins) claimParentConfirmation(key string, action parentConfirmationAction) *parentModeEntry {
+	v.parentModeMu.Lock()
+	defer v.parentModeMu.Unlock()
+	entry := v.parentModes[key]
+	if entry == nil || entry.action != action {
+		return nil
+	}
+	delete(v.parentModes, key)
+	v.parentModeBytes -= entry.bytes
+	entry.timer.Stop()
+	return entry
 }
 func (v *PGProfilePins) ClaimParentMode(r *http.Request, target, mode, token string) (*ParentModeIntent, error) {
 	if !v.valid() || r == nil || r.URL == nil {
@@ -416,14 +455,7 @@ func (v *PGProfilePins) ClaimParentMode(r *http.Request, target, mode, token str
 	if !valid {
 		return nil, datastore.ErrParentModeChanged
 	}
-	v.parentModeMu.Lock()
-	entry := v.parentModes[key]
-	if entry != nil {
-		delete(v.parentModes, key)
-		v.parentModeBytes -= entry.bytes
-		entry.timer.Stop()
-	}
-	v.parentModeMu.Unlock()
+	entry := v.claimParentConfirmation(key, parentConfirmationMode)
 	if entry == nil {
 		return nil, datastore.ErrParentModeChanged
 	}
@@ -463,4 +495,75 @@ func (v *PGProfilePins) BoundParentModeRequest(r *http.Request, intent *ParentMo
 		return nil, datastore.ErrParentModeUnavailable
 	}
 	return v.store.BoundParentModeRequest(r, intent)
+}
+
+// ParentListRemovalIntent cannot be used as a mode change or media grant.
+type ParentListRemovalIntent = datastore.ParentListRemovalIntent
+
+func (v *PGProfilePins) ParentListRemovalChallenge(r *http.Request, target, listURL string) (string, error) {
+	if !v.valid() || r == nil || r.URL == nil {
+		return "", datastore.ErrParentListRemovalUnavailable
+	}
+	intent, err := v.store.PrepareParentListRemoval(r, target, listURL, RequestTokens(r))
+	if err != nil {
+		return "", err
+	}
+	actor, size, deadline, err := v.store.ParentListRemovalBudget(intent)
+	if err != nil {
+		intent.Close()
+		return "", err
+	}
+	token, err := v.registerParentConfirmation(r, "pli_", &parentModeEntry{action: parentConfirmationListRemoval, removal: intent, actor: actor, bytes: size, deadline: deadline})
+	if err != nil {
+		return "", datastore.ErrParentListRemovalUnavailable
+	}
+	return token, nil
+}
+func (v *PGProfilePins) ClaimParentListRemoval(r *http.Request, target, listURL, token string) (*ParentListRemovalIntent, error) {
+	if !v.valid() || r == nil || r.URL == nil {
+		return nil, datastore.ErrParentListRemovalUnavailable
+	}
+	key, valid := parentConfirmationTokenKey(token, "pli_")
+	if !valid {
+		return nil, datastore.ErrParentListRemovalChanged
+	}
+	entry := v.claimParentConfirmation(key, parentConfirmationListRemoval)
+	if entry == nil {
+		return nil, datastore.ErrParentListRemovalChanged
+	}
+	if !entry.deadline.After(time.Now()) {
+		entry.close()
+		return nil, datastore.ErrParentListRemovalChanged
+	}
+	if err := v.store.BindParentListRemovalRetry(r, entry.removal, target, listURL, RequestTokens(r)); err != nil {
+		entry.close()
+		return nil, err
+	}
+	return entry.removal, nil
+}
+func (v *PGProfilePins) ImmediateParentListRemoval(r *http.Request, target, listURL string) (*ParentListRemovalIntent, error) {
+	if !v.valid() || r == nil || r.URL == nil {
+		return nil, datastore.ErrParentListRemovalUnavailable
+	}
+	intent, err := v.store.PrepareParentListRemoval(r, target, listURL, RequestTokens(r))
+	if err != nil {
+		return nil, err
+	}
+	if err = v.store.BindParentListRemovalRetry(r, intent, target, listURL, RequestTokens(r)); err != nil {
+		intent.Close()
+		return nil, err
+	}
+	return intent, nil
+}
+func (v *PGProfilePins) VerifyParentListRemoval(r *http.Request, intent *ParentListRemovalIntent) error {
+	if !v.valid() {
+		return datastore.ErrParentListRemovalUnavailable
+	}
+	return v.store.VerifyParentListRemovalPassword(r, intent)
+}
+func (v *PGProfilePins) BoundParentListRemovalRequest(r *http.Request, intent *ParentListRemovalIntent) (*http.Request, error) {
+	if !v.valid() {
+		return nil, datastore.ErrParentListRemovalUnavailable
+	}
+	return v.store.BoundParentListRemovalRequest(r, intent)
 }

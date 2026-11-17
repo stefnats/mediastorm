@@ -82,7 +82,13 @@ func parentModeValid(mode string) bool {
 	return mode == "" || mode == "rating" || mode == "content_list"
 }
 func parentModeRequestBoundary(r *http.Request) (string, string, string, error) {
-	if r == nil || r.URL == nil || r.Method != http.MethodPut || len(r.URL.EscapedPath())+len(r.URL.RawQuery) > 8192 || len(r.Header.Values("X-Client-ID")) > 1 {
+	return parentConfirmationRequestBoundary(r, http.MethodPut)
+}
+
+// Each typed operation supplies its own fixed method; this helper does not
+// choose an action from request input or reinterpret a mode as a list URL.
+func parentConfirmationRequestBoundary(r *http.Request, method string) (string, string, string, error) {
+	if r == nil || r.URL == nil || r.Method != method || len(r.URL.EscapedPath())+len(r.URL.RawQuery) > 8192 || len(r.Header.Values("X-Client-ID")) > 1 {
 		return "", "", "", ErrParentModeChanged
 	}
 	client := r.Header.Get("X-Client-ID")
@@ -248,7 +254,7 @@ func (ds *DataStore) BindParentModeRetry(r *http.Request, i *ParentModeIntent, t
 	s.retryCtx = r.Context()
 	s.cancel = cancel
 	s.mu.Unlock()
-	if err = ds.CheckProfilePinRequestFrame(r); err != nil {
+	if err = ds.CheckProfilePinRequestFrame(r.WithContext(run)); err != nil {
 		return err
 	}
 	tuple, _, _, err := readProfilePinAccess(run, ds.pool, s.original, s.target, s.hashes, true)
