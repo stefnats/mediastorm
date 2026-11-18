@@ -451,7 +451,12 @@ type cachedOriginalLanguageReader interface {
 // never substitute for the existing provider-bound cache validation.
 func (h *DisplayListHandler) originalLanguageMatcher(userID string, q displayListOriginalLanguageQuery) func(string, string) bool {
 	reader, _ := h.metadataForUser(userID).(cachedOriginalLanguageReader)
-	at := time.Now()
+	return originalLanguageMatcherAt(reader, q, time.Now())
+}
+
+// originalLanguageMatcherAt lets cache-only sources bind their own observation
+// without invoking per-user metadata configuration or constructing a provider.
+func originalLanguageMatcherAt(reader cachedOriginalLanguageReader, q displayListOriginalLanguageQuery, at time.Time) func(string, string) bool {
 	type identity struct{ id, kind string }
 	facts := map[identity]string{}
 	return func(id, kind string) bool {
@@ -577,7 +582,7 @@ func queryLovedStoredItems(items []lovedStoredItem, q displayListQueryOptions) (
 
 func displayListOriginalLanguageSupportedSource(source string) bool {
 	switch source {
-	case "watchlist", "custom-list", "custom_user_list", "custom-user-list", "permanent-prequeue", "hidden", "loved-stored", "collection-cached", "continue-watching-cached":
+	case "watchlist", "custom-list", "custom_user_list", "custom-user-list", "permanent-prequeue", "hidden", "loved-stored", "collection-cached", "continue-watching-cached", "recently-watched-cached":
 		return true
 	default:
 		return false
@@ -725,4 +730,114 @@ func queryCachedWatchingItems(items []historypkg.CachedContinueWatchingItem, q d
 		result = append(result, items[i])
 	}
 	return result, alphabet
+}
+
+type cachedRecentWatchesQuery struct {
+	filter        displayListQueryOptions
+	language      displayListOriginalLanguageQuery
+	windowDays    int
+	perProfileCap int
+	limit         int
+	offset        int
+	hideWatched   bool
+}
+
+// Validate every selector before consulting users, history or settings. The path
+// remains the viewer even when an existing client sends matching query aliases.
+func validateCachedRecentWatchesQuery(r *http.Request, viewerID string) (cachedRecentWatchesQuery, error) {
+	q := cachedRecentWatchesQuery{filter: parseDisplayListQuery(r), windowDays: 14}
+	values, err := url.ParseQuery(r.URL.RawQuery)
+	if err != nil {
+		return q, fmt.Errorf("invalid cached recent watches query")
+	}
+	allowed := map[string]bool{}
+	for _, key := range []string{"source", "limit", "offset", "homeView", "titleFilter", "filterMediaType", "sortBy", "sortDirection", "alphabet", "originalLanguages", "includeUnknownOriginalLanguage", "activityWindowDays", "maxItemsPerProfile", "hideWatched", "watchStatus", "genres", "ratingSource", "hideUnreleased", "includeUnwatchedCounts", "includeFacets", "token", "profileUnlock", "profileId", "userId", "clientId"} {
+		allowed[key] = true
+	}
+	for key, items := range values {
+		if !allowed[key] || len(items) != 1 {
+			return q, fmt.Errorf("unsupported or duplicate cached recent watches selector")
+		}
+	}
+	if values.Get("source") != "recently-watched-cached" {
+		return q, fmt.Errorf("invalid cached recent watches source")
+	}
+	for _, key := range []string{"profileId", "userId"} {
+		if value := strings.TrimSpace(values.Get(key)); value != "" && value != viewerID {
+			return q, fmt.Errorf("cached recent watches cannot select another profile")
+		}
+	}
+	for _, key := range []string{"limit", "offset", "activityWindowDays", "maxItemsPerProfile"} {
+		items, exists := values[key]
+		if !exists {
+			continue
+		}
+		n, parseErr := strconv.Atoi(items[0])
+		if parseErr != nil || strconv.Itoa(n) != items[0] || n < 0 {
+			return q, fmt.Errorf("invalid cached recent watches pagination or window")
+		}
+		switch key {
+		case "limit":
+			q.limit = n
+		case "offset":
+			q.offset = n
+		case "activityWindowDays":
+			if n < 1 || n > 90 {
+				return q, fmt.Errorf("cached recent watches window must be between 1 and 90 days")
+			}
+			q.windowDays = n
+		case "maxItemsPerProfile":
+			if n < 1 || n > 20 {
+				return q, fmt.Errorf("cached recent watches cap must be between 1 and 20")
+			}
+			q.perProfileCap = n
+		}
+	}
+	for _, key := range []string{"hideWatched", "hideUnreleased", "includeUnwatchedCounts", "includeFacets"} {
+		items, exists := values[key]
+		if !exists {
+			continue
+		}
+		if items[0] != "true" && items[0] != "false" {
+			return q, fmt.Errorf("invalid cached recent watches boolean")
+		}
+		if key == "hideWatched" {
+			q.hideWatched = items[0] == "true"
+		} else if items[0] != "false" {
+			return q, fmt.Errorf("cached recent watches cannot satisfy metadata-dependent requirements")
+		}
+	}
+	if q.filter.WatchStatus != "" && q.filter.WatchStatus != "all" || len(q.filter.Genres) != 0 || q.filter.RatingSource != "" {
+		return q, fmt.Errorf("cached recent watches cannot satisfy metadata-dependent requirements")
+	}
+	if q.filter.SortBy != "" && q.filter.SortBy != "default" && q.filter.SortBy != "name" {
+		return q, fmt.Errorf("cached recent watches support only default and name sorting")
+	}
+	if q.filter.SortDirection != "" && q.filter.SortDirection != "asc" && q.filter.SortDirection != "desc" {
+		return q, fmt.Errorf("invalid cached recent watches sort direction")
+	}
+	if q.filter.MediaType != "" && q.filter.MediaType != "all" && q.filter.MediaType != "movie" && q.filter.MediaType != "series" {
+		return q, fmt.Errorf("invalid cached recent watches media type")
+	}
+	if q.filter.Alphabet != "" && q.filter.Alphabet != "#" && (len(q.filter.Alphabet) != 1 || q.filter.Alphabet[0] < 'A' || q.filter.Alphabet[0] > 'Z') {
+		return q, fmt.Errorf("invalid cached recent watches alphabet")
+	}
+	viewKind := ""
+	switch values.Get("homeView") {
+	case "", "all":
+	case "movies":
+		viewKind = "movie"
+	case "shows":
+		viewKind = "series"
+	default:
+		return q, fmt.Errorf("cached recent watches support only builtin home views")
+	}
+	if viewKind != "" {
+		if q.filter.MediaType != "" && q.filter.MediaType != "all" && q.filter.MediaType != viewKind {
+			return q, fmt.Errorf("conflicting cached recent watches media selectors")
+		}
+		q.filter.MediaType = viewKind
+	}
+	q.language, err = parseDisplayListOriginalLanguageQuery(r)
+	return q, err
 }
