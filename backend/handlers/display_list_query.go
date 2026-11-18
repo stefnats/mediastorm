@@ -582,7 +582,7 @@ func queryLovedStoredItems(items []lovedStoredItem, q displayListQueryOptions) (
 
 func displayListOriginalLanguageSupportedSource(source string) bool {
 	switch source {
-	case "watchlist", "custom-list", "custom_user_list", "custom-user-list", "permanent-prequeue", "hidden", "loved-stored", "collection-cached", "continue-watching-cached", "recently-watched-cached":
+	case "watchlist", "custom-list", "custom_user_list", "custom-user-list", "permanent-prequeue", "hidden", "loved-stored", "collection-cached", "continue-watching-cached", "recently-watched-cached", "popular-on-server-cached":
 		return true
 	default:
 		return false
@@ -835,6 +835,119 @@ func validateCachedRecentWatchesQuery(r *http.Request, viewerID string) (cachedR
 	if viewKind != "" {
 		if q.filter.MediaType != "" && q.filter.MediaType != "all" && q.filter.MediaType != viewKind {
 			return q, fmt.Errorf("conflicting cached recent watches media selectors")
+		}
+		q.filter.MediaType = viewKind
+	}
+	q.language, err = parseDisplayListOriginalLanguageQuery(r)
+	return q, err
+}
+
+type cachedPopularTitlesQuery struct {
+	filter       displayListQueryOptions
+	language     displayListOriginalLanguageQuery
+	windowDays   int
+	minimumViews int
+	limit        int
+	offset       int
+	hideWatched  bool
+}
+
+// Validate every selector before consulting users, history or settings. The path
+// remains the viewer even when an existing client sends matching query aliases.
+func validateCachedPopularTitlesQuery(r *http.Request, viewerID string) (cachedPopularTitlesQuery, error) {
+	q := cachedPopularTitlesQuery{filter: parseDisplayListQuery(r), minimumViews: 2}
+	values, err := url.ParseQuery(r.URL.RawQuery)
+	if err != nil {
+		return q, fmt.Errorf("invalid cached popular titles query")
+	}
+	allowed := map[string]bool{}
+	for _, key := range []string{"source", "limit", "offset", "homeView", "titleFilter", "filterMediaType", "sortBy", "sortDirection", "alphabet", "originalLanguages", "includeUnknownOriginalLanguage", "activityWindowDays", "minimumViews", "minimumProfiles", "hideWatched", "watchStatus", "genres", "ratingSource", "hideUnreleased", "includeUnwatchedCounts", "includeFacets", "token", "profileUnlock", "profileId", "userId", "clientId"} {
+		allowed[key] = true
+	}
+	for key, items := range values {
+		if !allowed[key] || len(items) != 1 {
+			return q, fmt.Errorf("unsupported or duplicate cached popular titles selector")
+		}
+	}
+	if values.Get("source") != "popular-on-server-cached" {
+		return q, fmt.Errorf("invalid cached popular titles source")
+	}
+	for _, key := range []string{"profileId", "userId"} {
+		if value := strings.TrimSpace(values.Get(key)); value != "" && value != viewerID {
+			return q, fmt.Errorf("cached popular titles cannot select another profile")
+		}
+	}
+	for _, key := range []string{"limit", "offset", "activityWindowDays", "minimumViews", "minimumProfiles"} {
+		items, exists := values[key]
+		if !exists {
+			continue
+		}
+		n, parseErr := strconv.Atoi(items[0])
+		if parseErr != nil || strconv.Itoa(n) != items[0] || n < 0 {
+			return q, fmt.Errorf("invalid cached popular titles pagination or window")
+		}
+		switch key {
+		case "limit":
+			q.limit = n
+		case "offset":
+			q.offset = n
+		case "activityWindowDays":
+			if n < 7 || n > 365 {
+				return q, fmt.Errorf("cached popular titles window must be between 7 and 365 days")
+			}
+			q.windowDays = n
+		case "minimumViews", "minimumProfiles":
+			if n < 1 || n > 100 {
+				return q, fmt.Errorf("cached popular titles minimum views must be between 1 and 100")
+			}
+			q.minimumViews = n
+		}
+	}
+	if values.Has("minimumViews") && values.Has("minimumProfiles") && values.Get("minimumViews") != values.Get("minimumProfiles") {
+		return q, fmt.Errorf("conflicting cached popular titles minimum views")
+	}
+	for _, key := range []string{"hideWatched", "hideUnreleased", "includeUnwatchedCounts", "includeFacets"} {
+		items, exists := values[key]
+		if !exists {
+			continue
+		}
+		if items[0] != "true" && items[0] != "false" {
+			return q, fmt.Errorf("invalid cached popular titles boolean")
+		}
+		if key == "hideWatched" {
+			q.hideWatched = items[0] == "true"
+		} else if items[0] != "false" {
+			return q, fmt.Errorf("cached popular titles cannot satisfy metadata-dependent requirements")
+		}
+	}
+	if q.filter.WatchStatus != "" && q.filter.WatchStatus != "all" || len(q.filter.Genres) != 0 || q.filter.RatingSource != "" {
+		return q, fmt.Errorf("cached popular titles cannot satisfy metadata-dependent requirements")
+	}
+	if q.filter.SortBy != "" && q.filter.SortBy != "default" && q.filter.SortBy != "name" {
+		return q, fmt.Errorf("cached popular titles support only default and name sorting")
+	}
+	if q.filter.SortDirection != "" && q.filter.SortDirection != "asc" && q.filter.SortDirection != "desc" {
+		return q, fmt.Errorf("invalid cached popular titles sort direction")
+	}
+	if q.filter.MediaType != "" && q.filter.MediaType != "all" && q.filter.MediaType != "movie" && q.filter.MediaType != "series" {
+		return q, fmt.Errorf("invalid cached popular titles media type")
+	}
+	if q.filter.Alphabet != "" && q.filter.Alphabet != "#" && (len(q.filter.Alphabet) != 1 || q.filter.Alphabet[0] < 'A' || q.filter.Alphabet[0] > 'Z') {
+		return q, fmt.Errorf("invalid cached popular titles alphabet")
+	}
+	viewKind := ""
+	switch values.Get("homeView") {
+	case "", "all":
+	case "movies":
+		viewKind = "movie"
+	case "shows":
+		viewKind = "series"
+	default:
+		return q, fmt.Errorf("cached popular titles support only builtin home views")
+	}
+	if viewKind != "" {
+		if q.filter.MediaType != "" && q.filter.MediaType != "all" && q.filter.MediaType != viewKind {
+			return q, fmt.Errorf("conflicting cached popular titles media selectors")
 		}
 		q.filter.MediaType = viewKind
 	}

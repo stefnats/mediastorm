@@ -18,7 +18,8 @@ type RecentWatchSnapshotItem struct {
 }
 
 // RecentWatchesSnapshot owns its projection and remembers the exact history
-// service inputs. It is neither an authorization grant nor a retained pool.
+// service inputs for cached shared-activity views. It is neither an
+// authorization grant nor a retained pool.
 type RecentWatchesSnapshot struct {
 	ObservedAt time.Time                 `json:"-"`
 	Items      []RecentWatchSnapshotItem `json:"-"`
@@ -51,7 +52,28 @@ func recentWatchesCanceled(done <-chan struct{}) bool {
 // mutation. The caller owns eligibleUsers for the duration of this call and must
 // separately recheck contributor privacy and viewer authority before publishing.
 func (s *Service) SnapshotRecentWatches(ctx context.Context, viewerID string, eligibleUsers map[string]models.User, windowDays int, observedAt time.Time) (*RecentWatchesSnapshot, error) {
-	if s == nil || ctx == nil || viewerID == "" || strings.TrimSpace(viewerID) != viewerID || windowDays < 1 || windowDays > 90 || observedAt.IsZero() {
+	if windowDays < 1 || windowDays > 90 {
+		return nil, errors.New("invalid recent watches snapshot request")
+	}
+	return s.snapshotSharedWatches(ctx, viewerID, eligibleUsers, windowDays, observedAt)
+}
+
+// SnapshotPopularWatches copies the complete eligible played history for a
+// seven-to-365-day popularity window. Aggregation, identity binding and filtering
+// belong to the caller; no per-profile cap or popularity threshold is applied.
+// The returned observation retains the same private owner and revision checks
+// as SnapshotRecentWatches, without widening that method's one-to-90-day range.
+func (s *Service) SnapshotPopularWatches(ctx context.Context, viewerID string, eligibleUsers map[string]models.User, windowDays int, observedAt time.Time) (*RecentWatchesSnapshot, error) {
+	if windowDays < 7 || windowDays > 365 {
+		return nil, errors.New("invalid popular watches snapshot request")
+	}
+	return s.snapshotSharedWatches(ctx, viewerID, eligibleUsers, windowDays, observedAt)
+}
+
+// snapshotSharedWatches owns the shared copy/revision boundary. Its entry points
+// enforce their source-specific windows before using this complete scan.
+func (s *Service) snapshotSharedWatches(ctx context.Context, viewerID string, eligibleUsers map[string]models.User, windowDays int, observedAt time.Time) (*RecentWatchesSnapshot, error) {
+	if s == nil || ctx == nil || viewerID == "" || strings.TrimSpace(viewerID) != viewerID || windowDays < 1 || windowDays > 365 || observedAt.IsZero() {
 		return nil, errors.New("invalid recent watches snapshot request")
 	}
 	if err := ctx.Err(); err != nil {
