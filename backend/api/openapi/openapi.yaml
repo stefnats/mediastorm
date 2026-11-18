@@ -3867,7 +3867,8 @@ paths:
         The server sorts and filters before paging; never re-sort pages on the
         client. Use `total` for paging and `genres` for filter facets.
         `items` is `WatchlistItem[]` for `watchlist` / `custom-list`,
-        `TrendingItem[]` for `permanent-prequeue`, `recently-watched-cached` and custom-list shelves,
+        `TrendingItem[]` for `permanent-prequeue`, `recently-watched-cached`,
+        `popular-on-server-cached` and custom-list shelves,
         `HiddenItem[]` for the complete stored `hidden` management index,
         `LovedStoredItem[]` for the complete `loved-stored` browse view,
         plain `Title[]` for `collection-cached`,
@@ -3881,7 +3882,8 @@ paths:
             Up to 32 distinct registered canonical ISO639-3 codes, separated by
             commas. Supported only for stored watchlist, custom-list (including
             aliases and custom-list shelves), permanent-prequeue, hidden, loved-stored
-            and collection-cached / continue-watching-cached / recently-watched-cached. Matches
+            and collection-cached / continue-watching-cached / recently-watched-cached /
+            popular-on-server-cached. Matches
             current cached provider original-language facts before paging;
             missing, expired or unbound facts are unknown. No provider lookup
             is started. Invalid or unsupported active queries return 400.
@@ -3903,7 +3905,35 @@ paths:
             `popular-on-server`, `recently-watched`, `trending`, `genre`,
             `decade`, `mdblist`, `stremio`, `tmdb-list`, `trakt-list`,
             `publicmetadb-list`, `simkl-list`, `letterboxd-list`,
-            `personalized`, `loved`, `loved-stored`, `custom-ai`, `similar`, `collection`, `collection-cached`, `continue-watching-cached`, `recently-watched-cached`.
+            `personalized`, `loved`, `loved-stored`, `custom-ai`, `similar`, `collection`, `collection-cached`, `continue-watching-cached`, `recently-watched-cached`, `popular-on-server-cached`.
+            `popular-on-server-cached` is an explicit full-session adult-profile
+            browse of complete stored played history shared by opted-in server
+            profiles. Each completed stored movie or episode row counts once;
+            episodes roll up to their exact primary series identity. Repeated
+            plays of the same stored row are not separate observations. Contributor names,
+            user IDs and anonymous contributor group identifiers are not exposed.
+            minimumViews is a completed-item view threshold, not a distinct-profile
+            count; minimumProfiles is its compatibility alias and must agree when
+            both are supplied. Canonical groups use only the exact primary
+            provider, kind and value, never imported unbound side IDs.
+            Current Hidden records, optional viewer hideWatched, cached original
+            language, title, media type and alphabet selection precede the actual
+            total and paging. Alphabet choices cover the eligible pool without
+            the selected-letter restriction. Default ordering is view count,
+            then latest qualifying watch, name and identity; name sorting is also
+            supported. TrendingItem.rank is the completed-item view count, as on
+            the legacy popularity shelf, rather than a page position. limit=0
+            returns the entire finite matching title pool with no discovery cap.
+            Scoped/share sessions, children, unavailable readers and unsupported
+            metadata-dependent requests are rejected using the stored-view rules.
+            Changed history, consent, viewer, Hidden or language observations
+            return 409 with code popular_titles_snapshot_unavailable; required
+            readers unavailable returns 503. Current authority and input revisions
+            are checked again before publishing. No provider lookup, enrichment,
+            settings/history/user write, identity repair, rating observation or
+            fact renewal occurs; existing metadata-cache housekeeping applies.
+            This grants no playback, file, audio-language or age proof. The normal
+            popular-on-server producer and its existing semantics stay separate.
             `recently-watched-cached` is an explicit full-session adult-profile
             browse of stored played history shared by opted-in server profiles.
             It preserves current owned-profile and PIN checks; scoped/share
@@ -4020,12 +4050,31 @@ paths:
           schema: {type: integer, format: int64, minimum: 1}
         - name: activityWindowDays
           in: query
-          description: Activity window for recently-watched and recently-watched-cached. The cached source filters the complete stored window before its per-contributor cap.
+          description: |
+            Source-specific activity window. Recently-watched sources allow
+            1..90 days and default to 14. Popular-on-server sources allow 7..365
+            days and default to the configured window, or 90. Cached views use
+            the complete stored window before their filters and paging.
           schema:
             type: integer
             minimum: 1
-            maximum: 90
-            default: 14
+            maximum: 365
+        - name: minimumViews
+          in: query
+          description: Completed stored media-item view threshold for popular-on-server-cached, not a count of distinct profiles or replay events.
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 100
+            default: 2
+        - name: minimumProfiles
+          in: query
+          deprecated: true
+          description: Compatibility name for the completed-item view threshold on popularity sources. On popular-on-server-cached it must agree with minimumViews when both are supplied; it never means distinct profiles.
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 100
         - name: maxItemsPerProfile
           in: query
           description: Per-contributor cap for recently-watched and recently-watched-cached. Defaults to the configured cap, or 3. For the cached source all supported visibility and language filters precede this cap.
@@ -4035,7 +4084,7 @@ paths:
             maximum: 20
         - name: hideWatched
           in: query
-          description: Hide titles already watched by the current viewer where supported. On recently-watched-cached this uses stored viewer history before the per-contributor cap; it does not build progress or fetch metadata.
+          description: Hide titles already watched by the current viewer where supported. On the cached shared-history sources this uses stored viewer history before selection and paging; it does not build progress or fetch metadata.
           schema:
             type: boolean
             default: false
@@ -7938,7 +7987,7 @@ components:
         originalLanguageFilterSupported:
           type: boolean
           readOnly: true
-          description: True only for normalized stored watchlist, custom-list, permanent-prequeue, hidden, loved-stored and explicit collection-cached / continue-watching-cached / recently-watched-cached sources. On these sources total is the effective filtered count before pagination; sourceTotal or unfilteredTotal must not drive paging.
+          description: True only for normalized stored watchlist, custom-list, permanent-prequeue, hidden, loved-stored and explicit collection-cached / continue-watching-cached / recently-watched-cached / popular-on-server-cached sources. On these sources total is the effective filtered count before pagination; sourceTotal or unfilteredTotal must not drive paging.
         pool:
           type: object
           description: Present only for continue-watching-cached. Original complete feed observation; not a language-view snapshot or grant.

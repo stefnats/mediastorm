@@ -2,9 +2,7 @@ package handlers
 
 import (
 	"context"
-	"crypto/sha256"
 	"encoding/json"
-	"errors"
 	"io"
 	"net/http"
 	"os"
@@ -14,126 +12,19 @@ import (
 	"time"
 
 	"github.com/gorilla/mux"
-	"novastream/internal/auth"
 	"novastream/internal/mediaidentity"
-	"novastream/internal/profileaccess"
 	"novastream/models"
 	historypkg "novastream/services/history"
 )
 
 type cachedRecentWatchesReader interface {
 	SnapshotRecentWatches(context.Context, string, map[string]models.User, int, time.Time) (*historypkg.RecentWatchesSnapshot, error)
-	RecentWatchesSnapshotCurrent(*historypkg.RecentWatchesSnapshot) bool
-	GetWatchHistoryItem(string, string, string) (*models.WatchHistoryItem, error)
+	cachedSharedActivityHistory
 }
 
 func hasCachedRecentWatchesSource(r *http.Request) bool {
 	for _, source := range r.URL.Query()["source"] {
 		if strings.EqualFold(strings.TrimSpace(source), "recently-watched-cached") {
-			return true
-		}
-	}
-	return false
-}
-
-func cachedRecentWatchesError(w http.ResponseWriter, status int, code string) {
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(status)
-	_ = json.NewEncoder(w).Encode(map[string]string{"code": code, "error": "Cached recent watches unavailable"})
-}
-
-func cachedRecentViewerStamp(user models.User) ([32]byte, error) {
-	// User.MarshalJSON omits PinHash. Bind it privately as well, without putting
-	// either the profile or its credential stamp in the response or diagnostics.
-	raw, err := json.Marshal(struct {
-		Profile models.User
-		PinHash string
-	}{user, user.PinHash})
-	return sha256.Sum256(raw), err
-}
-
-func cachedRecentContributors(users []models.User) (map[string]models.User, [32]byte, error) {
-	eligible, _ := eligibleSharedShelfUsers(users)
-	type contributor struct {
-		ID, AccountID, Name, Privacy string
-		Kids                         bool
-		CreatedAt, UpdatedAt         time.Time
-	}
-	facts := make([]contributor, 0, len(eligible))
-	for id, user := range eligible {
-		if id == "" || id != strings.TrimSpace(id) || user.ID != id {
-			return nil, [32]byte{}, errors.New("invalid shared contributor")
-		}
-		facts = append(facts, contributor{id, user.AccountID, user.Name, user.ActivityPrivacy, user.IsKidsProfile, user.CreatedAt, user.UpdatedAt})
-	}
-	sort.Slice(facts, func(i, j int) bool { return facts[i].ID < facts[j].ID })
-	raw, err := json.Marshal(facts)
-	return eligible, sha256.Sum256(raw), err
-}
-
-type cachedRecentHidden struct {
-	stamp  [32]byte
-	tokens map[string]struct{}
-}
-
-// Only the exact primary ID can establish equivalence between legacy and
-// canonical provider forms. Saved side IDs and card scalar fields are not proof.
-func cachedRecentPrimaryTokens(id, kind string) map[string]struct{} {
-	title, valid := cachedRecentTitle(models.RecentWatch{ItemID: id, MediaType: mediaidentity.NormalizeMediaType(kind)})
-	if !valid {
-		return nil
-	}
-	providers := make(map[string]string)
-	if title.TMDBID > 0 {
-		providers["tmdb"] = strconv.FormatInt(title.TMDBID, 10)
-	}
-	if title.TVDBID > 0 {
-		providers["tvdb"] = strconv.FormatInt(title.TVDBID, 10)
-	}
-	if title.IMDBID != "" {
-		providers["imdb"] = title.IMDBID
-	}
-	return mediaidentity.IdentityTokens(title.MediaType, title.ID, "", 0, 0, providers)
-}
-
-func (h *DisplayListHandler) cachedRecentHiddenItems(viewer string) (cachedRecentHidden, error) {
-	result := cachedRecentHidden{tokens: make(map[string]struct{})}
-	if h.HiddenItemsService == nil {
-		return result, errors.New("hidden reader unavailable")
-	}
-	items, err := h.HiddenItemsService.List(viewer)
-	if err != nil {
-		return result, err
-	}
-	owned := make([]models.HiddenItem, len(items))
-	for i, item := range items {
-		owned[i] = item
-		if item.ExternalIDs != nil {
-			owned[i].ExternalIDs = make(map[string]string, len(item.ExternalIDs))
-			for key, value := range item.ExternalIDs {
-				owned[i].ExternalIDs[key] = value
-			}
-		}
-		identity := mediaidentity.Resolve(mediaidentity.Input{MediaType: item.MediaType, ID: item.ID, ExternalIDs: owned[i].ExternalIDs})
-		for token := range identity.Tokens {
-			result.tokens[identity.MediaType+"\x00"+token] = struct{}{}
-		}
-		for token := range cachedRecentPrimaryTokens(item.ID, item.MediaType) {
-			result.tokens[identity.MediaType+"\x00"+token] = struct{}{}
-		}
-	}
-	raw, err := json.Marshal(owned)
-	result.stamp = sha256.Sum256(raw)
-	return result, err
-}
-
-func (hidden cachedRecentHidden) hides(title models.Title) bool {
-	identity := mediaidentity.Resolve(mediaidentity.Input{MediaType: title.MediaType, ID: title.ID})
-	for token := range cachedRecentPrimaryTokens(title.ID, title.MediaType) {
-		identity.Tokens[token] = struct{}{}
-	}
-	for token := range identity.Tokens {
-		if _, found := hidden.tokens[identity.MediaType+"\x00"+token]; found {
 			return true
 		}
 	}
@@ -270,48 +161,13 @@ func (h *DisplayListHandler) getCachedRecentWatches(w http.ResponseWriter, r *ht
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
-	fail := func(status int, code string) { cachedRecentWatchesError(w, status, code) }
-	if auth.IsShareLinkRequest(r) || auth.GetSessionScope(r) != "" {
-		fail(403, "profile_session_required")
-		return
+	fail := func(status int, code string) { cachedRecentActivityCodes.fail(w, status, code) }
+	var reader cachedRecentWatchesReader
+	if h.HistoryHandler != nil {
+		reader, _ = h.HistoryHandler.Service.(cachedRecentWatchesReader)
 	}
-	if _, ok := h.requireUser(w, r); !ok {
-		return
-	}
-	if r.Context().Err() != nil {
-		return
-	}
-	if h.MetadataHandler == nil || h.MetadataHandler.UsersService == nil || h.HistoryHandler == nil {
-		fail(503, "recent_watches_reader_unavailable")
-		return
-	}
-	profile, found := h.MetadataHandler.UsersService.Get(viewer)
-	if !found || profile.ID != viewer || !auth.IsMaster(r) && (auth.GetAccountID(r) == "" || profile.AccountID != auth.GetAccountID(r)) {
-		fail(404, "profile_not_found")
-		return
-	}
-	if !profileaccess.CheckResource(w, r, viewer, "") {
-		return
-	}
-	if profile.IsKidsProfile {
-		fail(403, "kids_recent_watches_unavailable")
-		return
-	}
-	profileStamp, err := cachedRecentViewerStamp(profile)
-	if err != nil {
-		fail(503, "recent_watches_reader_unavailable")
-		return
-	}
-	users, usersOK := h.MetadataHandler.UsersService.(sharedShelfUsersService)
-	reader, historyOK := h.HistoryHandler.Service.(cachedRecentWatchesReader)
-	languages, languageOK := h.MetadataHandler.Service.(cachedOriginalLanguageReader)
-	if !usersOK || !historyOK || !languageOK {
-		fail(503, "recent_watches_reader_unavailable")
-		return
-	}
-	eligible, privacyStamp, err := cachedRecentContributors(users.ListAll())
-	if err != nil {
-		fail(503, "recent_watches_reader_unavailable")
+	observation, ok := h.captureCachedSharedActivity(w, r, viewer, cachedRecentActivityCodes, reader != nil)
+	if !ok {
 		return
 	}
 	cap := query.perProfileCap
@@ -323,7 +179,7 @@ func (h *DisplayListHandler) getCachedRecentWatches(w http.ResponseWriter, r *ht
 		}
 	}
 	at := time.Now()
-	snapshot, err := reader.SnapshotRecentWatches(r.Context(), viewer, eligible, query.windowDays, at)
+	snapshot, err := reader.SnapshotRecentWatches(r.Context(), viewer, observation.eligible, query.windowDays, at)
 	if r.Context().Err() != nil {
 		return
 	}
@@ -331,14 +187,11 @@ func (h *DisplayListHandler) getCachedRecentWatches(w http.ResponseWriter, r *ht
 		fail(409, "recent_watches_snapshot_unavailable")
 		return
 	}
-	hidden, err := h.cachedRecentHiddenItems(viewer)
-	if err != nil {
-		fail(503, "recent_watches_reader_unavailable")
+	if !observation.captureHidden(w) {
 		return
 	}
-	type identity struct{ id, kind string }
-	membership := map[identity]bool{}
-	matches := originalLanguageMatcherAt(languages, query.language, at)
+	membership := map[cachedSharedLanguageIdentity]bool{}
+	matches := originalLanguageMatcherAt(observation.languages, query.language, at)
 	cards := make([]cachedRecentCard, 0, len(snapshot.Items))
 	for _, row := range snapshot.Items {
 		if r.Context().Err() != nil {
@@ -349,7 +202,7 @@ func (h *DisplayListHandler) getCachedRecentWatches(w http.ResponseWriter, r *ht
 			return
 		}
 		title, valid := cachedRecentTitle(row.Watch)
-		if !valid || hidden.hides(title) {
+		if !valid || observation.hidden.hides(title) {
 			continue
 		}
 		if query.filter.MediaType != "" && query.filter.MediaType != "all" && title.MediaType != query.filter.MediaType {
@@ -369,7 +222,7 @@ func (h *DisplayListHandler) getCachedRecentWatches(w http.ResponseWriter, r *ht
 			}
 		}
 		if query.language.active() {
-			key := identity{title.ID, title.MediaType}
+			key := cachedSharedLanguageIdentity{title.ID, title.MediaType}
 			membership[key] = matches(key.id, key.kind)
 			if !membership[key] {
 				continue
@@ -432,46 +285,14 @@ func (h *DisplayListHandler) getCachedRecentWatches(w http.ResponseWriter, r *ht
 			items = items[:query.limit]
 		}
 	}
-	// Cache membership is checked again before authority/privacy checks. These
-	// independent observations do not claim one transaction across all services.
-	currentMatches := originalLanguageMatcherAt(languages, query.language, time.Now())
-	for key, accepted := range membership {
-		if currentMatches(key.id, key.kind) != accepted {
-			fail(409, "recent_watches_snapshot_unavailable")
-			return
+	configurationCurrent := func() bool {
+		if query.perProfileCap != 0 {
+			return true
 		}
-	}
-	latest, found := h.MetadataHandler.UsersService.Get(viewer)
-	latestStamp, stampErr := cachedRecentViewerStamp(latest)
-	if !profileaccess.CheckResource(w, r, viewer, "") {
-		return
-	}
-	if !found || stampErr != nil || latestStamp != profileStamp {
-		fail(409, "recent_watches_snapshot_unavailable")
-		return
-	}
-	_, currentPrivacy, err := cachedRecentContributors(users.ListAll())
-	if err != nil || currentPrivacy != privacyStamp {
-		fail(409, "recent_watches_snapshot_unavailable")
-		return
-	}
-	currentHidden, err := h.cachedRecentHiddenItems(viewer)
-	if err != nil {
-		fail(503, "recent_watches_reader_unavailable")
-		return
-	}
-	if query.perProfileCap == 0 {
 		currentCap, err := h.cachedRecentProfileCap()
-		if err != nil || currentCap != cap {
-			fail(409, "recent_watches_snapshot_unavailable")
-			return
-		}
+		return err == nil && currentCap == cap
 	}
-	if currentHidden.stamp != hidden.stamp || !reader.RecentWatchesSnapshotCurrent(snapshot) {
-		fail(409, "recent_watches_snapshot_unavailable")
-		return
-	}
-	if r.Context().Err() != nil {
+	if !observation.recheck(w, r, snapshot, query.language, membership, configurationCurrent) {
 		return
 	}
 	w.Header().Set("Content-Type", "application/json")
