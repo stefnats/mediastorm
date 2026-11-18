@@ -228,6 +228,41 @@ with sync_playwright() as pw:
     def name_input(kind):
         return page.locator('#profileName' if kind == 'onboarding' else '[data-profile-create] input[name=name]')
 
+    geometry_checks = []
+
+    def assert_onboarding_geometry(kind, stage):
+        if kind != 'onboarding':
+            return
+        required = ['.onboarding-progress-card', 'section[data-panel="4"].active',
+                    'form[data-profile-create]', '#profileAccountId', '#profileName', '#profilePin',
+                    '#profileColor', 'label.toggle:has(#profileKids)',
+                    'form[data-profile-create] button[type=submit]']
+        geometry = page.evaluate("""selectors => {
+          const required=selectors.map(selector=>({selector,element:document.querySelector(selector)}));
+          const optional=Array.from(document.querySelectorAll(
+            '[data-creation-read],[data-creation-forget],dialog[aria-label="Confirm account password"],dialog[aria-label="Confirm account password"] input[type=password]'
+          )).map(element=>({selector:element.tagName,element}));
+          const controls=required.concat(optional).map(({selector,element},index)=>{
+            if(!element)return {selector,required:index<required.length,visible:false};
+            const rect=element.getBoundingClientRect(),style=getComputedStyle(element);
+            return {selector,required:index<required.length,
+              visible:style.display!=='none'&&style.visibility!=='hidden'&&rect.width>0&&rect.height>0,
+              left:rect.left,right:rect.right,width:rect.width};
+          });
+          return {viewport:window.innerWidth,clientWidth:document.documentElement.clientWidth,
+            documentScrollWidth:document.documentElement.scrollWidth,bodyScrollWidth:document.body.scrollWidth,controls};
+        }""", required)
+        geometry_checks.append({'stage': stage, **geometry})
+        (out / 'layout-geometry.json').write_text(json.dumps(geometry_checks, indent=2) + '\n')
+        assert geometry['clientWidth'] == geometry['viewport'], 'Unexpected layout viewport'
+        assert geometry['documentScrollWidth'] <= geometry['viewport'], 'Onboarding document overflows horizontally'
+        assert geometry['bodyScrollWidth'] <= geometry['viewport'], 'Onboarding body overflows horizontally'
+        for control in geometry['controls']:
+            if control['required']:
+                assert control['visible'], control['selector'] + ' unexpectedly hidden'
+            if control['visible']:
+                assert control['left'] >= -0.5 and control['right'] <= geometry['viewport'] + 0.5, control['selector'] + ' is clipped horizontally'
+
     def confirm():
         dialog().wait_for(state='visible')
         dialog().locator('input[type=password]').fill('synthetic-web-parent')
@@ -268,12 +303,22 @@ with sync_playwright() as pw:
         for width, height in [(1280, 900), (390, 844)]:
             page.set_viewport_size({'width': width, 'height': height})
             loaded(kind)
+            assert_onboarding_geometry(kind, 'idle-' + str(width))
+            if kind == 'onboarding' and width == 390:
+                # Probe a narrower idle form without changing its DOM or values.
+                try:
+                    page.set_viewport_size({'width': 360, 'height': 800})
+                    assert_onboarding_geometry(kind, 'idle-360')
+                finally:
+                    page.set_viewport_size({'width': width, 'height': height})
+                assert_onboarding_geometry(kind, 'idle-390-restored')
             form = fill(kind, 'Synthetic direct ' + kind + ' ' + str(width))
             before = state()
             form.locator('button[type=submit]').click()
             dialog().wait_for(state='visible')
             assert len(stored()) == 1
             assert state()['commits'] == before['commits']
+            assert_onboarding_geometry(kind, 'confirmation-' + str(width))
             page.screenshot(path=str(out / ('confirmation-' + kind + '-' + str(width) + '.png')), full_page=True)
             confirm()
             page.wait_for_function("""basePath => window.createProfileCreationClient({
@@ -310,6 +355,7 @@ with sync_playwright() as pw:
         assert name_input(kind).input_value() == draft
         assert page.locator('[data-profile-create]').is_visible()
         assert dialog().count() == 0
+        assert_onboarding_geometry(kind, 'recovered-390')
         page.screenshot(path=str(out / ('recovered-' + kind + '-390.png')), full_page=True)
 
         # Actual challenge cancellation, input ABA and duplicate submission:
