@@ -95,6 +95,10 @@ func (h *DisplayListHandler) SetPrequeueStore(store persistentPrequeueStore) {
 }
 
 func (h *DisplayListHandler) Get(w http.ResponseWriter, r *http.Request) {
+	if hasCachedRecentWatchesSource(r) {
+		h.getCachedRecentWatches(w, r)
+		return
+	}
 	if _, err := parseDisplayListOriginalLanguageQuery(r); err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
