@@ -1095,3 +1095,71 @@ func validateCachedTMDBPublicListQuery(r *http.Request, viewer string) (cachedTM
 	q.language, err = parseDisplayListOriginalLanguageQuery(r)
 	return q, err
 }
+
+type cachedTMDBPersonCreditsQuery struct {
+	filter        displayListQueryOptions
+	language      displayListOriginalLanguageQuery
+	personID      int64
+	limit, offset int
+}
+
+// Reject unsupported selectors before any profile, settings or cache access.
+func validateCachedTMDBPersonCreditsQuery(r *http.Request, viewer string) (cachedTMDBPersonCreditsQuery, error) {
+	q := cachedTMDBPersonCreditsQuery{filter: parseDisplayListQuery(r)}
+	values, err := url.ParseQuery(r.URL.RawQuery)
+	if err != nil {
+		return q, fmt.Errorf("invalid cached TMDB person cast titles query")
+	}
+	allowed := map[string]bool{}
+	for _, key := range []string{"source", "personId", "filterMediaType", "titleFilter", "sortBy", "sortDirection", "alphabet", "originalLanguages", "includeUnknownOriginalLanguage", "limit", "offset", "token", "profileUnlock", "profileId", "userId", "clientId"} {
+		allowed[key] = true
+	}
+	for key, values := range values {
+		if !allowed[key] || len(values) != 1 {
+			return q, fmt.Errorf("unsupported or duplicate cached TMDB person cast titles selector")
+		}
+	}
+	if values.Get("source") != "tmdb-person-credits-cached" || viewer == "" || strings.TrimSpace(viewer) != viewer {
+		return q, fmt.Errorf("invalid cached TMDB person cast titles source")
+	}
+	q.personID, err = strconv.ParseInt(values.Get("personId"), 10, 64)
+	if err != nil || q.personID <= 0 || strconv.FormatInt(q.personID, 10) != values.Get("personId") {
+		return q, fmt.Errorf("invalid cached TMDB person cast titles identity")
+	}
+	for _, key := range []string{"profileId", "userId"} {
+		if value := strings.TrimSpace(values.Get(key)); value != "" && value != viewer {
+			return q, fmt.Errorf("cached TMDB person cast titles cannot select another profile")
+		}
+	}
+	for _, key := range []string{"limit", "offset"} {
+		if !values.Has(key) {
+			continue
+		}
+		n, err := strconv.Atoi(values.Get(key))
+		if err != nil || n < 0 || strconv.Itoa(n) != values.Get(key) {
+			return q, fmt.Errorf("invalid cached TMDB person cast titles pagination")
+		}
+		if key == "limit" {
+			q.limit = n
+		} else {
+			q.offset = n
+		}
+	}
+	if values.Has("filterMediaType") && values.Get("filterMediaType") != "all" && values.Get("filterMediaType") != "movie" && values.Get("filterMediaType") != "series" {
+		return q, fmt.Errorf("invalid cached TMDB person cast titles media filter")
+	}
+	if values.Has("sortBy") && values.Get("sortBy") != "default" && values.Get("sortBy") != "name" {
+		return q, fmt.Errorf("unsupported cached TMDB person cast titles sort")
+	}
+	if values.Has("sortDirection") && values.Get("sortDirection") != "asc" && values.Get("sortDirection") != "desc" {
+		return q, fmt.Errorf("invalid cached TMDB person cast titles sort direction")
+	}
+	if values.Has("alphabet") {
+		a := values.Get("alphabet")
+		if a != "#" && (len(a) != 1 || a[0] < 'A' || a[0] > 'Z') {
+			return q, fmt.Errorf("invalid cached TMDB person cast titles alphabet")
+		}
+	}
+	q.language, err = parseDisplayListOriginalLanguageQuery(r)
+	return q, err
+}

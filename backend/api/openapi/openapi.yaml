@@ -3871,7 +3871,7 @@ paths:
         `popular-on-server-cached` and custom-list shelves,
         `HiddenItem[]` for the complete stored `hidden` management index,
         `LovedStoredItem[]` for the complete `loved-stored` browse view,
-        plain `Title[]` for `collection-cached`, `similar-cached` and `tmdb-public-list-cached`,
+        plain `Title[]` for `collection-cached`, `similar-cached` and `tmdb-public-list-cached` / `tmdb-person-credits-cached`,
         whitelisted `CachedContinueWatchingItem[]` for `continue-watching-cached`, and
         the delegated metadata payload (usually `TrendingItem[]`) for
         discovery sources.
@@ -3883,7 +3883,7 @@ paths:
             commas. Supported only for stored watchlist, custom-list (including
             aliases and custom-list shelves), permanent-prequeue, hidden, loved-stored
             and collection-cached / continue-watching-cached / recently-watched-cached /
-            popular-on-server-cached / similar-cached / tmdb-public-list-cached. Matches
+            popular-on-server-cached / similar-cached / tmdb-public-list-cached / tmdb-person-credits-cached. Matches
             current cached provider original-language facts before paging;
             missing, expired or unbound facts are unknown. No provider lookup
             is started. Invalid or unsupported active queries return 400.
@@ -3905,7 +3905,46 @@ paths:
             `popular-on-server`, `recently-watched`, `trending`, `genre`,
             `decade`, `mdblist`, `stremio`, `tmdb-list`, `trakt-list`,
             `publicmetadb-list`, `simkl-list`, `letterboxd-list`,
-            `personalized`, `loved`, `loved-stored`, `custom-ai`, `tmdb-public-list-cached`, `similar`, `similar-cached`, `collection`, `collection-cached`, `continue-watching-cached`, `recently-watched-cached`, `popular-on-server-cached`.
+            `personalized`, `loved`, `loved-stored`, `custom-ai`, `tmdb-public-list-cached`, `tmdb-person-credits-cached`, `similar`, `similar-cached`, `collection`, `collection-cached`, `continue-watching-cached`, `recently-watched-cached`, `popular-on-server-cached`.
+            `tmdb-person-credits-cached` reads unique title membership from one
+            saved finite cast array of the existing global-key person-credits
+            operation. Requires canonical positive numeric personId; director,
+            crew, job, department and discover selectors are not accepted.
+            Only a successful normal combined_credits decode in the person mode
+            records this source, before later local media/filter/sort/page work.
+            Later high-level filter/enrichment errors can follow a valid saved
+            observation. Director mode, crew and legacy assembled v5 pages never
+            establish it. Missing/null cast is unavailable; explicit [] is valid.
+            Every raw row is validated before first-occurrence deduplication by
+            explicit media kind plus primary TMDB number. The first exact primary
+            label wins, including blank/space labels; later duplicates never
+            repair it. Movie42 and series42 remain distinct. The observation is
+            bounded at4096 raw cast rows and4MiB serialized stored projection,
+            with fixed expiry at most24h or the shorter positive base cache TTL.
+            This is not a complete upstream filmography or role/episode count.
+            Responses contain plain Title[] and personCredits with fixed
+            sourceType person-credits and scope returned-cast-titles, personId,
+            metadataLanguage, observedAt and expiresAt. Primary identities and
+            labels grant no side-ID, artwork, audio/file, age or playback claim.
+            Current full adult session, owned profile/PIN/master policy,
+            original service identity and pure effective locale preferences are
+            required. Scoped/share sessions and child profiles are rejected.
+            Hidden, selected cached original-language membership, whole saved
+            observation and expiry are rechecked before publication, without
+            claiming an atomic global transaction or immutable future pages.
+            Original-language/Unknown OR, title, kind and alphabet filtering
+            precede exact deduplicated total and page selection over the whole
+            bounded set, including beyond the ordinary local500-title window.
+            Only default/name sorting is supported; alphabet facets omit the
+            selected-letter restriction. limit=0 returns the finite filtered pool.
+            Unsupported, duplicate and noncanonical selectors return400 before
+            readers. Only filterMediaType selects movie/series/all on this source.
+            Missing/expired/malformed/changed observations return409 with code
+            tmdb_person_credits_snapshot_unavailable; unavailable reader or
+            preference inputs return503. Reads never generate, fetch, enrich,
+            save settings, renew snapshots or fall back to normal source work.
+            Existing original-language lookup can remove expired fact files;
+            the new strict cast snapshot reader changes no files.
             `tmdb-public-list-cached` explicitly reads one bounded saved item
             array from the existing normal global-key TMDB public-list operation.
             Requires canonical positive numeric listId. Only that successful
@@ -4113,6 +4152,10 @@ paths:
         - name: tmdbId
           in: query
           description: Required positive canonical seed TMDB ID for similar-cached.
+          schema: {type: integer, format: int64, minimum: 1}
+        - name: personId
+          in: query
+          description: Required positive canonical TMDB person identifier for tmdb-person-credits-cached.
           schema: {type: integer, format: int64, minimum: 1}
         - name: mediaType
           in: query
@@ -8061,7 +8104,19 @@ components:
         originalLanguageFilterSupported:
           type: boolean
           readOnly: true
-          description: True only for normalized stored watchlist, custom-list, permanent-prequeue, hidden, loved-stored and explicit collection-cached / similar-cached / tmdb-public-list-cached / continue-watching-cached / recently-watched-cached / popular-on-server-cached sources. On these sources total is the effective filtered count before pagination; sourceTotal or unfilteredTotal must not drive paging.
+          description: True only for normalized stored watchlist, custom-list, permanent-prequeue, hidden, loved-stored and explicit collection-cached / similar-cached / tmdb-public-list-cached / tmdb-person-credits-cached / continue-watching-cached / recently-watched-cached / popular-on-server-cached sources. On these sources total is the effective filtered count before pagination; sourceTotal or unfilteredTotal must not drive paging.
+        personCredits:
+          type: object
+          description: Present only for tmdb-person-credits-cached. Unique title membership of one finite normal cast array; not full filmography, credit/role counts, renewal or an access grant.
+          additionalProperties: false
+          required: [personId, sourceType, metadataLanguage, observedAt, expiresAt, scope]
+          properties:
+            personId: {type: integer, format: int64, minimum: 1}
+            sourceType: {type: string, enum: [person-credits]}
+            metadataLanguage: {type: string}
+            observedAt: {type: string, format: date-time}
+            expiresAt: {type: string, format: date-time}
+            scope: {type: string, enum: [returned-cast-titles]}
         publicList:
           type: object
           description: Present only for tmdb-public-list-cached. Finite item array observed in the normal global-key public-list operation, not upstream completeness, a verified provider visibility flag or an access grant.
