@@ -16,7 +16,7 @@ func newBulkTestScrobbler(t *testing.T, transport func(*http.Request) (*http.Res
 	t.Helper()
 	client := NewClient("client-id", "secret")
 	client.SetHTTPClientForTest(&http.Client{Transport: traktRoundTripFunc(transport)})
-	mgr := newTestConfigManager(t, config.Settings{Trakt: config.TraktSettings{Accounts: []config.TraktAccount{{ID: "account", ClientID: "client-id", ClientSecret: "secret", AccessToken: "token", ExpiresAt: time.Now().Add(time.Hour).Unix(), ScrobblingEnabled: true}}}})
+	mgr := newTestConfigManager(t, config.Settings{Trakt: config.TraktSettings{Accounts: []config.TraktAccount{{ID: "account", ClientID: "client-id", ClientSecret: "secret", AccessToken: "token", ExpiresAt: time.Now().Add(2 * time.Hour).Unix(), ScrobblingEnabled: true}}}})
 	s := NewScrobbler(client, mgr)
 	s.SetUserService(&mockTraktUserService{users: map[string]models.User{"user": {ID: "user", TraktAccountID: "account"}}})
 	return s

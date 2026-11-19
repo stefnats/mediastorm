@@ -67,7 +67,7 @@ func TestUnscrobbleEpisodeRemovesTraktHistory(t *testing.T) {
 		return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader(`{"deleted":{"episodes":1}}`)), Header: make(http.Header)}, nil
 	})})
 	mgr := newTestConfigManager(t, config.Settings{Trakt: config.TraktSettings{Accounts: []config.TraktAccount{{
-		ID: "trakt-1", ClientID: "client-id", ClientSecret: "secret", AccessToken: "token", ExpiresAt: time.Now().Add(time.Hour).Unix(), ScrobblingEnabled: true,
+		ID: "trakt-1", ClientID: "client-id", ClientSecret: "secret", AccessToken: "token", ExpiresAt: time.Now().Add(2 * time.Hour).Unix(), ScrobblingEnabled: true,
 	}}}})
 	scrobbler := NewScrobbler(client, mgr)
 	scrobbler.SetUserService(&mockTraktUserService{users: map[string]models.User{"user-1": {ID: "user-1", TraktAccountID: "trakt-1"}}})
