@@ -184,12 +184,19 @@ func TestKidsVODIdentityRevisionTracksPINAndOwnershipPrerequisites(t *testing.T)
 }
 
 func TestKidsVODHTTPBridgeUsesStoredOwnerWithoutGrantingDisabledPolicy(t *testing.T) {
-	f := newRootKidsVODIdentityFixture()
-	bridge, ref, pinCalls, policyCalls := f.bridge(t)
-	w := httptest.NewRecorder()
-	intent, decision := bridge.resolve(w, f.request(), "", ref)
-	if intent != nil || !decision.IsNotApplicable() || decision.Allowed() || *pinCalls != 1 || *policyCalls != 1 {
-		t.Fatal("stored owner/PIN/disabled-policy result was not preserved without granting playback")
+	for _, isChild := range []bool{true, false} {
+		f := newRootKidsVODIdentityFixture()
+		f.profile.IsKidsProfile = isChild
+		bridge, ref, pinCalls, policyCalls := f.bridge(t)
+		w := httptest.NewRecorder()
+		intent, decision := bridge.resolve(w, f.request(), "", ref)
+		expectedPolicyReads := 1
+		if !isChild {
+			expectedPolicyReads = 2
+		}
+		if intent != nil || decision.IsNotApplicable() == isChild || decision.Allowed() || *pinCalls != 1 || *policyCalls != expectedPolicyReads {
+			t.Fatalf("stored owner/PIN did not preserve child denial or explicit adult inactivity: child=%t", isChild)
+		}
 	}
 }
 
@@ -319,8 +326,8 @@ func TestKidsVODHTTPBridgeUsesRealSessionAndProfileBoundUnlockValidator(t *testi
 			w := httptest.NewRecorder()
 			intent, decision := bridge.resolve(w, r, "", ref)
 			if mode == "valid" {
-				if intent != nil || !decision.IsNotApplicable() || decision.Allowed() || *policyCalls != 1 {
-					t.Fatal("real current unlock did not reach explicit disabled policy")
+				if intent != nil || decision.IsNotApplicable() || decision.Allowed() || decision.Outcome() != kidsvod.UnknownDenied || *policyCalls != 1 {
+					t.Fatal("real current unlock did not reach unknown denial for disabled child policy")
 				}
 				return
 			}
