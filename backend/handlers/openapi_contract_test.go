@@ -1144,6 +1144,7 @@ func TestOpenAPIContract(t *testing.T) {
 	t.Run("parent_list_removal", func(t *testing.T) { parentListRemovalOpenAPIContract(t, v) })
 	t.Run("parent_list_writes", func(t *testing.T) { parentListWritesOpenAPIContract(t, v) })
 	t.Run("parent_ratings", func(t *testing.T) { parentRatingsOpenAPIContract(t, v) })
+	t.Run("regional_child_policy", func(t *testing.T) { regionalChildPolicyOpenAPIContract(t, v) })
 
 	t.Run("parent_kids_flag_client", func(t *testing.T) { parentKidsFlagClientOpenAPIContract(t, v) })
 
