@@ -219,8 +219,8 @@ func TestZeroImportedAndDisabledDecisionsCannotInventLegacyFallback(t *testing.T
 	f.policy.Enabled = false
 	f.mu.Unlock()
 	intent, decision := s.ResolveRequest(f.request(false), "child", f.ref)
-	if intent != nil || !decision.IsNotApplicable() || decision.Allowed() || f.cacheCalls.Load() != 0 {
-		t.Fatal("explicit disabled policy did not defer without a regional grant")
+	if intent != nil || decision.IsNotApplicable() || decision.Allowed() || f.cacheCalls.Load() != 0 {
+		t.Fatal("disabled child policy bypassed regional protection")
 	}
 	if err := json.Unmarshal([]byte(`{"outcome":1}`), &decision); err == nil {
 		t.Fatal("decision imported")

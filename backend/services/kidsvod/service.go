@@ -20,13 +20,17 @@ type actor struct {
 	master                 bool
 }
 type Intent struct {
-	seal        *serviceSeal
-	actor       actor
-	profile     string
-	ref         ResourceRef
-	fingerprint string
-	epoch       uint64
-	expires     time.Time
+	seal                             *serviceSeal
+	actor                            actor
+	profile                          string
+	ref                              ResourceRef
+	fingerprint                      string
+	classificationFingerprint        string
+	classificationBindingFingerprint string
+	classificationOutcome            Outcome
+	classificationExpires            time.Time
+	epoch                            uint64
+	expires                          time.Time
 }
 
 func (i Intent) MarshalJSON() ([]byte, error) { return []byte("null"), nil }
@@ -113,6 +117,37 @@ func (s *Service) ResolveRequest(r *http.Request, profile string, ref ResourceRe
 	return s.resolve(r.Context(), a, profile, ref)
 }
 func (s *Service) resolve(ctx context.Context, a actor, profile string, ref ResourceRef) (*Intent, Decision) {
+	first, decision := s.resolveCurrent(ctx, a, profile, ref, true)
+	if first == nil {
+		return nil, decision
+	}
+	// Dependencies may block. A second cache-only observation must still agree
+	// on the original base authority before publication. No transaction is claimed.
+	current, _ := s.resolveCurrent(ctx, a, profile, ref, false)
+	if current == nil || first.fingerprint != current.fingerprint {
+		return nil, s.unknown(CodeContextChanged)
+	}
+	if !first.expires.After(s.deps.Clock.Now()) || ctx.Err() != nil {
+		return nil, s.unknown(CodeContextChanged)
+	}
+	if first.classificationBindingFingerprint != current.classificationBindingFingerprint ||
+		first.classificationOutcome != UnknownDenied && !first.classificationExpires.After(s.deps.Clock.Now()) {
+		first.classificationOutcome = UnknownDenied
+		first.classificationFingerprint = ""
+		first.classificationExpires = time.Time{}
+	}
+	return first, decisionForIntent(s, first)
+}
+func decisionForIntent(s *Service, intent *Intent) Decision {
+	if intent.classificationOutcome == AllowedByClassification {
+		return s.decision(AllowedByClassification, "")
+	}
+	if intent.classificationOutcome == Denied {
+		return s.decision(Denied, CodeAccessDenied)
+	}
+	return s.unknown(CodeClassificationUnknown)
+}
+func (s *Service) resolveCurrent(ctx context.Context, a actor, profile string, ref ResourceRef, classify bool) (*Intent, Decision) {
 	if s == nil || s.seal == nil || s.deps.Clock == nil || s.deps.Profiles == nil || s.deps.Policies == nil || s.deps.Sessions == nil {
 		return nil, s.unknown(CodeClassificationUnknown)
 	}
@@ -138,11 +173,37 @@ func (s *Service) resolve(ctx context.Context, a actor, profile string, ref Reso
 	if err != nil || !policy.valid() {
 		return nil, s.unknown(CodeClassificationUnknown)
 	}
+	if policy.MaxMovieAge != nil {
+		value := *policy.MaxMovieAge
+		policy.MaxMovieAge = &value
+	}
+	if policy.MaxEpisodeAge != nil {
+		value := *policy.MaxEpisodeAge
+		policy.MaxEpisodeAge = &value
+	}
 	if !policy.Enabled {
 		s.mu.Lock()
 		unchanged := s.epochs[profile] == epoch
 		s.mu.Unlock()
 		if !unchanged || ctx.Err() != nil {
+			return nil, s.unknown(CodeContextChanged)
+		}
+		if p.IsKids {
+			return nil, s.unknown(CodeContextChanged)
+		}
+		// An inactive adult still needs fresh current identity after a blocking
+		// policy lookup. Missing or changed prerequisites are never inactivity.
+		currentProfile, profileErr := s.deps.Profiles.CurrentProfile(ctx, profile)
+		currentSession, sessionErr := s.deps.Sessions.CurrentSession(ctx, a.token)
+		if profileErr != nil || sessionErr != nil || currentProfile != p || currentSession.Token != session.Token || currentSession.AccountID != session.AccountID || currentSession.IsMaster != session.IsMaster || currentSession.Scope != "" || currentSession.ClientID != session.ClientID || currentSession.ExpiresAt != session.ExpiresAt || ctx.Err() != nil {
+			return nil, s.unknown(CodeContextChanged)
+		}
+		currentPolicy, policyErr := s.deps.Policies.CurrentPolicy(ctx, profile)
+		finalProfile, finalProfileErr := s.deps.Profiles.CurrentProfile(ctx, profile)
+		s.mu.Lock()
+		currentEpoch := s.epochs[profile]
+		s.mu.Unlock()
+		if finalProfileErr != nil || finalProfile != p || policyErr != nil || !currentPolicy.valid() || currentPolicy.Enabled || currentPolicy.Revision != policy.Revision || currentEpoch != epoch || !currentSession.ExpiresAt.After(s.deps.Clock.Now()) || ctx.Err() != nil {
 			return nil, s.unknown(CodeContextChanged)
 		}
 		return nil, s.decision(NotApplicable, "")
@@ -160,6 +221,34 @@ func (s *Service) resolve(ctx context.Context, a actor, profile string, ref Reso
 	binding, err := s.deps.Resources.ResolveCacheOnly(ctx, Subject{account: p.AccountID, profile: profile, client: a.client}, ref)
 	if err != nil || binding.AccountID != p.AccountID || binding.ProfileID != profile || binding.Resource != ref || !validBinding(binding, now) {
 		return nil, s.unknown(CodeClassificationUnknown)
+	}
+	binding = copyBinding(binding)
+	var classification *VerifiedRegionalClassification
+	classificationOutcome := UnknownDenied
+	classificationFingerprint := ""
+	classificationExpires := time.Time{}
+	if classify && s.deps.Classifications != nil {
+		verified, readErr := s.deps.Classifications.ResolveVerifiedCacheOnly(ctx, Subject{account: p.AccountID, profile: profile, client: a.client}, copyBinding(binding))
+		if readErr == nil && verified != nil && verified.facts.validFor(binding, s.deps.Clock.Now()) {
+			// Clone again so the configured reader cannot later mutate its own object.
+			frozen := *verified
+			frozen.facts.Episode = copyEpisode(verified.facts.Episode)
+			classification = &frozen
+			encoded, encodeErr := classification.fingerprint()
+			if encodeErr == nil {
+				digest := sha256.Sum256(encoded)
+				classificationFingerprint = hex.EncodeToString(digest[:])
+				classificationExpires = classification.facts.ExpiresAt
+				cap := policy.MaxMovieAge
+				if binding.MediaType == "series" {
+					cap = policy.MaxEpisodeAge
+				}
+				classificationOutcome = Denied
+				if cap != nil && classification.facts.Age <= *cap {
+					classificationOutcome = AllowedByClassification
+				}
+			}
+		}
 	}
 	expiry := binding.ExpiresAt
 	if session.ExpiresAt.Before(expiry) {
@@ -182,7 +271,21 @@ func (s *Service) resolve(ctx context.Context, a actor, profile string, ref Reso
 		return nil, s.unknown(CodeContextChanged)
 	}
 	sum := sha256.Sum256(data)
-	return &Intent{seal: s.seal, actor: a, profile: profile, ref: ref, fingerprint: hex.EncodeToString(sum[:]), epoch: epoch, expires: expiry}, s.unknown(CodeClassificationUnknown)
+	// Optional exact played-edition continuity has its own binding fingerprint;
+	// it never changes the existing parent-exception base authority or expiry.
+	classificationBindingData, err := json.Marshal([]any{hex.EncodeToString(sum[:]), binding.EditionID})
+	if err != nil {
+		return nil, s.unknown(CodeContextChanged)
+	}
+	classificationBindingSum := sha256.Sum256(classificationBindingData)
+	intent := &Intent{seal: s.seal, actor: a, profile: profile, ref: ref, fingerprint: hex.EncodeToString(sum[:]), epoch: epoch, expires: expiry, classificationFingerprint: classificationFingerprint, classificationBindingFingerprint: hex.EncodeToString(classificationBindingSum[:]), classificationOutcome: classificationOutcome, classificationExpires: classificationExpires}
+	if classificationOutcome == AllowedByClassification {
+		return intent, s.decision(AllowedByClassification, "")
+	}
+	if classificationOutcome == Denied {
+		return intent, s.decision(Denied, CodeAccessDenied)
+	}
+	return intent, s.unknown(CodeClassificationUnknown)
 }
 func validBinding(b Binding, now time.Time) bool {
 	if !catalogID(b.CatalogID, b.MediaType) || !token(b.Revision, 256) || !fileVersion(b.SourceVersion) || b.ObservedAt.IsZero() || b.ObservedAt.After(now) || now.Sub(b.ObservedAt) > MaxBindingTTL || b.ExpiresAt.Sub(b.ObservedAt) > MaxBindingTTL || !b.ExpiresAt.After(now) || !b.ExpiresAt.After(b.ObservedAt) {
@@ -260,7 +363,7 @@ func (s *Service) EvaluateStored(ctx context.Context, intent *Intent, grant *Gra
 	if current == nil {
 		return decision
 	}
-	if current.fingerprint != intent.fingerprint {
+	if current.fingerprint != intent.fingerprint || grant == nil && current.classificationFingerprint != intent.classificationFingerprint {
 		return s.unknown(CodeContextChanged)
 	}
 	s.mu.Lock()
@@ -268,7 +371,19 @@ func (s *Service) EvaluateStored(ctx context.Context, intent *Intent, grant *Gra
 	return s.evaluateLocked(current, grant)
 }
 func (s *Service) evaluateLocked(intent *Intent, grant *Grant) Decision {
-	if grant == nil || grant.seal != s.seal {
+	if intent == nil || intent.seal != s.seal || s.epochs[intent.profile] != intent.epoch || !intent.expires.After(s.deps.Clock.Now()) {
+		return s.unknown(CodeContextChanged)
+	}
+	if grant == nil {
+		if intent.classificationOutcome == AllowedByClassification && intent.classificationFingerprint != "" && intent.classificationExpires.After(s.deps.Clock.Now()) {
+			return s.decision(AllowedByClassification, "")
+		}
+		if intent.classificationOutcome == Denied {
+			return s.decision(Denied, CodeAccessDenied)
+		}
+		return s.unknown(CodeParentApprovalRequired)
+	}
+	if grant.seal != s.seal {
 		return s.unknown(CodeParentApprovalRequired)
 	}
 	entry := s.grants[grant.id]
@@ -342,6 +457,11 @@ func (s *Service) InvalidateProfile(profile string) {
 	s.profileEpochLocked(profile)
 	s.nextEpoch++
 	s.epochs[profile] = s.nextEpoch
+	for lease := range s.leases {
+		if lease.intent.profile == profile {
+			s.closeLeaseLocked(lease, CodeContextChanged)
+		}
+	}
 	for id, entry := range s.grants {
 		if entry.intent.profile == profile {
 			entry.revoked = true
@@ -372,6 +492,14 @@ func (s *Service) profileEpochLocked(profile string) uint64 {
 				if entry.intent.profile == candidate && !entry.revoked && entry.expires.After(s.deps.Clock.Now()) {
 					active = true
 					break
+				}
+			}
+			if !active {
+				for lease := range s.leases {
+					if lease.intent.profile == candidate && !lease.closed {
+						active = true
+						break
+					}
 				}
 			}
 			if !active {

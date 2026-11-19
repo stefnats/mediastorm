@@ -36,6 +36,7 @@ const (
 	NotApplicable
 	AllowedByParent
 	Denied
+	AllowedByClassification
 )
 
 var ErrOpaqueCapability = errors.New("kids VOD capabilities cannot be imported")
@@ -53,7 +54,7 @@ func (d Decision) Outcome() Outcome {
 	return d.outcome
 }
 func (d Decision) Code() string {
-	if d.seal != nil && (d.outcome == AllowedByParent || d.outcome == NotApplicable) {
+	if d.seal != nil && (d.outcome == AllowedByParent || d.outcome == AllowedByClassification || d.outcome == NotApplicable) {
 		return ""
 	}
 	if d.code == "" {
@@ -61,7 +62,9 @@ func (d Decision) Code() string {
 	}
 	return d.code
 }
-func (d Decision) Allowed() bool                { return d.seal != nil && d.outcome == AllowedByParent }
+func (d Decision) Allowed() bool {
+	return d.seal != nil && (d.outcome == AllowedByParent || d.outcome == AllowedByClassification)
+}
 func (d Decision) IsNotApplicable() bool        { return d.seal != nil && d.outcome == NotApplicable }
 func (d Decision) MarshalJSON() ([]byte, error) { return []byte("null"), nil }
 func (d *Decision) UnmarshalJSON([]byte) error  { *d = Decision{}; return ErrOpaqueCapability }
@@ -160,6 +163,9 @@ func (r ResourceRef) Part() int          { return r.part }
 // concrete profile have been resolved. Its zero/imported value is unusable.
 type Subject struct{ account, profile, client string }
 
+func (Subject) MarshalJSON() ([]byte, error)  { return []byte("null"), nil }
+func (s *Subject) UnmarshalJSON([]byte) error { *s = Subject{}; return ErrOpaqueCapability }
+
 func (s Subject) AccountID() string { return s.account }
 func (s Subject) ProfileID() string { return s.profile }
 func (s Subject) ClientID() string  { return s.client }
@@ -173,8 +179,10 @@ type Binding struct {
 	Resource                                   ResourceRef
 	AccountID, ProfileID, CatalogID, MediaType string
 	Episode                                    *models.EpisodeReference
-	SourceVersion, Revision                    string
-	ObservedAt, ExpiresAt                      time.Time
+	// EditionID is a trusted played-edition mapping, not a release filename.
+	EditionID               string
+	SourceVersion, Revision string
+	ObservedAt, ExpiresAt   time.Time
 	// Raw provider metadata is informational only in this foundation. Neither
 	// these rows nor a US scalar is a verified edition/episode classification.
 	CertificationEvidence []models.CertificationEvidence
@@ -195,12 +203,13 @@ func (realClock) Now() time.Time                            { return time.Now() 
 func (realClock) AfterFunc(d time.Duration, f func()) Timer { return time.AfterFunc(d, f) }
 
 type Dependencies struct {
-	Profiles  Profiles
-	Policies  Policies
-	Sessions  Sessions
-	Resources Resources
-	Parent    ParentGate
-	Clock     Clock
+	Profiles        Profiles
+	Policies        Policies
+	Sessions        Sessions
+	Resources       Resources
+	Classifications VerifiedClassifications
+	Parent          ParentGate
+	Clock           Clock
 }
 type serviceSeal struct{ nonce [32]byte }
 
