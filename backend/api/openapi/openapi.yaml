@@ -3871,7 +3871,7 @@ paths:
         `popular-on-server-cached` and custom-list shelves,
         `HiddenItem[]` for the complete stored `hidden` management index,
         `LovedStoredItem[]` for the complete `loved-stored` browse view,
-        plain `Title[]` for `collection-cached` and `similar-cached`,
+        plain `Title[]` for `collection-cached`, `similar-cached` and `tmdb-public-list-cached`,
         whitelisted `CachedContinueWatchingItem[]` for `continue-watching-cached`, and
         the delegated metadata payload (usually `TrendingItem[]`) for
         discovery sources.
@@ -3883,7 +3883,7 @@ paths:
             commas. Supported only for stored watchlist, custom-list (including
             aliases and custom-list shelves), permanent-prequeue, hidden, loved-stored
             and collection-cached / continue-watching-cached / recently-watched-cached /
-            popular-on-server-cached / similar-cached. Matches
+            popular-on-server-cached / similar-cached / tmdb-public-list-cached. Matches
             current cached provider original-language facts before paging;
             missing, expired or unbound facts are unknown. No provider lookup
             is started. Invalid or unsupported active queries return 400.
@@ -3905,7 +3905,44 @@ paths:
             `popular-on-server`, `recently-watched`, `trending`, `genre`,
             `decade`, `mdblist`, `stremio`, `tmdb-list`, `trakt-list`,
             `publicmetadb-list`, `simkl-list`, `letterboxd-list`,
-            `personalized`, `loved`, `loved-stored`, `custom-ai`, `similar`, `similar-cached`, `collection`, `collection-cached`, `continue-watching-cached`, `recently-watched-cached`, `popular-on-server-cached`.
+            `personalized`, `loved`, `loved-stored`, `custom-ai`, `tmdb-public-list-cached`, `similar`, `similar-cached`, `collection`, `collection-cached`, `continue-watching-cached`, `recently-watched-cached`, `popular-on-server-cached`.
+            `tmdb-public-list-cached` explicitly reads one bounded saved item
+            array from the existing normal global-key TMDB public-list operation.
+            Requires canonical positive numeric listId. Only that successful
+            normal provider operation can record a new versioned observation;
+            legacy assembled v5 pages and other list sources are never promoted.
+            "Public list" names that existing provider mode; the observation
+            does not independently verify a provider public/private visibility
+            flag or authorize private, account-token or user-list operations.
+            The exact decoded item array is observed before local media, filter,
+            sorting and paging windows, including the ordinary 500-item limit.
+            This is not a promise about omitted upstream pages or full catalogue
+            enumeration. Only primary typed TMDB identity, exact stored label
+            and original order are retained; no side-ID or language repair.
+            Whole observations are limited to 4096 candidates and 4 MiB, with
+            fixed expiry at most 24 hours or the shorter positive base TTL.
+            Valid explicit empty arrays are supported; missing/null arrays are not.
+            Responses contain plain Title[] and publicList with scope
+            returned-items, listId, metadataLanguage, observedAt and expiresAt.
+            Current full-session adult ownership/PIN and effective source locale
+            are required; share/scoped sessions and child profiles are denied.
+            Current Hidden, selected cached original-language membership, original
+            service/profile/preferences, whole observation and expiry are checked
+            again before publication. These independent checks do not freeze
+            global state or guarantee immutable pages across requests.
+            Original-language/Unknown OR, title, media-kind and alphabet filters
+            precede total and paging of the entire bounded observation; name or
+            default order is supported. Alphabet facets omit the letter filter.
+            limit=0 returns the matching finite pool. Unsupported source, watched,
+            discover, genre, rating, year/runtime/unreleased/count/facet selectors,
+            duplicate fields and noncanonical identifiers/paging return 400 before
+            readers. Only filterMediaType selects media kind on this source;
+            the ordinary mediaType/seed selectors are not accepted.
+            Missing/expired/malformed/changed observations return 409 with code
+            tmdb_public_list_snapshot_unavailable; unavailable readers/preferences
+            return 503. Reads do not save settings, refresh, enrich, invoke a
+            provider, renew observations or fall back to the ordinary list path.
+            This observation grants no playback, audio/file-language or age access.
             `similar-cached` is an explicit full-session adult-profile browse of
             one previously returned normal Similar result set, identified by
             positive canonical tmdbId and seed mediaType movie or series. It is
@@ -4066,6 +4103,7 @@ paths:
             default: watchlist
         - name: listId
           in: query
+          description: For tmdb-public-list-cached, a required positive canonical numeric TMDB list identifier; opaque IDs remain valid on their existing sources.
           schema:
             type: string
         - name: collectionId
@@ -8023,7 +8061,18 @@ components:
         originalLanguageFilterSupported:
           type: boolean
           readOnly: true
-          description: True only for normalized stored watchlist, custom-list, permanent-prequeue, hidden, loved-stored and explicit collection-cached / similar-cached / continue-watching-cached / recently-watched-cached / popular-on-server-cached sources. On these sources total is the effective filtered count before pagination; sourceTotal or unfilteredTotal must not drive paging.
+          description: True only for normalized stored watchlist, custom-list, permanent-prequeue, hidden, loved-stored and explicit collection-cached / similar-cached / tmdb-public-list-cached / continue-watching-cached / recently-watched-cached / popular-on-server-cached sources. On these sources total is the effective filtered count before pagination; sourceTotal or unfilteredTotal must not drive paging.
+        publicList:
+          type: object
+          description: Present only for tmdb-public-list-cached. Finite item array observed in the normal global-key public-list operation, not upstream completeness, a verified provider visibility flag or an access grant.
+          additionalProperties: false
+          required: [listId, metadataLanguage, observedAt, expiresAt, scope]
+          properties:
+            listId: {type: integer, format: int64, minimum: 1}
+            metadataLanguage: {type: string}
+            observedAt: {type: string, format: date-time}
+            expiresAt: {type: string, format: date-time}
+            scope: {type: string, enum: [returned-items]}
         similar:
           type: object
           description: Present only for similar-cached. A finite normal returned result set, not the full upstream catalogue, a renewal or an immutable cross-request grant.

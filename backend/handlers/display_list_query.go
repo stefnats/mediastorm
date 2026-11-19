@@ -582,7 +582,7 @@ func queryLovedStoredItems(items []lovedStoredItem, q displayListQueryOptions) (
 
 func displayListOriginalLanguageSupportedSource(source string) bool {
 	switch source {
-	case "watchlist", "custom-list", "custom_user_list", "custom-user-list", "permanent-prequeue", "hidden", "loved-stored", "collection-cached", "continue-watching-cached", "recently-watched-cached", "popular-on-server-cached", "similar-cached":
+	case "watchlist", "custom-list", "custom_user_list", "custom-user-list", "permanent-prequeue", "hidden", "loved-stored", "collection-cached", "continue-watching-cached", "recently-watched-cached", "popular-on-server-cached", "similar-cached", "tmdb-public-list-cached":
 		return true
 	default:
 		return false
@@ -1022,6 +1022,74 @@ func validateCachedSimilarQuery(r *http.Request, viewer string) (cachedSimilarQu
 		a := values.Get("alphabet")
 		if a != "#" && (len(a) != 1 || a[0] < 'A' || a[0] > 'Z') {
 			return q, fmt.Errorf("invalid cached similar alphabet")
+		}
+	}
+	q.language, err = parseDisplayListOriginalLanguageQuery(r)
+	return q, err
+}
+
+type cachedTMDBPublicListQuery struct {
+	filter        displayListQueryOptions
+	language      displayListOriginalLanguageQuery
+	listID        int64
+	limit, offset int
+}
+
+// Reject unsupported selectors before any profile, settings or cache access.
+func validateCachedTMDBPublicListQuery(r *http.Request, viewer string) (cachedTMDBPublicListQuery, error) {
+	q := cachedTMDBPublicListQuery{filter: parseDisplayListQuery(r)}
+	values, err := url.ParseQuery(r.URL.RawQuery)
+	if err != nil {
+		return q, fmt.Errorf("invalid cached TMDB public list query")
+	}
+	allowed := map[string]bool{}
+	for _, key := range []string{"source", "listId", "filterMediaType", "titleFilter", "sortBy", "sortDirection", "alphabet", "originalLanguages", "includeUnknownOriginalLanguage", "limit", "offset", "token", "profileUnlock", "profileId", "userId", "clientId"} {
+		allowed[key] = true
+	}
+	for key, values := range values {
+		if !allowed[key] || len(values) != 1 {
+			return q, fmt.Errorf("unsupported or duplicate cached TMDB public list selector")
+		}
+	}
+	if values.Get("source") != "tmdb-public-list-cached" || viewer == "" || strings.TrimSpace(viewer) != viewer {
+		return q, fmt.Errorf("invalid cached TMDB public list source")
+	}
+	q.listID, err = strconv.ParseInt(values.Get("listId"), 10, 64)
+	if err != nil || q.listID <= 0 || strconv.FormatInt(q.listID, 10) != values.Get("listId") {
+		return q, fmt.Errorf("invalid cached TMDB public list identity")
+	}
+	for _, key := range []string{"profileId", "userId"} {
+		if value := strings.TrimSpace(values.Get(key)); value != "" && value != viewer {
+			return q, fmt.Errorf("cached TMDB public list cannot select another profile")
+		}
+	}
+	for _, key := range []string{"limit", "offset"} {
+		if !values.Has(key) {
+			continue
+		}
+		n, err := strconv.Atoi(values.Get(key))
+		if err != nil || n < 0 || strconv.Itoa(n) != values.Get(key) {
+			return q, fmt.Errorf("invalid cached TMDB public list pagination")
+		}
+		if key == "limit" {
+			q.limit = n
+		} else {
+			q.offset = n
+		}
+	}
+	if values.Has("filterMediaType") && values.Get("filterMediaType") != "all" && values.Get("filterMediaType") != "movie" && values.Get("filterMediaType") != "series" {
+		return q, fmt.Errorf("invalid cached TMDB public list media filter")
+	}
+	if values.Has("sortBy") && values.Get("sortBy") != "default" && values.Get("sortBy") != "name" {
+		return q, fmt.Errorf("unsupported cached TMDB public list sort")
+	}
+	if values.Has("sortDirection") && values.Get("sortDirection") != "asc" && values.Get("sortDirection") != "desc" {
+		return q, fmt.Errorf("invalid cached TMDB public list sort direction")
+	}
+	if values.Has("alphabet") {
+		a := values.Get("alphabet")
+		if a != "#" && (len(a) != 1 || a[0] < 'A' || a[0] > 'Z') {
+			return q, fmt.Errorf("invalid cached TMDB public list alphabet")
 		}
 	}
 	q.language, err = parseDisplayListOriginalLanguageQuery(r)

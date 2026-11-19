@@ -4823,6 +4823,7 @@ func (c *tmdbClient) staticShelfTitles(ctx context.Context, opts TMDBListOptions
 		if err := c.doGET(ctx, endpoint, &payload); err != nil {
 			return nil, fmt.Errorf("tmdb public list failed: %w", err)
 		}
+		c.recordTMDBPublicListSnapshot(ctx, sourceID, payload.Items, time.Now())
 		return payload.Items, nil
 	case TMDBSourceMovieCollection:
 		endpoint = fmt.Sprintf("%s/collection/%d?%s", tmdbBaseURL, sourceID, params.Encode())

@@ -77,14 +77,9 @@ func cachedMetadataPreferencesStamp(facts cachedMetadataPreferences) [32]byte {
 	return sha256.Sum256(raw)
 }
 
-func (h *MetadataHandler) captureCachedMetadata(userID string) (*cachedMetadataContext, error) {
-	facts, language, err := h.cachedMetadataPreferences(userID)
-	if err != nil {
-		return nil, err
-	}
-	base := h.Service
+func cachedMetadataLanguageService(base metadataService, configured bool, language string) (metadataService, error) {
 	service := base
-	if facts.Configured {
+	if configured {
 		localized, ok := service.(interface {
 			WithLanguage(string) *metadatapkg.Service
 		})
@@ -92,6 +87,19 @@ func (h *MetadataHandler) captureCachedMetadata(userID string) (*cachedMetadataC
 			return nil, errors.New("localized cached metadata unavailable")
 		}
 		service = localized.WithLanguage(language)
+	}
+	return service, nil
+}
+
+func (h *MetadataHandler) captureCachedMetadata(userID string) (*cachedMetadataContext, error) {
+	facts, language, err := h.cachedMetadataPreferences(userID)
+	if err != nil {
+		return nil, err
+	}
+	base := h.Service
+	service, err := cachedMetadataLanguageService(base, facts.Configured, language)
+	if err != nil {
+		return nil, err
 	}
 	reader, ok := service.(cachedSimilarReader)
 	languages, languageOK := service.(cachedOriginalLanguageReader)
@@ -101,12 +109,50 @@ func (h *MetadataHandler) captureCachedMetadata(userID string) (*cachedMetadataC
 	return &cachedMetadataContext{base: base, reader: reader, languages: languages, locale: reader.CachedSimilarMetadataLanguage(), preferences: cachedMetadataPreferencesStamp(facts)}, nil
 }
 
-func (h *MetadataHandler) cachedMetadataCurrent(userID string, captured *cachedMetadataContext) (bool, error) {
+func (h *MetadataHandler) cachedMetadataBaseCurrent(userID string, base metadataService, preferences [32]byte) (bool, error) {
 	facts, _, err := h.cachedMetadataPreferences(userID)
 	if err != nil {
 		return false, err
 	}
-	current, original := reflect.ValueOf(h.Service), reflect.ValueOf(captured.base)
+	current, original := reflect.ValueOf(h.Service), reflect.ValueOf(base)
 	same := current.IsValid() && original.IsValid() && current.Type() == original.Type() && current.Comparable() && original.Comparable() && current.Equal(original)
-	return same && cachedMetadataPreferencesStamp(facts) == captured.preferences && captured.reader.CachedSimilarMetadataLanguage() == captured.locale, nil
+	return same && cachedMetadataPreferencesStamp(facts) == preferences, nil
+}
+
+func (h *MetadataHandler) cachedMetadataCurrent(userID string, captured *cachedMetadataContext) (bool, error) {
+	current, err := h.cachedMetadataBaseCurrent(userID, captured.base, captured.preferences)
+	return current && captured.reader.CachedSimilarMetadataLanguage() == captured.locale, err
+}
+
+// Each explicit catalogue source asserts its own optional reader. Public-list
+// support must not add methods to the already supported Similar contract.
+type cachedTMDBPublicListMetadataContext struct {
+	base        metadataService
+	reader      cachedTMDBPublicListReader
+	languages   cachedOriginalLanguageReader
+	locale      string
+	preferences [32]byte
+}
+
+func (h *MetadataHandler) captureCachedTMDBPublicListMetadata(userID string) (*cachedTMDBPublicListMetadataContext, error) {
+	facts, language, err := h.cachedMetadataPreferences(userID)
+	if err != nil {
+		return nil, err
+	}
+	base := h.Service
+	service, err := cachedMetadataLanguageService(base, facts.Configured, language)
+	if err != nil {
+		return nil, err
+	}
+	reader, ok := service.(cachedTMDBPublicListReader)
+	languages, languageOK := service.(cachedOriginalLanguageReader)
+	if !ok || !languageOK || reader.CachedTMDBPublicListMetadataLanguage() == "" {
+		return nil, errors.New("cached TMDB public list unavailable")
+	}
+	return &cachedTMDBPublicListMetadataContext{base: base, reader: reader, languages: languages, locale: reader.CachedTMDBPublicListMetadataLanguage(), preferences: cachedMetadataPreferencesStamp(facts)}, nil
+}
+
+func (h *MetadataHandler) cachedTMDBPublicListMetadataCurrent(userID string, captured *cachedTMDBPublicListMetadataContext) (bool, error) {
+	current, err := h.cachedMetadataBaseCurrent(userID, captured.base, captured.preferences)
+	return current && captured.reader.CachedTMDBPublicListMetadataLanguage() == captured.locale, err
 }
