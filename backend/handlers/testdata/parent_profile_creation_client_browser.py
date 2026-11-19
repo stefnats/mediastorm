@@ -432,55 +432,79 @@ with sync_playwright() as pw:
         # Hold the actual known-success wire reply until the real page lifetime
         # changes. This is distinct from the parsed-JSON barrier above. Each
         # request still goes through Main and commits once before the edit.
+        def late_wire_for(original_page, original_kind, reason, label, document_origin, completion):
+            # Playwright invokes routes in independent greenlets. Capture this
+            # exact page/document/case instead of borrowing the next loop values.
+            def late_wire(route):
+                if not require_create_destination(route):
+                    return
+                request = route.request
+                if request.method != 'POST' or not request.headers.get('x-parent-intent'):
+                    route.continue_()
+                    return
+                assert request.frame == original_page.main_frame
+                assert original_page.evaluate('performance.timeOrigin') == document_origin
+                assert completion['matched'] == 0, 'Original late retry intercepted more than once'
+                body = request.post_data_json
+                assert body['name'] == label and body['accountId'] == 'actor' and body['isKidsProfile'] is True
+                operation = request.headers.get('x-profile-creation-operation')
+                assert re.fullmatch(r'pcr_[0-9a-f]{64}', operation or '')
+                assert re.fullmatch(r'pcc_[0-9a-f]{64}', request.headers['x-parent-intent'])
+                assert any(entry['ref'] == operation and entry['ownerID'] == 'actor' for entry in stored())
+                completion['matched'] += 1
+                retained_before_retry.append(True)
+                actual = route.fetch(max_redirects=0)
+                assert actual.status == 200
+                assert original_page.evaluate('performance.timeOrigin') == document_origin
+                if reason == 'modal':
+                    original_page.evaluate("hideModal();showCreateProfileModal('actor')")
+                    original_page.locator('[data-profile-create] input[name=name]').fill('Replacement modal draft')
+                elif reason == 'step':
+                    original_page.evaluate('goToStep(3)')
+                elif reason == 'refresh':
+                    original_page.evaluate('loadData()' if original_kind == 'accounts' else 'loadAccountsAndProfiles()')
+                elif reason == 'owner':
+                    selector = 'form[data-profile-create] select[name=accountId]' if original_kind == 'accounts' else '#profileAccountId'
+                    original_page.locator(selector).evaluate("""select => {
+                      const next=Array.from(select.options).find(option=>option.value!==select.value);
+                      if(!next) throw new Error('Synthetic second household missing');
+                      select.value=next.value;select.dispatchEvent(new Event('change',{bubbles:true}));
+                    }""")
+                else:
+                    assert reason == 'pagehide'
+                    original_page.evaluate("window.dispatchEvent(new PageTransitionEvent('pagehide'))")
+                assert original_page.evaluate('performance.timeOrigin') == document_origin
+                route.fulfill(response=actual)
+                completion['fulfilled'] = True
+            return late_wire
+
         retirements = ['refresh', 'pagehide']
         retirements.append('modal' if kind == 'accounts' else 'step')
         if args.role == 'master':
             retirements.append('owner')
         for reason in retirements:
             loaded(kind)
-            form = fill(kind, 'Synthetic late wire ' + kind + ' ' + reason)
+            label = 'Synthetic late wire ' + kind + ' ' + reason
+            form = fill(kind, label)
             before = state()
-
-            def late_wire(route):
-                if not require_create_destination(route):
-                    return
-                if route.request.method != 'POST' or not route.request.headers.get('x-parent-intent'):
-                    route.continue_()
-                    return
-                # The newer route masks the generic assertion route, so retain
-                # the same explicit persistence-before-mutation check here.
-                operation = route.request.headers['x-profile-creation-operation']
-                assert any(entry['ref'] == operation for entry in stored())
-                retained_before_retry.append(True)
-                actual = route.fetch(max_redirects=0)
-                assert actual.status == 200
-                if reason == 'modal':
-                    page.evaluate("hideModal();showCreateProfileModal('actor')")
-                    name_input(kind).fill('Replacement modal draft')
-                elif reason == 'step':
-                    page.evaluate('goToStep(3)')
-                elif reason == 'refresh':
-                    page.evaluate('loadData()' if kind == 'accounts' else 'loadAccountsAndProfiles()')
-                elif reason == 'owner':
-                    selector = 'form[data-profile-create] select[name=accountId]' if kind == 'accounts' else '#profileAccountId'
-                    page.locator(selector).evaluate("""select => {
-                      const next=Array.from(select.options).find(option=>option.value!==select.value);
-                      if(!next) throw new Error('Synthetic second household missing');
-                      select.value=next.value;select.dispatchEvent(new Event('change',{bubbles:true}));
-                    }""")
-                else:
-                    page.evaluate("window.dispatchEvent(new PageTransitionEvent('pagehide'))")
-                route.fulfill(response=actual)
+            document_origin = page.evaluate('performance.timeOrigin')
+            completion = {'matched': 0, 'fulfilled': False}
+            late_wire = late_wire_for(page, kind, reason, label, document_origin, completion)
 
             page.route('**' + create_path, late_wire)
             form.locator('button[type=submit]').click()
             confirm()
             page.wait_for_function("""basePath => window.createProfileCreationClient({
               actorAccountID:'actor',basePath}).list().length === 1""", arg=prefix)
-            # Event delivery and the async caller continuation both complete
-            # before reading its retained action state.
+            # Retirement clears the action before an awaited refresh finishes.
+            # Drain active callbacks, including their actual refresh and held
+            # reply, before the next loaded() may navigate this document away.
+            # wait propagates handler errors; it does not use ignoreErrors.
             page.wait_for_function('profileCreationAction === null')
-            page.unroute('**' + create_path, late_wire)
+            page.unroute_all(behavior='wait')
+            assert completion == {'matched': 1, 'fulfilled': True}, 'Original late reply did not finish'
+            assert page.evaluate('performance.timeOrigin') == document_origin
+            page.route('**' + create_path, verify_retained)
             check_compound(before, state())
             assert len(stored()) == 1
             assert dialog().count() == 0
@@ -489,7 +513,9 @@ with sync_playwright() as pw:
             if reason == 'owner':
                 owner_selector = 'form[data-profile-create] select[name=accountId]' if kind == 'accounts' else '#profileAccountId'
                 assert page.locator(owner_selector).input_value() != 'actor'
-            checkpoints.append({'case': 'late-wire-' + kind + '-' + reason, 'created': state()['createdResults']})
+            checkpoints.append({'case': 'late-wire-' + kind + '-' + reason, 'created': state()['createdResults'],
+                                'wireMatches': completion['matched'], 'wireFulfilled': completion['fulfilled'],
+                                'callbackDrained': True})
 
     # Actual session revocation rejects a fresh explicit read without a prompt
     # or replay; the locally retained locator remains unresolved.
