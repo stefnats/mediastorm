@@ -346,6 +346,7 @@ const (
 	parentConfirmationRatingPair
 	parentConfirmationKidsFlag
 	parentConfirmationProfileCreation
+	parentConfirmationRegionalPolicy
 )
 
 type parentModeEntry struct {
@@ -1154,4 +1155,70 @@ func (v *PGProfilePins) TakeProfileCreationRecoveryPair(ctx context.Context, r *
 		return datastore.ErrParentProfileCreationUnavailable
 	}
 	return v.store.TakeProfileCreationRecoveryPair(ctx, r, s, u, w)
+}
+
+func (v *PGProfilePins) ParentRegionalPolicyChallenge(r *http.Request, target string, body []byte) (string, error) {
+	if !v.valid() || r == nil || r.URL == nil {
+		return "", datastore.ErrParentRatingUnavailable
+	}
+	intent, err := v.store.PrepareParentRegionalPolicy(r, target, body, RequestTokens(r))
+	if err != nil {
+		return "", err
+	}
+	actor, size, deadline, err := v.store.ParentRatingBudget(intent)
+	if err != nil {
+		intent.Close()
+		return "", err
+	}
+	token, err := v.registerParentConfirmation(r, "prf_", &parentModeEntry{action: parentConfirmationRegionalPolicy, rating: intent, actor: actor, bytes: size, deadline: deadline})
+	if err != nil {
+		return "", datastore.ErrParentRatingUnavailable
+	}
+	return token, nil
+}
+func (v *PGProfilePins) ClaimParentRegionalPolicy(r *http.Request, target string, body []byte, token string) (*ParentRatingIntent, error) {
+	if !v.valid() || r == nil || r.URL == nil {
+		return nil, datastore.ErrParentRatingUnavailable
+	}
+	key, ok := parentConfirmationTokenKey(token, "prf_")
+	if !ok {
+		return nil, datastore.ErrParentRatingChanged
+	}
+	entry := v.claimParentConfirmation(key, parentConfirmationRegionalPolicy)
+	if entry == nil {
+		return nil, datastore.ErrParentRatingChanged
+	}
+	if !entry.deadline.After(time.Now()) {
+		entry.close()
+		return nil, datastore.ErrParentRatingChanged
+	}
+	if err := v.store.BindParentRegionalPolicyRetry(r, entry.rating, target, body, RequestTokens(r)); err != nil {
+		entry.close()
+		return nil, err
+	}
+	return entry.rating, nil
+}
+func (v *PGProfilePins) ImmediateParentRegionalPolicy(r *http.Request, target string, body []byte) (*ParentRatingIntent, error) {
+	if !v.valid() || r == nil || r.URL == nil {
+		return nil, datastore.ErrParentRatingUnavailable
+	}
+	intent, err := v.store.PrepareParentRegionalPolicy(r, target, body, RequestTokens(r))
+	if err != nil {
+		return nil, err
+	}
+	if err = v.store.BindParentRegionalPolicyRetry(r, intent, target, body, RequestTokens(r)); err != nil {
+		intent.Close()
+		return nil, err
+	}
+	return intent, nil
+}
+
+// ReadRegionalPolicy uses the original authenticated current PG frame and the
+// same owned concrete profile/PIN observation as other protected profile reads.
+func (v *PGProfilePins) ReadRegionalPolicy(r *http.Request, target string) (*models.RegionalChildPolicy, error) {
+	if !v.valid() || r == nil {
+		return nil, datastore.ErrRegionalPolicyUnavailable
+	}
+	observation, err := v.store.ReadRegionalPolicyRequest(r, target, RequestTokens(r))
+	return observation, err
 }

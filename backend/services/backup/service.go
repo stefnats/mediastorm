@@ -535,9 +535,7 @@ func (s *Service) restoreBackupFile(backupPath, sourceName string) error {
 			break
 		}
 		if !databaseRestored {
-			if _, ok := manifest.Files["database.json"]; ok {
-				return fmt.Errorf("database.json missing from backup")
-			}
+			return fmt.Errorf("database.json is required for PostgreSQL restore")
 		}
 	}
 
@@ -853,6 +851,7 @@ type localMediaItemExport struct {
 // Global app settings (scheduled tasks / automations / scrapers / indexers / etc.)
 // live in settings.json and are backed up as a separate archive member.
 type databaseExport struct {
+	RegionalChildPolicies    []models.RegionalChildPolicyBackup     `json:"regionalChildPolicies"`
 	Reminders                map[string]models.ReminderProfileState `json:"reminders,omitempty"`
 	Version                  string                                 `json:"version"`
 	ExportedAt               time.Time                              `json:"exportedAt"`
@@ -893,6 +892,7 @@ type customListExport struct {
 // databaseExportSections lists durable database sections expected in modern backups.
 // Used by tests to prevent silent coverage regressions.
 var databaseExportSections = []string{
+	"regionalChildPolicies",
 	"reminders",
 	"accounts",
 	"users",
@@ -955,6 +955,10 @@ func (s *Service) exportDatabaseBytes() ([]byte, error) {
 		export.Users[i] = rawUser(u)
 	}
 
+	export.RegionalChildPolicies, err = s.store.ListRegionalPolicies(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("export regional child policies: %w", err)
+	}
 	sessions, err := s.store.Sessions().List(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("export sessions: %w", err)
@@ -1189,8 +1193,18 @@ func (s *Service) importDatabaseBytes(data []byte) error {
 		return fmt.Errorf("recordings are still closing; restore was not started")
 	}
 	defer releaseCaptures()
+	importedChildren := false
+	for _, profile := range export.Users {
+		if profile.IsKidsProfile {
+			importedChildren = true
+			break
+		}
+	}
 	err = s.store.WithTx(ctx, func(tx *datastore.Tx) error {
 		if err := tx.LockRemindersForRestore(ctx); err != nil {
+			return err
+		}
+		if err := tx.GuardRegionalRestore(ctx, importedChildren); err != nil {
 			return err
 		}
 		// Clear durable data that does not cascade from users/accounts first.
@@ -1233,6 +1247,9 @@ func (s *Service) importDatabaseBytes(data []byte) error {
 			if err := tx.Users().Create(ctx, &u); err != nil {
 				return fmt.Errorf("restore user %s: %w", u.ID, err)
 			}
+		}
+		if err := tx.RestoreRegionalPolicies(ctx, export.RegionalChildPolicies); err != nil {
+			return err
 		}
 		for profile, state := range export.Reminders {
 			if err := tx.RestoreReminders(ctx, profile, state); err != nil {
