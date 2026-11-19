@@ -95,6 +95,10 @@ func (h *DisplayListHandler) SetPrequeueStore(store persistentPrequeueStore) {
 }
 
 func (h *DisplayListHandler) Get(w http.ResponseWriter, r *http.Request) {
+	if hasCachedTMDBPersonCreditsSource(r) {
+		h.getCachedTMDBPersonCredits(w, r)
+		return
+	}
 	if hasCachedTMDBPublicListSource(r) {
 		h.getCachedTMDBPublicList(w, r)
 		return

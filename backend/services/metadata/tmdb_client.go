@@ -4847,6 +4847,7 @@ func (c *tmdbClient) staticShelfTitles(ctx context.Context, opts TMDBListOptions
 			return nil, fmt.Errorf("tmdb person credits failed: %w", err)
 		}
 		if opts.SourceType == TMDBSourcePersonCredits {
+			c.recordTMDBPersonCreditsSnapshot(ctx, sourceID, payload.Cast, time.Now())
 			return payload.Cast, nil
 		}
 		directed := make([]tmdbShelfTitle, 0, len(payload.Crew))

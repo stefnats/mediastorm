@@ -156,3 +156,36 @@ func (h *MetadataHandler) cachedTMDBPublicListMetadataCurrent(userID string, cap
 	current, err := h.cachedMetadataBaseCurrent(userID, captured.base, captured.preferences)
 	return current && captured.reader.CachedTMDBPublicListMetadataLanguage() == captured.locale, err
 }
+
+// Person-cast support is an independent optional reader, not a requirement
+// for the already supported Similar or public-list adapters.
+type cachedTMDBPersonCreditsMetadataContext struct {
+	base        metadataService
+	reader      cachedTMDBPersonCreditsReader
+	languages   cachedOriginalLanguageReader
+	locale      string
+	preferences [32]byte
+}
+
+func (h *MetadataHandler) captureCachedTMDBPersonCreditsMetadata(userID string) (*cachedTMDBPersonCreditsMetadataContext, error) {
+	facts, language, err := h.cachedMetadataPreferences(userID)
+	if err != nil {
+		return nil, err
+	}
+	base := h.Service
+	service, err := cachedMetadataLanguageService(base, facts.Configured, language)
+	if err != nil {
+		return nil, err
+	}
+	reader, ok := service.(cachedTMDBPersonCreditsReader)
+	languages, languageOK := service.(cachedOriginalLanguageReader)
+	if !ok || !languageOK || reader.CachedTMDBPersonCreditsMetadataLanguage() == "" {
+		return nil, errors.New("cached TMDB person cast titles unavailable")
+	}
+	return &cachedTMDBPersonCreditsMetadataContext{base: base, reader: reader, languages: languages, locale: reader.CachedTMDBPersonCreditsMetadataLanguage(), preferences: cachedMetadataPreferencesStamp(facts)}, nil
+}
+
+func (h *MetadataHandler) cachedTMDBPersonCreditsMetadataCurrent(userID string, captured *cachedTMDBPersonCreditsMetadataContext) (bool, error) {
+	current, err := h.cachedMetadataBaseCurrent(userID, captured.base, captured.preferences)
+	return current && captured.reader.CachedTMDBPersonCreditsMetadataLanguage() == captured.locale, err
+}
