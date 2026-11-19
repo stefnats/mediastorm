@@ -3871,7 +3871,7 @@ paths:
         `popular-on-server-cached` and custom-list shelves,
         `HiddenItem[]` for the complete stored `hidden` management index,
         `LovedStoredItem[]` for the complete `loved-stored` browse view,
-        plain `Title[]` for `collection-cached`,
+        plain `Title[]` for `collection-cached` and `similar-cached`,
         whitelisted `CachedContinueWatchingItem[]` for `continue-watching-cached`, and
         the delegated metadata payload (usually `TrendingItem[]`) for
         discovery sources.
@@ -3883,7 +3883,7 @@ paths:
             commas. Supported only for stored watchlist, custom-list (including
             aliases and custom-list shelves), permanent-prequeue, hidden, loved-stored
             and collection-cached / continue-watching-cached / recently-watched-cached /
-            popular-on-server-cached. Matches
+            popular-on-server-cached / similar-cached. Matches
             current cached provider original-language facts before paging;
             missing, expired or unbound facts are unknown. No provider lookup
             is started. Invalid or unsupported active queries return 400.
@@ -3905,7 +3905,35 @@ paths:
             `popular-on-server`, `recently-watched`, `trending`, `genre`,
             `decade`, `mdblist`, `stremio`, `tmdb-list`, `trakt-list`,
             `publicmetadb-list`, `simkl-list`, `letterboxd-list`,
-            `personalized`, `loved`, `loved-stored`, `custom-ai`, `similar`, `collection`, `collection-cached`, `continue-watching-cached`, `recently-watched-cached`, `popular-on-server-cached`.
+            `personalized`, `loved`, `loved-stored`, `custom-ai`, `similar`, `similar-cached`, `collection`, `collection-cached`, `continue-watching-cached`, `recently-watched-cached`, `popular-on-server-cached`.
+            `similar-cached` is an explicit full-session adult-profile browse of
+            one previously returned normal Similar result set, identified by
+            positive canonical tmdbId and seed mediaType movie or series. It is
+            not the complete upstream catalogue or omitted provider pages.
+            Only successful, non-cached normal generation can record the
+            separately versioned observation; legacy bare v4 cache hits do not
+            establish it. Candidates retain primary TMDB identities and order,
+            without side-ID repair, language, artwork, availability or age claims.
+            Expiry is fixed at observation time, at most 24 hours or the shorter
+            existing base cache TTL. A valid observed empty result is supported.
+            Missing, expired, malformed or changed observations return 409 with
+            code similar_snapshot_unavailable; missing readers or unreadable
+            preference inputs return 503. Browsing never generates, refreshes,
+            renews facts, saves settings or falls back to the ordinary source.
+            Current owner, PIN, profile, effective metadata language, Hidden,
+            snapshot and selected cached-language membership are rechecked
+            before publishing. Scoped/share sessions and child profiles are
+            rejected. These independent observations do not freeze global state.
+            Original-language/Unknown, title, media-kind and alphabet selection
+            precede exact total and paging of the finite observed set. Supports
+            default/name sorting; alphabet choices omit the selected-letter
+            restriction. limit=0 returns the complete matching observed set.
+            Unsupported watched, genre, rating, runtime, year/added sort,
+            unreleased, count and facet requirements return 400 before readers.
+            The similar descriptor has scope returned-results and retains its
+            original seed, metadata language and observation/expiry times.
+            This grants no seed/candidate playback, file, audio or age permission.
+            The ordinary Similar producer and its provider behavior are unchanged.
             `popular-on-server-cached` is an explicit full-session adult-profile
             browse of complete stored played history shared by opted-in server
             profiles. Each completed stored movie or episode row counts once;
@@ -4044,6 +4072,14 @@ paths:
           in: query
           description: Positive canonical collection ID for collection-cached; conflicting id aliases reject.
           schema: {type: integer, format: int64, minimum: 1}
+        - name: tmdbId
+          in: query
+          description: Required positive canonical seed TMDB ID for similar-cached.
+          schema: {type: integer, format: int64, minimum: 1}
+        - name: mediaType
+          in: query
+          description: Seed media kind for metadata sources; similar-cached requires movie or series.
+          schema: {type: string}
         - name: id
           in: query
           description: Existing collection ID alias; must agree with collectionId when both are supplied.
@@ -4168,7 +4204,7 @@ paths:
         '404':
           $ref: '#/components/responses/Error'
         '409':
-          description: Requested collection snapshot is unavailable; only explicit normal reload may contact the provider.
+          description: Requested stored observation is unavailable or changed; only an explicit ordinary producer request may contact a provider.
           content:
             application/json:
               schema: {$ref: '#/components/schemas/Error'}
@@ -7987,7 +8023,19 @@ components:
         originalLanguageFilterSupported:
           type: boolean
           readOnly: true
-          description: True only for normalized stored watchlist, custom-list, permanent-prequeue, hidden, loved-stored and explicit collection-cached / continue-watching-cached / recently-watched-cached / popular-on-server-cached sources. On these sources total is the effective filtered count before pagination; sourceTotal or unfilteredTotal must not drive paging.
+          description: True only for normalized stored watchlist, custom-list, permanent-prequeue, hidden, loved-stored and explicit collection-cached / similar-cached / continue-watching-cached / recently-watched-cached / popular-on-server-cached sources. On these sources total is the effective filtered count before pagination; sourceTotal or unfilteredTotal must not drive paging.
+        similar:
+          type: object
+          description: Present only for similar-cached. A finite normal returned result set, not the full upstream catalogue, a renewal or an immutable cross-request grant.
+          additionalProperties: false
+          required: [tmdbId, mediaType, metadataLanguage, observedAt, expiresAt, scope]
+          properties:
+            tmdbId: {type: integer, format: int64, minimum: 1}
+            mediaType: {type: string, enum: [movie, series]}
+            metadataLanguage: {type: string}
+            observedAt: {type: string, format: date-time}
+            expiresAt: {type: string, format: date-time}
+            scope: {type: string, enum: [returned-results]}
         pool:
           type: object
           description: Present only for continue-watching-cached. Original complete feed observation; not a language-view snapshot or grant.

@@ -6872,6 +6872,8 @@ func (s *Service) Similar(ctx context.Context, mediaType string, tmdbID int64) (
 		log.Printf("[metadata] failed to cache similar results: %v", err)
 	}
 
+	s.recordSimilarSnapshot(ctx, normalizedType, tmdbID, titles, time.Now())
+
 	log.Printf("[metadata] similar fetch success type=%s tmdbId=%d count=%d", normalizedType, tmdbID, len(titles))
 	return titles, nil
 }

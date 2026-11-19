@@ -582,7 +582,7 @@ func queryLovedStoredItems(items []lovedStoredItem, q displayListQueryOptions) (
 
 func displayListOriginalLanguageSupportedSource(source string) bool {
 	switch source {
-	case "watchlist", "custom-list", "custom_user_list", "custom-user-list", "permanent-prequeue", "hidden", "loved-stored", "collection-cached", "continue-watching-cached", "recently-watched-cached", "popular-on-server-cached":
+	case "watchlist", "custom-list", "custom_user_list", "custom-user-list", "permanent-prequeue", "hidden", "loved-stored", "collection-cached", "continue-watching-cached", "recently-watched-cached", "popular-on-server-cached", "similar-cached":
 		return true
 	default:
 		return false
@@ -950,6 +950,79 @@ func validateCachedPopularTitlesQuery(r *http.Request, viewerID string) (cachedP
 			return q, fmt.Errorf("conflicting cached popular titles media selectors")
 		}
 		q.filter.MediaType = viewKind
+	}
+	q.language, err = parseDisplayListOriginalLanguageQuery(r)
+	return q, err
+}
+
+type cachedSimilarQuery struct {
+	filter        displayListQueryOptions
+	language      displayListOriginalLanguageQuery
+	kind          string
+	seed          int64
+	limit, offset int
+}
+
+// Reject unsupported selectors before any profile, settings or cache access.
+func validateCachedSimilarQuery(r *http.Request, viewer string) (cachedSimilarQuery, error) {
+	q := cachedSimilarQuery{filter: parseDisplayListQuery(r)}
+	values, err := url.ParseQuery(r.URL.RawQuery)
+	if err != nil {
+		return q, fmt.Errorf("invalid cached similar query")
+	}
+	allowed := map[string]bool{}
+	for _, key := range []string{"source", "mediaType", "tmdbId", "filterMediaType", "titleFilter", "sortBy", "sortDirection", "alphabet", "originalLanguages", "includeUnknownOriginalLanguage", "limit", "offset", "token", "profileUnlock", "profileId", "userId", "clientId"} {
+		allowed[key] = true
+	}
+	for key, values := range values {
+		if !allowed[key] || len(values) != 1 {
+			return q, fmt.Errorf("unsupported or duplicate cached similar selector")
+		}
+	}
+	if values.Get("source") != "similar-cached" || viewer == "" || strings.TrimSpace(viewer) != viewer {
+		return q, fmt.Errorf("invalid cached similar source")
+	}
+	q.kind = values.Get("mediaType")
+	if q.kind != "movie" && q.kind != "series" {
+		return q, fmt.Errorf("cached similar requires movie or series seed kind")
+	}
+	q.seed, err = strconv.ParseInt(values.Get("tmdbId"), 10, 64)
+	if err != nil || q.seed <= 0 || strconv.FormatInt(q.seed, 10) != values.Get("tmdbId") {
+		return q, fmt.Errorf("invalid cached similar seed")
+	}
+	for _, key := range []string{"profileId", "userId"} {
+		if value := strings.TrimSpace(values.Get(key)); value != "" && value != viewer {
+			return q, fmt.Errorf("cached similar cannot select another profile")
+		}
+	}
+	for _, key := range []string{"limit", "offset"} {
+		if !values.Has(key) {
+			continue
+		}
+		n, err := strconv.Atoi(values.Get(key))
+		if err != nil || n < 0 || strconv.Itoa(n) != values.Get(key) {
+			return q, fmt.Errorf("invalid cached similar pagination")
+		}
+		if key == "limit" {
+			q.limit = n
+		} else {
+			q.offset = n
+		}
+	}
+	if values.Has("filterMediaType") && values.Get("filterMediaType") != "all" && values.Get("filterMediaType") != "movie" && values.Get("filterMediaType") != "series" {
+		return q, fmt.Errorf("invalid cached similar media filter")
+	}
+	if values.Has("sortBy") && values.Get("sortBy") != "default" && values.Get("sortBy") != "name" {
+		return q, fmt.Errorf("unsupported cached similar sort")
+	}
+	if values.Has("sortDirection") && values.Get("sortDirection") != "asc" && values.Get("sortDirection") != "desc" {
+		return q, fmt.Errorf("invalid cached similar sort direction")
+	}
+	if values.Has("alphabet") {
+		a := values.Get("alphabet")
+		if a != "#" && (len(a) != 1 || a[0] < 'A' || a[0] > 'Z') {
+			return q, fmt.Errorf("invalid cached similar alphabet")
+		}
 	}
 	q.language, err = parseDisplayListOriginalLanguageQuery(r)
 	return q, err
