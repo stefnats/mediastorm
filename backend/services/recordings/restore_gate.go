@@ -9,7 +9,14 @@ var captureRestoreTurn = func() chan struct{} { turn := make(chan struct{}, 1); 
 var captureOwnersMu sync.Mutex
 var captureOwners = map[*captureOwner]struct{}{}
 var captureRestoring bool
+var captureRestoreEpoch uint64
 var captureRestoreDone chan struct{}
+
+func derivedRestoreStamp() (uint64, bool) {
+	captureOwnersMu.Lock()
+	defer captureOwnersMu.Unlock()
+	return captureRestoreEpoch, !captureRestoring
+}
 
 type captureOwner struct {
 	cancel context.CancelFunc
@@ -65,6 +72,7 @@ func QuiesceForRestore(ctx context.Context) (func(), error) {
 		return nil, err
 	}
 	captureRestoring = true
+	captureRestoreEpoch++
 	captureRestoreDone = make(chan struct{})
 	barrier := captureRestoreDone
 	owners := make([]*captureOwner, 0, len(captureOwners))

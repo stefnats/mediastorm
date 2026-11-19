@@ -934,6 +934,12 @@ func main() {
 		recordingsService = recordings.NewService(store.Recordings(), settings.Transmux.FFmpegPath, filepath.Join(settings.Cache.Directory, "recordings"))
 		recordingsService.SetRuleRepository(store.RecordingRules())
 		recordingsService.SetPartTimingProber(settings.Transmux.FFprobePath)
+		derivedTools := recordingDerivedToolsReader(cfgManager)
+		if tools, err := derivedTools(context.Background()); err == nil {
+			if err = recordingsService.ConfigureDerivedJoiner(context.Background(), tools, derivedTools); err != nil {
+				log.Printf("[recordings] joined recording preparation is unavailable")
+			}
+		}
 	}
 	var recordingsStreamProvider streaming.Provider
 	if recordingsService != nil {
@@ -1609,6 +1615,7 @@ func main() {
 	webRecordingPIN, webRecordingDownload := newRecordingWebPOSTHandlers(sessionsService, accountsService, userService, usersHandler.VerifyPin, recordingsHandler.ExportParts, currentProfilePins)
 	_, webRecordingTimingRead := newRecordingWebPOSTHandlers(sessionsService, accountsService, userService, usersHandler.VerifyPin, recordingsHandler.GetPartTiming, currentProfilePins)
 	_, webRecordingTimingInspect := newRecordingWebPOSTHandlers(sessionsService, accountsService, userService, usersHandler.VerifyPin, recordingsHandler.RefreshPartTiming, currentProfilePins)
+	registerRecordingDerivedWebRoutes(r, adminUIHandler, sessionsService, accountsService, userService, usersHandler.VerifyPin, recordingsHandler, currentProfilePins)
 	webRecordingPINLimiter := api.NewIPRateLimiter(rate.Every(6*time.Second), 10)
 	r.HandleFunc("/admin/api/users/{userID}/pin/verify", recordingWebOrigin(adminUIHandler.RequireAuth(api.RateLimitHandlerFunc(webRecordingPINLimiter, webRecordingPIN)))).Methods(http.MethodPost)
 	r.HandleFunc("/admin/api/live/recordings/{recordingID}/export", recordingWebOrigin(adminUIHandler.RequireAuth(webRecordingDownload))).Methods(http.MethodPost)

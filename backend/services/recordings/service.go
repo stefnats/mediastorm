@@ -60,6 +60,7 @@ type Service struct {
 	remuxRecording  func(string) error
 	syncCaptureFile func(*os.File) error
 	partTiming      *partTimingState
+	derived         *derivedState
 
 	mu       sync.Mutex
 	statusMu sync.Mutex
@@ -137,10 +138,14 @@ func (s *Service) Start(ctx context.Context) error {
 }
 
 func (s *Service) Stop(ctx context.Context) error {
+	var derivedErr error
+	if state := s.derivedState(); state != nil {
+		derivedErr = state.stop(ctx)
+	}
 	s.mu.Lock()
 	if !s.running {
 		s.mu.Unlock()
-		return nil
+		return derivedErr
 	}
 	s.cancel()
 	s.running = false
@@ -154,9 +159,9 @@ func (s *Service) Stop(ctx context.Context) error {
 
 	select {
 	case <-done:
-		return nil
+		return derivedErr
 	case <-ctx.Done():
-		return ctx.Err()
+		return errors.Join(derivedErr, ctx.Err())
 	}
 }
 
@@ -369,6 +374,12 @@ func (s *Service) Delete(id string) error {
 	recording, err := s.Get(id)
 	if err != nil {
 		return err
+	}
+	joinCtx, joinCancel := context.WithTimeout(context.Background(), 5*time.Second)
+	joinErr := s.retireDerivedRecording(joinCtx, id)
+	joinCancel()
+	if joinErr != nil {
+		return joinErr
 	}
 	if recording.Status == models.RecordingStatusPending && strings.TrimSpace(recording.RuleID) != "" {
 		// Keep the schedule key as a tombstone so the rule expander does not
