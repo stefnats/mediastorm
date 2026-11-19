@@ -8385,10 +8385,10 @@ func (s *Service) Trailers(ctx context.Context, req models.TrailerQuery) (*model
 	// For season requests, prefer season-specific trailers as primary
 	var primary *models.Trailer
 	if req.SeasonNumber > 0 {
-		primary = selectPrimaryTrailerForSeason(trailers, req.SeasonNumber)
+		primary = selectPrimaryTrailerForSeason(trailers, req.SeasonNumber, s.preferredTrailerLanguage())
 	}
 	if primary == nil {
-		primary = selectPrimaryTrailer(trailers)
+		primary = selectPrimaryTrailer(trailers, s.preferredTrailerLanguage())
 	}
 
 	if len(trailers) == 0 {
@@ -8682,13 +8682,17 @@ func dedupeTrailers(trailers []models.Trailer) []models.Trailer {
 	return deduped
 }
 
-func selectPrimaryTrailer(trailers []models.Trailer) *models.Trailer {
+func selectPrimaryTrailer(trailers []models.Trailer, preferredLanguage ...string) *models.Trailer {
 	if len(trailers) == 0 {
 		return nil
 	}
+	language, hasPreferred := preferredTrailerAvailable(trailers, 0, preferredLanguage)
 	bestIndex := -1
 	bestScore := -1
 	for idx := range trailers {
+		if hasPreferred && !matchesPreferredTrailer(&trailers[idx], language) {
+			continue
+		}
 		score := scoreTrailerCandidate(&trailers[idx])
 		if score > bestScore {
 			bestScore = score
@@ -8704,10 +8708,11 @@ func selectPrimaryTrailer(trailers []models.Trailer) *models.Trailer {
 // selectPrimaryTrailerForSeason selects the best trailer for a specific season.
 // It considers trailers with matching SeasonNumber, and for season 1 also considers
 // season 0 (show-level) trailers since they typically represent the first season.
-func selectPrimaryTrailerForSeason(trailers []models.Trailer, seasonNumber int) *models.Trailer {
+func selectPrimaryTrailerForSeason(trailers []models.Trailer, seasonNumber int, preferredLanguage ...string) *models.Trailer {
 	if len(trailers) == 0 || seasonNumber <= 0 {
 		return nil
 	}
+	language, hasPreferred := preferredTrailerAvailable(trailers, seasonNumber, preferredLanguage)
 	bestIndex := -1
 	bestScore := -1
 	for idx := range trailers {
@@ -8715,6 +8720,9 @@ func selectPrimaryTrailerForSeason(trailers []models.Trailer, seasonNumber int) 
 		// Consider trailers for this specific season
 		// For season 1, also consider season 0 (show-level) trailers
 		if trailerSeason != seasonNumber && !(seasonNumber == 1 && trailerSeason == 0) {
+			continue
+		}
+		if hasPreferred && !matchesPreferredTrailer(&trailers[idx], language) {
 			continue
 		}
 		score := scoreTrailerCandidate(&trailers[idx])
