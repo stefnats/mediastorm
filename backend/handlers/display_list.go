@@ -95,6 +95,10 @@ func (h *DisplayListHandler) SetPrequeueStore(store persistentPrequeueStore) {
 }
 
 func (h *DisplayListHandler) Get(w http.ResponseWriter, r *http.Request) {
+	if hasCachedTMDBPublicListSource(r) {
+		h.getCachedTMDBPublicList(w, r)
+		return
+	}
 	if hasCachedSimilarSource(r) {
 		h.getCachedSimilar(w, r)
 		return
