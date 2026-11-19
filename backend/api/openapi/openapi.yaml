@@ -116,6 +116,167 @@ tags:
   - name: clients
 
 paths:
+  /api/users/{userId}/kids/local-file-approvals:
+    post:
+      operationId: approveParentLocalFile
+      summary: Approve one actual opened local file with fresh account credentials
+      description: |
+        Explicitly configured PostgreSQL raw-local vertical only. Main does not
+        install this isolated service yet. This is a parent file exception,
+        never an automatic FSK, title-wide or episode classification. The first
+        403 includes a bounded pfa_ parentIntent retaining the actual root/FD.
+        Retry exact original bytes/path/client/session with X-Parent-Intent and
+        X-Account-Password. Current owned child, configured regional policy,
+        profile PIN and current library ACL are mandatory even if the global
+        PIN flag is false. No probe, provider or media read precedes approval.
+        Approval is bounded by the original session/file observation and two
+        hours, never renewed by seeks. Unsupported sources fail closed here.
+        Other media route closure and shared Main installation are separate.
+      security: [{bearerAuth: []}]
+      parameters:
+        - $ref: '#/components/parameters/UserID'
+        - in: header
+          name: X-Parent-Intent
+          schema: {type: string, pattern: '^pfa_[0-9a-f]{64}$'}
+        - $ref: '#/components/parameters/ParentAccountPassword'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [itemId]
+              properties:
+                itemId: {type: string, minLength: 1, maxLength: 128}
+      responses:
+        '200':
+          description: A same-session locator for the original exact local file, not a bearer grant.
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                required: [approvalId, expiresAt, streamUrl, outcome]
+                properties:
+                  approvalId: {type: string, pattern: '^lfa_[0-9a-f]{64}$'}
+                  expiresAt: {type: string, format: date-time}
+                  streamUrl: {type: string}
+                  outcome: {type: string, enum: [parent-file-exception]}
+        '400': {$ref: '#/components/responses/Error'}
+        '401': {$ref: '#/components/responses/Error'}
+        '403': {$ref: '#/components/responses/Error'}
+        '404': {$ref: '#/components/responses/Error'}
+        '409': {$ref: '#/components/responses/Error'}
+        '413': {$ref: '#/components/responses/Error'}
+        '503': {$ref: '#/components/responses/Error'}
+
+  /api/users/{userId}/library/items/{itemId}/approved-file:
+    get:
+      operationId: streamParentLocalFile
+      summary: Stream the original parent-approved local file
+      description: Original full session/client/child/PIN/policy/root/FD/current SQL ACL must still agree. The approval ID is only a locator. Single full, open, closed and suffix byte ranges are supported. Independent range requests duplicate the held FD. No HLS, provider, direct URL, conditional range or multi-range fallback. Current checks bound each chunk and a joined watcher cancels blocked writes on detected drift. Stable local file stat versions are checked; content-hash immutability is not claimed.
+      security: [{bearerAuth: []}]
+      parameters:
+        - $ref: '#/components/parameters/UserID'
+        - in: path
+          name: itemId
+          required: true
+          schema: {type: string, minLength: 1, maxLength: 128}
+        - in: query
+          name: approvalId
+          required: true
+          schema: {type: string, pattern: '^lfa_[0-9a-f]{64}$'}
+        - in: header
+          name: Range
+          schema: {type: string}
+      responses:
+        '200':
+          description: Checked original raw local file bytes.
+          headers:
+            Accept-Ranges: {schema: {type: string}}
+            Content-Range: {schema: {type: string}}
+            Content-Length: {schema: {type: integer, minimum: 0}}
+          content:
+            application/octet-stream:
+              schema: {type: string, format: binary}
+        '206':
+          description: Checked original raw local file bytes.
+          headers:
+            Accept-Ranges: {schema: {type: string}}
+            Content-Range: {schema: {type: string}}
+            Content-Length: {schema: {type: integer, minimum: 0}}
+          content:
+            application/octet-stream:
+              schema: {type: string, format: binary}
+        '416': {description: Unsatisfiable single range after authorization.}
+        '400': {$ref: '#/components/responses/Error'}
+        '401': {$ref: '#/components/responses/Error'}
+        '403': {$ref: '#/components/responses/Error'}
+        '404': {$ref: '#/components/responses/Error'}
+        '503': {$ref: '#/components/responses/Error'}
+
+    head:
+      operationId: headParentLocalFile
+      summary: Read checked original local file headers
+      description: Original full session/client/child/PIN/policy/root/FD/current SQL ACL must still agree. The approval ID is only a locator. Single full, open, closed and suffix byte ranges are supported. Independent range requests duplicate the held FD. No HLS, provider, direct URL, conditional range or multi-range fallback. Current checks bound each chunk and a joined watcher cancels blocked writes on detected drift. Stable local file stat versions are checked; content-hash immutability is not claimed.
+      security: [{bearerAuth: []}]
+      parameters:
+        - $ref: '#/components/parameters/UserID'
+        - in: path
+          name: itemId
+          required: true
+          schema: {type: string, minLength: 1, maxLength: 128}
+        - in: query
+          name: approvalId
+          required: true
+          schema: {type: string, pattern: '^lfa_[0-9a-f]{64}$'}
+        - in: header
+          name: Range
+          schema: {type: string}
+      responses:
+        '200':
+          description: Checked original raw local file headers.
+          headers:
+            Accept-Ranges: {schema: {type: string}}
+            Content-Range: {schema: {type: string}}
+            Content-Length: {schema: {type: integer, minimum: 0}}
+        '206':
+          description: Checked original raw local file headers.
+          headers:
+            Accept-Ranges: {schema: {type: string}}
+            Content-Range: {schema: {type: string}}
+            Content-Length: {schema: {type: integer, minimum: 0}}
+        '416': {description: Unsatisfiable single range after authorization.}
+        '400': {$ref: '#/components/responses/Error'}
+        '401': {$ref: '#/components/responses/Error'}
+        '403': {$ref: '#/components/responses/Error'}
+        '404': {$ref: '#/components/responses/Error'}
+        '503': {$ref: '#/components/responses/Error'}
+
+    delete:
+      operationId: revokeParentLocalFile
+      summary: Retire this same-session local file exception
+      description: Original full session/client/child/PIN/policy/root/FD/current SQL ACL must still agree. The approval ID is only a locator. Single full, open, closed and suffix byte ranges are supported. Independent range requests duplicate the held FD. No HLS, provider, direct URL, conditional range or multi-range fallback. Current checks bound each chunk and a joined watcher cancels blocked writes on detected drift. Stable local file stat versions are checked; content-hash immutability is not claimed.
+      security: [{bearerAuth: []}]
+      parameters:
+        - $ref: '#/components/parameters/UserID'
+        - in: path
+          name: itemId
+          required: true
+          schema: {type: string, minLength: 1, maxLength: 128}
+        - in: query
+          name: approvalId
+          required: true
+          schema: {type: string, pattern: '^lfa_[0-9a-f]{64}$'}
+      responses:
+        '204': {description: Original exception retired.}
+        '400': {$ref: '#/components/responses/Error'}
+        '401': {$ref: '#/components/responses/Error'}
+        '403': {$ref: '#/components/responses/Error'}
+        '404': {$ref: '#/components/responses/Error'}
+        '503': {$ref: '#/components/responses/Error'}
+
   /api/users/{userId}/kids/regional-policy:
     get:
       operationId: getAPIRegionalChildPolicy

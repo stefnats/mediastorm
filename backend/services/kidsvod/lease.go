@@ -90,7 +90,7 @@ func (s *Service) OpenLease(ctx context.Context, intent *Intent, grant *Grant) (
 	}
 	s.mu.Lock()
 	decision = s.evaluateLocked(intent, grant)
-	if !decision.Allowed() || ctx.Err() != nil || len(s.leases) >= MaxLeases {
+	if !decision.Allowed() || ctx.Err() != nil || len(s.leases)+len(s.fileReaders) >= MaxLeases {
 		s.mu.Unlock()
 		return nil, s.unknown(CodeContextChanged)
 	}

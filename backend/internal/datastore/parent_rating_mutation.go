@@ -42,6 +42,7 @@ type parentRatingState struct {
 	body                                       []byte
 	desired                                    []string
 	regionalState                              string
+	fileBinding                                string
 	deadline                                   time.Time
 	life                                       context.Context
 	stop                                       context.CancelFunc
@@ -95,13 +96,18 @@ const (
 	parentRatingTV
 	parentRatingPair
 	parentRatingRegional
+	parentRatingLocalFile
 )
 
 func parentRatingRequestBoundary(r *http.Request, kind parentRatingAction) (string, string, string, error) {
-	if kind < parentRatingGeneric || kind > parentRatingRegional || r == nil || r.URL == nil || len(r.URL.EscapedPath())+len(r.URL.RawPath)+len(r.URL.RawQuery) > 8192 {
+	if kind < parentRatingGeneric || kind > parentRatingLocalFile || r == nil || r.URL == nil || len(r.URL.EscapedPath())+len(r.URL.RawPath)+len(r.URL.RawQuery) > 8192 {
 		return "", "", "", ErrParentRatingChanged
 	}
-	path, query, client, err := parentConfirmationRequestBoundary(r, http.MethodPut)
+	method := http.MethodPut
+	if kind == parentRatingLocalFile {
+		method = http.MethodPost
+	}
+	path, query, client, err := parentConfirmationRequestBoundary(r, method)
 	if err != nil {
 		return "", "", "", ErrParentRatingChanged
 	}
@@ -110,6 +116,13 @@ func parentRatingRequestBoundary(r *http.Request, kind parentRatingAction) (stri
 func parentRatingDesired(kind parentRatingAction, raw []byte) ([]string, error) {
 	if len(raw) > ParentRatingBodyLimit {
 		return nil, ErrParentRatingBodyTooLarge
+	}
+	if kind == parentRatingLocalFile {
+		id, err := ParentLocalFileItem(raw)
+		if err != nil {
+			return nil, err
+		}
+		return []string{id}, nil
 	}
 	if kind == parentRatingRegional {
 		policy, err := models.DecodeRegionalChildPolicy(raw)

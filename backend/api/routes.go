@@ -102,10 +102,17 @@ func masterOnlySportsMutation(handler http.HandlerFunc) http.Handler {
 type RegisterOption func(*registerOptions)
 
 type registerOptions struct {
-	pgPins   *profileunlock.PGProfilePins
-	unlocks  *profileunlock.Service
-	security SecuritySettingsFunc
-	recovery *handlers.ProfileRecoveryHandler
+	parentLocalFiles *handlers.ParentLocalFileHandler
+	pgPins           *profileunlock.PGProfilePins
+	unlocks          *profileunlock.Service
+	security         SecuritySettingsFunc
+	recovery         *handlers.ProfileRecoveryHandler
+}
+
+// WithParentLocalFiles selects the isolated raw-local parent exception. Main
+// does not install this option until the separate all-route closure is ready.
+func WithParentLocalFiles(handler *handlers.ParentLocalFileHandler) RegisterOption {
+	return func(options *registerOptions) { options.parentLocalFiles = handler }
 }
 
 // WithProfileUnlocks enables server-issued profile unlock tokens and, when the
@@ -333,6 +340,12 @@ func Register(
 	// Profile ownership middleware for user routes
 	profileProtected := protected.PathPrefix("/users").Subrouter()
 	profileProtected.Use(ProfileOwnershipMiddleware(usersSvc, options.pgPins))
+	profileProtected.HandleFunc("/{userID}/kids/local-file-approvals", options.parentLocalFiles.Approve).Methods(http.MethodPost)
+	profileProtected.HandleFunc("/{userID}/library/items/{itemID}/approved-file", options.parentLocalFiles.Stream).Methods(http.MethodGet, http.MethodHead)
+	profileProtected.HandleFunc("/{userID}/library/items/{itemID}/approved-file", options.parentLocalFiles.Revoke).Methods(http.MethodDelete)
+	if localMediaHandler != nil && options.parentLocalFiles != nil {
+		localMediaHandler.SetParentLocalFiles(options.parentLocalFiles)
+	}
 	recoveryHandler := options.recovery
 	if recoveryHandler == nil {
 		recoveryHandler = handlers.NewProfileRecoveryHandler(nil, nil)

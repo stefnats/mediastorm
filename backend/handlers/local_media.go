@@ -47,9 +47,13 @@ type LocalMediaHandler struct {
 	userSettings userSettingsProvider
 	remote       *remotemedia.Service
 	access       *libraryaccess.Service
+	parentFiles  *ParentLocalFileHandler
 }
 
 func (h *LocalMediaHandler) SetRemoteMediaService(service *remotemedia.Service) { h.remote = service }
+func (h *LocalMediaHandler) SetParentLocalFiles(service *ParentLocalFileHandler) {
+	h.parentFiles = service
+}
 func (h *LocalMediaHandler) SetLibraryAccessService(service *libraryaccess.Service) {
 	h.access = service
 }
@@ -438,6 +442,9 @@ func (h *LocalMediaHandler) GetPlayback(w http.ResponseWriter, r *http.Request) 
 	itemID := strings.TrimSpace(mux.Vars(r)["itemID"])
 	if itemID == "" {
 		http.Error(w, "missing item ID", http.StatusBadRequest)
+		return
+	}
+	if h.parentFiles != nil && h.parentFiles.childPlayback(w, r, itemID) {
 		return
 	}
 	if h.service == nil {
