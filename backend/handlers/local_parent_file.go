@@ -10,6 +10,7 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/gorilla/mux"
@@ -31,6 +32,8 @@ type ParentLocalFileHandler struct {
 	parent *parentauth.Guard
 	local  *localmedia.Service
 	core   *kidsvod.Service
+	hlsMu  sync.Mutex
+	hls    *parentFileHLSManager
 }
 type parentFileProfiles struct{ store *datastore.DataStore }
 

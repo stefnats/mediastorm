@@ -123,6 +123,7 @@ func (a *parentFileApproval) close() {
 		}
 		if a.service != nil {
 			a.service.closeParentFileReaders(a)
+			a.service.closeParentFileProcesses(a)
 		}
 		_ = a.intent.source.Close()
 		if a.service != nil {
@@ -544,7 +545,7 @@ func (s *Service) acquireParentFileReader(r *http.Request, entry *parentFileAppr
 	l := &ParentFileReader{service: s, entry: entry, ctx: ctx, cancel: cancel, ready: make(chan struct{}), requestDone: make(chan struct{}), grantDone: make(chan struct{})}
 	s.mu.Lock()
 	s.pruneLocked()
-	if s.fileGrants[entry.id] != entry || entry.ctx.Err() != nil || len(s.leases)+len(s.fileReaders) >= MaxLeases || r.Context().Err() != nil {
+	if s.fileGrants[entry.id] != entry || entry.ctx.Err() != nil || len(s.leases)+len(s.fileReaders)+len(s.fileProcesses)+s.fileOutputReaders >= MaxLeases || r.Context().Err() != nil {
 		s.mu.Unlock()
 		cancel()
 		return nil, ErrParentFileChanged

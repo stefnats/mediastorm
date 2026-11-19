@@ -54,16 +54,18 @@ type approval struct {
 }
 
 type Service struct {
-	deps          Dependencies
-	seal          *serviceSeal
-	mu            sync.Mutex
-	epochs        map[string]uint64
-	nextEpoch     uint64
-	grants        map[string]*approval
-	leases        map[*Lease]string
-	fileGrants    map[string]*parentFileApproval
-	filePreparing map[*ParentFileIntent]struct{}
-	fileReaders   map[*ParentFileReader]*parentFileApproval
+	deps              Dependencies
+	seal              *serviceSeal
+	mu                sync.Mutex
+	epochs            map[string]uint64
+	nextEpoch         uint64
+	grants            map[string]*approval
+	leases            map[*Lease]string
+	fileGrants        map[string]*parentFileApproval
+	filePreparing     map[*ParentFileIntent]struct{}
+	fileReaders       map[*ParentFileReader]*parentFileApproval
+	fileProcesses     map[*ParentFileProcessLease]*parentFileApproval
+	fileOutputReaders int
 }
 
 func New(deps Dependencies) (*Service, error) {

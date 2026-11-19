@@ -389,6 +389,7 @@ func TestOpenAPIContract(t *testing.T) {
 		t.Fatal(err)
 	}
 	parentLocalFileUnavailableContract(t, v)
+	parentLocalFileHLSUnavailableContract(t, v)
 	now := time.Now().UTC().Truncate(time.Second)
 
 	t.Run("auth", func(t *testing.T) {
