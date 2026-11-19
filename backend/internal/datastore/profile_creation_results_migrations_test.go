@@ -11,9 +11,10 @@ import (
 
 func TestProfileCreationResultsMigrationFull081AndEmptyPerStepDown(t *testing.T) {
 	f := creationOperationFixture(t)
+	latest := latestEmbeddedMigrationVersion(t)
 	creationOperationGoose(t)
-	if v := creationOperationVersion(t, f.ds); v != 81 {
-		t.Fatal("New did not discover081", v)
+	if v := creationOperationVersion(t, f.ds); v != latest {
+		t.Fatalf("startup migration version = %d, want latest embedded %d", v, latest)
 	}
 	if err := creationOperationDown(t.Context(), f.ds); err != nil {
 		t.Fatal("empty081 then080 per-step Down", err)
@@ -27,8 +28,8 @@ func TestProfileCreationResultsMigrationFull081AndEmptyPerStepDown(t *testing.T)
 	}
 	f.ds.Close()
 	f.ds = f.open(t)
-	if v := creationOperationVersion(t, f.ds); v != 81 {
-		t.Fatal("restart did not upgrade081", v)
+	if v := creationOperationVersion(t, f.ds); v != latest {
+		t.Fatalf("restart migration version = %d, want latest embedded %d", v, latest)
 	}
 }
 func TestProfileCreationResultsMigrationRetainedProofRefusesDown(t *testing.T) {

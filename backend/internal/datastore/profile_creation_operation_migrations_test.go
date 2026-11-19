@@ -48,6 +48,7 @@ func creationOperationVersion(t *testing.T, ds *DataStore) int64 {
 }
 func TestProfileCreationOperationsFull080EmptyDownUpgradeAndRestart(t *testing.T) {
 	f := creationOperationFixture(t)
+	latest := latestEmbeddedMigrationVersion(t)
 	creationOperationUse080(t, f)
 	creationOperationGoose(t)
 	if version := creationOperationVersion(t, f.ds); version != 80 {
@@ -68,7 +69,10 @@ func TestProfileCreationOperationsFull080EmptyDownUpgradeAndRestart(t *testing.T
 	before := creationOperationExistingRows(t, f)
 	f.ds.Close()
 	f.ds = f.open(t)
-	if creationOperationVersion(t, f.ds) != 81 || creationOperationExistingRows(t, f) != before {
+	if version := creationOperationVersion(t, f.ds); version != latest {
+		t.Fatalf("startup migration version = %d, want latest embedded %d", version, latest)
+	}
+	if creationOperationExistingRows(t, f) != before {
 		t.Fatal("080 upgrade changed existing records")
 	}
 	r := creationOperationReserve(t, f.ds, t.Context(), "correlation_actor")
@@ -83,6 +87,9 @@ func TestProfileCreationOperationsFull080EmptyDownUpgradeAndRestart(t *testing.T
 	oldDS := f.ds
 	f.ds.Close()
 	f.ds = f.open(t)
+	if version := creationOperationVersion(t, f.ds); version != latest {
+		t.Fatalf("restart migration version = %d, want latest embedded %d", version, latest)
+	}
 	s := creationOperationObserve(t, f.ds, t.Context(), ref)
 	if s.record.state != "unknown" || s.record.metadata.ActorID != "correlation_actor" {
 		t.Fatal("durable unresolved record lost across New")
@@ -290,7 +297,7 @@ func TestProfileCreationOperationsRepeatableReadCounterexampleIsReadOnly(t *test
 }
 
 // The080 feature controls deliberately run UpTo080, preserving their strict
-// per-migration assertions. New() discovery/latest081 has separate controls.
+// per-migration assertions. New() discovery of the latest migration has separate controls.
 func creationOperationUse080(t *testing.T, f *settingsDSFixture) {
 	t.Helper()
 	creationOperationGoose(t)
