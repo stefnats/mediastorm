@@ -23,6 +23,9 @@ type Lease struct {
 	expires    time.Time
 }
 
+func (Lease) MarshalJSON() ([]byte, error) { return []byte("null"), nil }
+func (*Lease) UnmarshalJSON([]byte) error  { return ErrOpaqueCapability }
+
 func (l *Lease) Context() context.Context {
 	if l == nil || l.ctx == nil {
 		return closedContext
@@ -92,8 +95,22 @@ func (s *Service) OpenLease(ctx context.Context, intent *Intent, grant *Grant) (
 		return nil, s.unknown(CodeContextChanged)
 	}
 	leaseCtx, cancel := context.WithCancel(ctx)
-	lease := &Lease{service: s, ctx: leaseCtx, cancel: cancel, intent: intent, grant: grant, expires: s.grants[grant.id].expires}
-	s.leases[lease] = grant.id
+	expiry := intent.expires
+	grantID := ""
+	if grant != nil {
+		entry := s.grants[grant.id]
+		if entry == nil {
+			cancel()
+			s.mu.Unlock()
+			return nil, s.unknown(CodeContextChanged)
+		}
+		expiry = entry.expires
+		grantID = grant.id
+	} else if intent.classificationExpires.Before(expiry) {
+		expiry = intent.classificationExpires
+	}
+	lease := &Lease{service: s, ctx: leaseCtx, cancel: cancel, intent: intent, grant: grant, expires: expiry}
+	s.leases[lease] = grantID
 	s.mu.Unlock()
 	stopParent := context.AfterFunc(ctx, func() { lease.Close() })
 	timer := s.deps.Clock.AfterFunc(lease.expires.Sub(s.deps.Clock.Now()), func() { s.mu.Lock(); s.closeLeaseLocked(lease, CodeApprovalExpired); s.mu.Unlock() })
