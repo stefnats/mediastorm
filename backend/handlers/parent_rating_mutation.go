@@ -31,6 +31,7 @@ const (
 	parentRatingMovie
 	parentRatingTV
 	parentRatingPair
+	parentRatingRegional
 )
 
 func readParentRatingBody(r *http.Request) ([]byte, error) {
@@ -69,6 +70,8 @@ func (h *UsersHandler) currentParentRating(w http.ResponseWriter, r *http.Reques
 			intent, err = h.pgPins.ClaimParentRatingMovie(r, id, body, values[0])
 		case parentRatingTV:
 			intent, err = h.pgPins.ClaimParentRatingTV(r, id, body, values[0])
+		case parentRatingRegional:
+			intent, err = h.pgPins.ClaimParentRegionalPolicy(r, id, body, values[0])
 		case parentRatingPair:
 			intent, err = h.pgPins.ClaimParentRatingPair(r, id, body, values[0])
 		default:
@@ -83,6 +86,8 @@ func (h *UsersHandler) currentParentRating(w http.ResponseWriter, r *http.Reques
 			token, err = h.pgPins.ParentRatingMovieChallenge(r, id, body)
 		case parentRatingTV:
 			token, err = h.pgPins.ParentRatingTVChallenge(r, id, body)
+		case parentRatingRegional:
+			token, err = h.pgPins.ParentRegionalPolicyChallenge(r, id, body)
 		case parentRatingPair:
 			token, err = h.pgPins.ParentRatingPairChallenge(r, id, body)
 		default:
@@ -105,6 +110,8 @@ func (h *UsersHandler) currentParentRating(w http.ResponseWriter, r *http.Reques
 			intent, err = h.pgPins.ImmediateParentRatingMovie(r, id, body)
 		case parentRatingTV:
 			intent, err = h.pgPins.ImmediateParentRatingTV(r, id, body)
+		case parentRatingRegional:
+			intent, err = h.pgPins.ImmediateParentRegionalPolicy(r, id, body)
 		case parentRatingPair:
 			intent, err = h.pgPins.ImmediateParentRatingPair(r, id, body)
 		default:
@@ -133,8 +140,20 @@ func (h *UsersHandler) currentParentRating(w http.ResponseWriter, r *http.Reques
 		writeParentRatingError(w, originalRequest, datastore.ErrParentRatingUnavailable)
 		return
 	}
+	var regional *models.RegionalChildPolicy
 	var user models.User
 	switch action {
+	case parentRatingRegional:
+		writer, ok := h.Service.(interface {
+			CommitParentRegionalPolicy(context.Context, string, *datastore.ParentRatingIntent) (models.RegionalChildPolicy, error)
+		})
+		if !ok {
+			err = datastore.ErrParentRatingUnavailable
+		} else {
+			value, e := writer.CommitParentRegionalPolicy(r.Context(), id, intent)
+			err = e
+			regional = &value
+		}
 	case parentRatingGeneric:
 		user, err = persistence.CommitParentRatingGeneric(r.Context(), id, intent)
 	case parentRatingMovie:
@@ -157,7 +176,11 @@ func (h *UsersHandler) currentParentRating(w http.ResponseWriter, r *http.Reques
 		return
 	}
 	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(user)
+	if regional != nil {
+		_ = json.NewEncoder(w).Encode(regional)
+	} else {
+		_ = json.NewEncoder(w).Encode(user)
+	}
 }
 func writeParentRatingError(w http.ResponseWriter, r *http.Request, err error) {
 	if r.Context().Err() != nil {

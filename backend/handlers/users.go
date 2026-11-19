@@ -6,6 +6,8 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"net/url"
+	"novastream/internal/requestsecurity"
 	"strings"
 	"time"
 
@@ -1720,4 +1722,54 @@ func writeCurrentPinChangeError(w http.ResponseWriter, r *http.Request, err erro
 	default:
 		apierror.Write(w, http.StatusServiceUnavailable, "profile_unavailable", "profile access unavailable")
 	}
+}
+
+// Regional policy has no legacy cache setter. Cookie aliases use the exact
+// trusted origin before body capture, authentication challenge or mutation.
+func (h *UsersHandler) RegionalChildPolicy(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Cache-Control", "no-store")
+	id := mux.Vars(r)["userID"]
+	if id == "" || strings.TrimSpace(id) != id || h.pgPins == nil {
+		writeParentRatingError(w, r, datastore.ErrParentRatingUnavailable)
+		return
+	}
+	if r.Method == http.MethodPut {
+		if strings.HasPrefix(r.URL.Path, "/admin/") || strings.HasPrefix(r.URL.Path, "/account/") {
+			origins, sites := r.Header.Values("Origin"), r.Header.Values("Sec-Fetch-Site")
+			scheme := "http"
+			if requestsecurity.IsSecure(r) {
+				scheme = "https"
+			}
+			valid := len(origins) == 1 && len(sites) <= 1 && (len(sites) == 0 || sites[0] == "same-origin")
+			expected, e := url.Parse(scheme + "://" + r.Host)
+			origin, o := url.Parse(r.Header.Get("Origin"))
+			port := func(u *url.URL) string {
+				if p := u.Port(); p != "" {
+					return p
+				}
+				if u.Scheme == "https" {
+					return "443"
+				}
+				return "80"
+			}
+			valid = valid && e == nil && o == nil && expected.User == nil && expected.Host != "" && origin.User == nil && origin.Scheme == scheme && origin.Host != "" && origin.Path == "" && origin.RawQuery == "" && origin.Fragment == "" && origin.Opaque == "" && !origin.ForceQuery && strings.EqualFold(origin.Hostname(), expected.Hostname()) && port(origin) == port(expected) && !strings.ContainsAny(origins[0], "?#")
+			if !valid {
+				http.Error(w, "same-origin request required", http.StatusForbidden)
+				return
+			}
+		}
+		h.currentParentRating(w, r, id, parentRatingRegional)
+		return
+	}
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	policy, err := h.pgPins.ReadRegionalPolicy(r, id)
+	if err != nil {
+		writeParentRatingError(w, r, err)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(policy)
 }

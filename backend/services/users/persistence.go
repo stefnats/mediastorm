@@ -1264,3 +1264,45 @@ func (l *StorageRecoveryLease) CreationPairLease() *datastore.ProfileCreationRec
 	}
 	return l.state.creationProof
 }
+
+func (s *Service) CommitParentRegionalPolicy(ctx context.Context, targetID string, intent *datastore.ParentRatingIntent) (models.RegionalChildPolicy, error) {
+	if s == nil || !s.useDB() || ctx == nil || ctx.Err() != nil {
+		return models.RegionalChildPolicy{}, datastore.ErrParentRatingUnavailable
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.ensurePersistenceLocked()
+	if s.persistence.uncertain {
+		return models.RegionalChildPolicy{}, ErrPersistenceUncertain
+	}
+	current, known := s.users[targetID]
+	confirmed, present := s.persistence.confirmed[targetID]
+	revision, exists := s.persistence.revisions[targetID]
+	if !known || !present || !exists || !reflect.DeepEqual(current, confirmed) {
+		return models.RegionalChildPolicy{}, datastore.ErrUserWriteConflict
+	}
+	if selected, err := s.store.ParentRegionalPolicyTarget(ctx, intent, revision); err != nil || selected != targetID {
+		if err != nil {
+			return models.RegionalChildPolicy{}, err
+		}
+		return models.RegionalChildPolicy{}, datastore.ErrUserWriteConflict
+	}
+	receipt, err := s.store.CommitParentRegionalPolicy(intent)
+	if err != nil {
+		if errors.Is(err, datastore.ErrParentRatingUnknown) {
+			s.markStorageUnknownLocked([]string{targetID})
+		}
+		return models.RegionalChildPolicy{}, err
+	}
+	record, policy, err := s.store.AcknowledgeParentRegionalPolicy(ctx, intent, receipt, revision)
+	if err != nil {
+		return models.RegionalChildPolicy{}, err
+	}
+	s.users[targetID] = cloneUser(record.User)
+	s.persistence.confirmed[targetID] = cloneUser(record.User)
+	s.persistence.revisions[targetID] = record.Revision
+	if err = ctx.Err(); err != nil {
+		return models.RegionalChildPolicy{}, err
+	}
+	return policy, nil
+}

@@ -116,6 +116,204 @@ tags:
   - name: clients
 
 paths:
+  /api/users/{userId}/kids/regional-policy:
+    get:
+      operationId: getAPIRegionalChildPolicy
+      summary: Read current regional child policy configuration
+      description: Current PostgreSQL owned-profile and PIN observation. Null means unconfigured; a child remains protected and cannot fall back to inactive adult behavior. This response is configuration, never played-edition classification or playback permission.
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/UserID'
+      responses:
+        '200':
+          description: Current explicit configuration, or null when unconfigured.
+          content:
+            application/json:
+              schema:
+                nullable: true
+                allOf:
+                  - $ref: '#/components/schemas/RegionalChildPolicy'
+        '401': {$ref: '#/components/responses/Error'}
+        '403': {$ref: '#/components/responses/Error'}
+        '404': {$ref: '#/components/responses/Error'}
+        '409': {$ref: '#/components/responses/Error'}
+        '503': {$ref: '#/components/responses/Error'}
+    put:
+      operationId: putAPIRegionalChildPolicy
+      summary: Save explicit regional caps with fresh parental confirmation
+      description: |
+        PostgreSQL only. Exactly version, country, maxMovieAge and maxEpisodeAge
+        must occur once with canonical case; unknown/duplicate/null/trailing
+        fields and noninteger unsupported caps reject before confirmation.
+        No enabled flag, generation, source evidence or US rating conversion.
+        A missing policy never disables protection for a current child.
+
+        Fresh current account password is required even for masters. The first
+        403 includes a prf_ parentIntent. Retry exact original request bytes,
+        method/path/query/client/session/target with X-Parent-Intent and
+        X-Account-Password before its original bounded deadline. Wrong proof,
+        changed state, cancellation or replay cannot overwrite current policy.
+        Cookie aliases require an exact trusted same-origin PUT. Cap persistence
+        and target updatedAt are atomic; uncertain commit returns503 and must
+        be reloaded before a new explicit save. No media policy is installed.
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/UserID'
+        - $ref: '#/components/parameters/RegionalPolicyIntent'
+        - $ref: '#/components/parameters/ParentAccountPassword'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/RegionalChildPolicy'}
+      responses:
+        '200':
+          description: Exact known committed configuration. No reusable proof is returned.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/RegionalChildPolicy'}
+        '400': {$ref: '#/components/responses/Error'}
+        '401': {$ref: '#/components/responses/Error'}
+        '403': {$ref: '#/components/responses/Error'}
+        '404': {$ref: '#/components/responses/Error'}
+        '409': {$ref: '#/components/responses/Error'}
+        '413': {$ref: '#/components/responses/Error'}
+        '503': {$ref: '#/components/responses/Error'}
+
+  /admin/api/users/{userId}/kids/regional-policy:
+    get:
+      operationId: getAdminRegionalChildPolicy
+      summary: Read current regional child policy configuration
+      description: Current PostgreSQL owned-profile and PIN observation. Null means unconfigured; a child remains protected and cannot fall back to inactive adult behavior. This response is configuration, never played-edition classification or playback permission.
+      security:
+        - accountSession: []
+      parameters:
+        - $ref: '#/components/parameters/UserID'
+      responses:
+        '200':
+          description: Current explicit configuration, or null when unconfigured.
+          content:
+            application/json:
+              schema:
+                nullable: true
+                allOf:
+                  - $ref: '#/components/schemas/RegionalChildPolicy'
+        '401': {$ref: '#/components/responses/Error'}
+        '403': {$ref: '#/components/responses/Error'}
+        '404': {$ref: '#/components/responses/Error'}
+        '409': {$ref: '#/components/responses/Error'}
+        '503': {$ref: '#/components/responses/Error'}
+    put:
+      operationId: putAdminRegionalChildPolicy
+      summary: Save explicit regional caps with fresh parental confirmation
+      description: |
+        PostgreSQL only. Exactly version, country, maxMovieAge and maxEpisodeAge
+        must occur once with canonical case; unknown/duplicate/null/trailing
+        fields and noninteger unsupported caps reject before confirmation.
+        No enabled flag, generation, source evidence or US rating conversion.
+        A missing policy never disables protection for a current child.
+
+        Fresh current account password is required even for masters. The first
+        403 includes a prf_ parentIntent. Retry exact original request bytes,
+        method/path/query/client/session/target with X-Parent-Intent and
+        X-Account-Password before its original bounded deadline. Wrong proof,
+        changed state, cancellation or replay cannot overwrite current policy.
+        Cookie aliases require an exact trusted same-origin PUT. Cap persistence
+        and target updatedAt are atomic; uncertain commit returns503 and must
+        be reloaded before a new explicit save. No media policy is installed.
+      security:
+        - accountSession: []
+      parameters:
+        - $ref: '#/components/parameters/UserID'
+        - $ref: '#/components/parameters/RegionalPolicyIntent'
+        - $ref: '#/components/parameters/ParentAccountPassword'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/RegionalChildPolicy'}
+      responses:
+        '200':
+          description: Exact known committed configuration. No reusable proof is returned.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/RegionalChildPolicy'}
+        '400': {$ref: '#/components/responses/Error'}
+        '401': {$ref: '#/components/responses/Error'}
+        '403': {$ref: '#/components/responses/Error'}
+        '404': {$ref: '#/components/responses/Error'}
+        '409': {$ref: '#/components/responses/Error'}
+        '413': {$ref: '#/components/responses/Error'}
+        '503': {$ref: '#/components/responses/Error'}
+
+  /account/api/users/{userId}/kids/regional-policy:
+    get:
+      operationId: getAccountRegionalChildPolicy
+      summary: Read current regional child policy configuration
+      description: Current PostgreSQL owned-profile and PIN observation. Null means unconfigured; a child remains protected and cannot fall back to inactive adult behavior. This response is configuration, never played-edition classification or playback permission.
+      security:
+        - accountSession: []
+      parameters:
+        - $ref: '#/components/parameters/UserID'
+      responses:
+        '200':
+          description: Current explicit configuration, or null when unconfigured.
+          content:
+            application/json:
+              schema:
+                nullable: true
+                allOf:
+                  - $ref: '#/components/schemas/RegionalChildPolicy'
+        '401': {$ref: '#/components/responses/Error'}
+        '403': {$ref: '#/components/responses/Error'}
+        '404': {$ref: '#/components/responses/Error'}
+        '409': {$ref: '#/components/responses/Error'}
+        '503': {$ref: '#/components/responses/Error'}
+    put:
+      operationId: putAccountRegionalChildPolicy
+      summary: Save explicit regional caps with fresh parental confirmation
+      description: |
+        PostgreSQL only. Exactly version, country, maxMovieAge and maxEpisodeAge
+        must occur once with canonical case; unknown/duplicate/null/trailing
+        fields and noninteger unsupported caps reject before confirmation.
+        No enabled flag, generation, source evidence or US rating conversion.
+        A missing policy never disables protection for a current child.
+
+        Fresh current account password is required even for masters. The first
+        403 includes a prf_ parentIntent. Retry exact original request bytes,
+        method/path/query/client/session/target with X-Parent-Intent and
+        X-Account-Password before its original bounded deadline. Wrong proof,
+        changed state, cancellation or replay cannot overwrite current policy.
+        Cookie aliases require an exact trusted same-origin PUT. Cap persistence
+        and target updatedAt are atomic; uncertain commit returns503 and must
+        be reloaded before a new explicit save. No media policy is installed.
+      security:
+        - accountSession: []
+      parameters:
+        - $ref: '#/components/parameters/UserID'
+        - $ref: '#/components/parameters/RegionalPolicyIntent'
+        - $ref: '#/components/parameters/ParentAccountPassword'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/RegionalChildPolicy'}
+      responses:
+        '200':
+          description: Exact known committed configuration. No reusable proof is returned.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/RegionalChildPolicy'}
+        '400': {$ref: '#/components/responses/Error'}
+        '401': {$ref: '#/components/responses/Error'}
+        '403': {$ref: '#/components/responses/Error'}
+        '404': {$ref: '#/components/responses/Error'}
+        '409': {$ref: '#/components/responses/Error'}
+        '413': {$ref: '#/components/responses/Error'}
+        '503': {$ref: '#/components/responses/Error'}
+
   /admin/api/usenet/fallback:
     get:
       operationId: listSABFallbackStatuses
@@ -5706,6 +5904,12 @@ components:
       description: Session token as a query parameter; only accepted on media URLs such as `/api/video/stream`.
 
   parameters:
+    RegionalPolicyIntent:
+      name: X-Parent-Intent
+      in: header
+      required: false
+      schema: {type: string, pattern: '^prf_[0-9a-f]{64}$'}
+      description: One-shot original regional policy confirmation; no other parent action accepts it.
     ParentKidsFlagIntent:
       name: X-Parent-Intent
       in: header
@@ -6082,6 +6286,16 @@ components:
             $ref: '#/components/schemas/Error'
 
   schemas:
+    RegionalChildPolicy:
+      type: object
+      additionalProperties: false
+      required: [version, country, maxMovieAge, maxEpisodeAge]
+      properties:
+        version: {type: integer, enum: [1]}
+        country: {type: string, enum: [DE]}
+        maxMovieAge: {type: integer, enum: [0, 6, 12, 16, 18]}
+        maxEpisodeAge: {type: integer, enum: [0, 6, 12, 16, 18]}
+      description: Explicit DE/FSK configuration, never a verified classification or media grant.
     ProfileCreationChallenge:
       allOf:
         - $ref: '#/components/schemas/Error'

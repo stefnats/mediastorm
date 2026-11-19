@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"net/http"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -40,6 +41,7 @@ type parentRatingState struct {
 	kind                                       parentRatingAction
 	body                                       []byte
 	desired                                    []string
+	regionalState                              string
 	deadline                                   time.Time
 	life                                       context.Context
 	stop                                       context.CancelFunc
@@ -92,10 +94,11 @@ const (
 	parentRatingMovie
 	parentRatingTV
 	parentRatingPair
+	parentRatingRegional
 )
 
 func parentRatingRequestBoundary(r *http.Request, kind parentRatingAction) (string, string, string, error) {
-	if kind < parentRatingGeneric || kind > parentRatingPair || r == nil || r.URL == nil || len(r.URL.EscapedPath())+len(r.URL.RawPath)+len(r.URL.RawQuery) > 8192 {
+	if kind < parentRatingGeneric || kind > parentRatingRegional || r == nil || r.URL == nil || len(r.URL.EscapedPath())+len(r.URL.RawPath)+len(r.URL.RawQuery) > 8192 {
 		return "", "", "", ErrParentRatingChanged
 	}
 	path, query, client, err := parentConfirmationRequestBoundary(r, http.MethodPut)
@@ -107,6 +110,13 @@ func parentRatingRequestBoundary(r *http.Request, kind parentRatingAction) (stri
 func parentRatingDesired(kind parentRatingAction, raw []byte) ([]string, error) {
 	if len(raw) > ParentRatingBodyLimit {
 		return nil, ErrParentRatingBodyTooLarge
+	}
+	if kind == parentRatingRegional {
+		policy, err := models.DecodeRegionalChildPolicy(raw)
+		if err != nil {
+			return nil, ErrParentRatingPayload
+		}
+		return []string{policy.Country, strconv.Itoa(policy.MaxMovieAge), strconv.Itoa(policy.MaxEpisodeAge)}, nil
 	}
 	decoder := json.NewDecoder(bytes.NewReader(raw))
 	decoder.DisallowUnknownFields()
@@ -233,6 +243,14 @@ func (ds *DataStore) prepareParentRating(kind parentRatingAction, r *http.Reques
 	}
 	life, stop := context.WithDeadline(context.Background(), deadline)
 	s := &parentRatingState{store: ds, original: original, tuple: tuple, hashes: hashes, kind: kind, body: bytes.Clone(body), desired: append([]string{}, desired...), method: r.Method, path: path, rawPath: r.URL.RawPath, query: query, clientHeader: client, deadline: deadline, life: life, stop: stop, phase: parentPrepared, bytes: size, target: target, compare: bcrypt.CompareHashAndPassword}
+	if kind == parentRatingRegional {
+		s.regionalState, err = regionalPolicyState(prepCtx, ds.pool, target)
+		s.bytes += len(s.regionalState)
+		if err != nil || s.bytes > parentModeSnapshotLimit {
+			s.stop()
+			return nil, ErrParentRatingUnavailable
+		}
+	}
 	value := &ParentRatingIntent{state: s}
 	s.self = value
 	return value, nil
@@ -302,6 +320,12 @@ func (ds *DataStore) bindParentRatingRetry(kind parentRatingAction, r *http.Requ
 	}
 	if !sameParentModeTuple(tuple, s.tuple) {
 		return ErrParentRatingChanged
+	}
+	if kind == parentRatingRegional {
+		current, err := regionalPolicyState(run, ds.pool, target)
+		if err != nil || current != s.regionalState {
+			return ErrParentRatingChanged
+		}
 	}
 	if err = run.Err(); err != nil {
 		return err
@@ -456,8 +480,30 @@ func (ds *DataStore) commitParentRating(kind parentRatingAction, i *ParentRating
 	if !sameParentModeTuple(current, s.tuple) {
 		return empty, ErrParentRatingChanged
 	}
+	var regional *models.RegionalChildPolicy
+	if kind == parentRatingRegional {
+		if _, err = tx.Exec(ctx, `SELECT user_id FROM regional_profile_policies WHERE user_id=$1 FOR UPDATE`, s.target); err != nil {
+			return empty, ErrParentRatingUnavailable
+		}
+		current, readErr := regionalPolicyState(ctx, tx, s.target)
+		if readErr != nil || current != s.regionalState {
+			return empty, ErrParentRatingChanged
+		}
+		movie, _ := strconv.Atoi(s.desired[1])
+		episode, _ := strconv.Atoi(s.desired[2])
+		value := models.RegionalChildPolicy{Version: 1, Country: s.desired[0], MaxMovieAge: movie, MaxEpisodeAge: episode}
+		if !value.Valid() {
+			return empty, ErrParentRatingPayload
+		}
+		regional = &value
+		if _, err = tx.Exec(ctx, `INSERT INTO regional_profile_policies(user_id,policy_version,country,max_movie_age,max_episode_age,revision,updated_at,updated_by) VALUES($1,1,$2,$3,$4,1,clock_timestamp(),$5) ON CONFLICT(user_id) DO UPDATE SET policy_version=EXCLUDED.policy_version,country=EXCLUDED.country,max_movie_age=EXCLUDED.max_movie_age,max_episode_age=EXCLUDED.max_episode_age,updated_at=EXCLUDED.updated_at,updated_by=EXCLUDED.updated_by`, s.target, value.Country, value.MaxMovieAge, value.MaxEpisodeAge, s.original.AccountID); err != nil {
+			return empty, ErrParentRatingUnavailable
+		}
+	}
 	var record UserWriteRecord
 	switch kind {
+	case parentRatingRegional:
+		record, err = ds.scanUserWrite(tx.QueryRow(ctx, `UPDATE users AS u SET updated_at=clock_timestamp() WHERE id=$1 AND `+userWriteVersion+`=$2 AND clock_timestamp()<$3 RETURNING `+userColumns+`,`+userWriteVersion, s.target, s.tuple.profile.version, s.deadline))
 	case parentRatingGeneric:
 		record, err = ds.scanUserWrite(tx.QueryRow(ctx, `UPDATE users AS u SET kids_max_rating=$1,updated_at=clock_timestamp() WHERE id=$2 AND `+userWriteVersion+`=$3 AND clock_timestamp()<$4 RETURNING `+userColumns+`,`+userWriteVersion, s.desired[0], s.target, s.tuple.profile.version, s.deadline))
 	case parentRatingMovie:
@@ -481,7 +527,7 @@ func (ds *DataStore) commitParentRating(kind parentRatingAction, i *ParentRating
 		}
 		return empty, ErrParentRatingUnknown
 	}
-	receipt := &parentRatingReceiptState{store: ds, intent: i, kind: kind, before: UserRevision{owner: ds, id: s.target, version: s.tuple.profile.version}, record: record, run: ctx}
+	receipt := &parentRatingReceiptState{store: ds, intent: i, kind: kind, before: UserRevision{owner: ds, id: s.target, version: s.tuple.profile.version}, record: record, run: ctx, regional: regional}
 	value := &ParentRatingReceipt{state: receipt}
 	receipt.self = value
 	return value, nil
@@ -508,15 +554,16 @@ func (ds *DataStore) BoundParentRatingRequest(r *http.Request, i *ParentRatingIn
 }
 
 type parentRatingReceiptState struct {
-	mu     sync.Mutex
-	self   *ParentRatingReceipt
-	store  *DataStore
-	intent *ParentRatingIntent
-	kind   parentRatingAction
-	before UserRevision
-	record UserWriteRecord
-	run    context.Context
-	used   bool
+	mu       sync.Mutex
+	self     *ParentRatingReceipt
+	store    *DataStore
+	intent   *ParentRatingIntent
+	kind     parentRatingAction
+	before   UserRevision
+	record   UserWriteRecord
+	regional *models.RegionalChildPolicy
+	run      context.Context
+	used     bool
 }
 
 // ParentRatingReceipt is a historical, one-use Users acknowledgement only.
@@ -595,4 +642,27 @@ func (ds *DataStore) CommitParentRatingPair(i *ParentRatingIntent) (*ParentRatin
 }
 func (ds *DataStore) AcknowledgeParentRatingPair(ctx context.Context, i *ParentRatingIntent, receipt *ParentRatingReceipt, expected UserRevision) (UserWriteRecord, error) {
 	return ds.acknowledgeParentRating(parentRatingPair, ctx, i, receipt, expected)
+}
+
+func (ds *DataStore) PrepareParentRegionalPolicy(r *http.Request, target string, body []byte, tokens []string) (*ParentRatingIntent, error) {
+	return ds.prepareParentRating(parentRatingRegional, r, target, body, tokens)
+}
+func (ds *DataStore) BindParentRegionalPolicyRetry(r *http.Request, i *ParentRatingIntent, target string, body []byte, tokens []string) error {
+	return ds.bindParentRatingRetry(parentRatingRegional, r, i, target, body, tokens)
+}
+func (ds *DataStore) ParentRegionalPolicyTarget(ctx context.Context, i *ParentRatingIntent, expected UserRevision) (string, error) {
+	return ds.parentRatingTarget(parentRatingRegional, ctx, i, expected)
+}
+func (ds *DataStore) CommitParentRegionalPolicy(i *ParentRatingIntent) (*ParentRatingReceipt, error) {
+	return ds.commitParentRating(parentRatingRegional, i)
+}
+func (ds *DataStore) AcknowledgeParentRegionalPolicy(ctx context.Context, i *ParentRatingIntent, value *ParentRatingReceipt, expected UserRevision) (UserWriteRecord, models.RegionalChildPolicy, error) {
+	record, err := ds.acknowledgeParentRating(parentRatingRegional, ctx, i, value, expected)
+	if err != nil {
+		return UserWriteRecord{}, models.RegionalChildPolicy{}, err
+	}
+	if value.state.regional == nil {
+		return UserWriteRecord{}, models.RegionalChildPolicy{}, ErrParentRatingChanged
+	}
+	return record, *value.state.regional, nil
 }

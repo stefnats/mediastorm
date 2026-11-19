@@ -2,10 +2,12 @@ package handlers
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
 	"net/http"
+	"novastream/internal/datastore"
 	"path/filepath"
 	"strings"
 	"time"
@@ -136,7 +138,9 @@ func (h *BackupHandler) RestoreBackup(w http.ResponseWriter, r *http.Request) {
 	// Perform restore
 	if err := h.backupService.RestoreBackup(filename); err != nil {
 		status := http.StatusInternalServerError
-		if strings.Contains(err.Error(), "not found") {
+		if errors.Is(err, datastore.ErrProtectedFamilyRestore) {
+			status = http.StatusForbidden
+		} else if strings.Contains(err.Error(), "not found") {
 			status = http.StatusNotFound
 		} else if strings.Contains(err.Error(), "invalid") || strings.Contains(err.Error(), "checksum") {
 			status = http.StatusBadRequest
@@ -197,7 +201,9 @@ func (h *BackupHandler) RestoreBackupUpload(w http.ResponseWriter, r *http.Reque
 
 	if err := h.backupService.RestoreBackupUpload(file, header.Filename); err != nil {
 		status := http.StatusInternalServerError
-		if strings.Contains(strings.ToLower(err.Error()), "zip") ||
+		if errors.Is(err, datastore.ErrProtectedFamilyRestore) {
+			status = http.StatusForbidden
+		} else if strings.Contains(strings.ToLower(err.Error()), "zip") ||
 			strings.Contains(err.Error(), "manifest") || strings.Contains(err.Error(), "checksum") {
 			status = http.StatusBadRequest
 		}
@@ -307,7 +313,11 @@ func (h *BackupHandler) ImportData(w http.ResponseWriter, r *http.Request) {
 
 	if err := h.backupService.ImportDatabaseJSON(data); err != nil {
 		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusInternalServerError)
+		status := http.StatusInternalServerError
+		if errors.Is(err, datastore.ErrProtectedFamilyRestore) {
+			status = http.StatusForbidden
+		}
+		w.WriteHeader(status)
 		json.NewEncoder(w).Encode(map[string]interface{}{
 			"error":           "Failed to import data: " + err.Error(),
 			"preImportBackup": preBackup,
