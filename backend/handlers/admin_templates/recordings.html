@@ -154,11 +154,32 @@
         </div>
     </form>
 </dialog>
+<style>#recordingDerivedOpen[hidden], #recordingDerivedClose[hidden] { display: none !important; }</style>
+<section aria-label="Prepared joined recording" style="margin-top:1rem;overflow-wrap:anywhere;">
+    <p id="recordingDerivedStatus" role="status" aria-live="polite"></p>
+    <button id="recordingDerivedOpen" type="button" class="btn btn-secondary" hidden>Save prepared joined copy</button>
+    <button id="recordingDerivedClose" type="button" class="btn btn-secondary" hidden>Dismiss download response</button>
+    <div id="recordingDerivedReceiver" style="margin-top:0.75rem;"></div>
+</section>
+<dialog id="recordingDerivedPIN" style="max-width:min(26rem,90vw);background:var(--bg-secondary);color:var(--text-primary);border:1px solid var(--border);border-radius:0.75rem;">
+    <form>
+        <h2>Unlock recording profile</h2>
+        <p>Enter this recording profile's PIN for the selected joined-copy action. Original parts remain unchanged.</p>
+        <label for="recordingDerivedPINInput">Profile PIN</label>
+        <input id="recordingDerivedPINInput" data-derived-pin type="password" autocomplete="off" class="form-input" maxlength="256">
+        <p data-derived-pin-status role="status" aria-live="polite"></p>
+        <div style="display:flex;gap:0.5rem;flex-wrap:wrap;">
+            <button type="submit" class="btn btn-primary">Unlock and continue</button>
+            <button type="button" data-derived-pin-cancel class="btn btn-secondary">Cancel</button>
+        </div>
+    </form>
+</dialog>
 {{end}}
 
 {{define "scripts"}}
 <script src="{{.ServerBasePath}}/api/static/recording-plan-v1.js"></script>
 <script src="{{.ServerBasePath}}/api/static/recording-export-v1.js"></script>
+<script src="{{.ServerBasePath}}/api/static/recording-derived-v1.js"></script>
 <script>
 const profiles = {{json .Users}};
 let channels = [];
@@ -169,6 +190,12 @@ let currentRecordingPlan = new Map();
 let recordingListGeneration = 0;
 const recordingExportUI = window.RecordingExportUI.create({
     container: document.getElementById('recordingsList'), status: document.getElementById('recordingExportStatus'), dialog: document.getElementById('recordingExportPIN'),
+    profile: () => document.getElementById('recordingProfile').value, generation: () => recordingListGeneration,
+    apiBase: () => pageApiBase(), pinBase: () => basePath + '/api/users'
+});
+const recordingDerivedUI = window.RecordingDerivedUI.create({
+    container: document.getElementById('recordingsList'), status: document.getElementById('recordingDerivedStatus'), dialog: document.getElementById('recordingDerivedPIN'),
+    openButton: document.getElementById('recordingDerivedOpen'), closeButton: document.getElementById('recordingDerivedClose'), receiverHost: document.getElementById('recordingDerivedReceiver'),
     profile: () => document.getElementById('recordingProfile').value, generation: () => recordingListGeneration,
     apiBase: () => pageApiBase(), pinBase: () => basePath + '/api/users'
 });
@@ -575,6 +602,7 @@ function streamRecordingURL(id) {
 
 async function loadRecordings() {
     recordingExportUI.invalidate();
+    recordingDerivedUI.invalidate();
     const generation = ++recordingListGeneration;
     const profileId = document.getElementById('recordingProfile').value;
     const response = await fetch(`${pageApiBase()}?profileId=${encodeURIComponent(profileId)}`);
@@ -613,6 +641,7 @@ function renderRuleForecast(plan, fallback) {
 
 function renderRecordings(recordings) {
     recordingExportUI.bind(recordings, document.getElementById('recordingProfile').value, recordingListGeneration);
+    recordingDerivedUI.bind(recordings, document.getElementById('recordingProfile').value, recordingListGeneration);
     const container = document.getElementById('recordingsList');
     if (!recordings.length) {
         container.innerHTML = '<div style="padding: 1rem; color: var(--text-muted);">No recordings scheduled.</div>';
@@ -623,6 +652,7 @@ function renderRecordings(recordings) {
         const canDelete = !['starting', 'running'].includes(recording.status) && !(recording.ruleId && recording.status === 'pending');
         const canPlay = ['completed', 'running', 'cancelled', 'failed'].includes(recording.status) && !!recording.outputPath;
         const exportInfo = window.RecordingExportUI.details(recording);
+        const canJoin = window.RecordingDerivedUI.details(recording);
         const playLabel = exportInfo && exportInfo.count > 1 ? 'Play first available part' : (recording.status === 'running' ? 'Play In Progress' : 'Play');
         const visibleError = recording.error && recording.error !== 'recording rule paused' && !recording.error.startsWith('cancelled because the recording rule')
             ? recording.error
@@ -641,6 +671,12 @@ function renderRecordings(recordings) {
                 <div style="display: flex; gap: 0.5rem; flex-wrap: wrap;">
                     ${canPlay ? `<a class="btn btn-primary btn-sm" href="${streamRecordingURL(recording.id)}" target="_blank" rel="noreferrer">${playLabel}</a>` : ''}
                     ${exportInfo && exportInfo.exportable ? `<button type="button" class="btn btn-secondary btn-sm" data-recording-export="${escapeHtml(recording.id)}">Download parts ZIP</button>` : ''}
+                    ${canJoin ? `<div style="display:flex;gap:0.4rem;flex-wrap:wrap;align-items:center;">
+                        <button type="button" class="btn btn-secondary btn-sm" data-recording-derived="${escapeHtml(recording.id)}" data-derived-operation="join">Prepare joined copy</button>
+                        <button type="button" class="btn btn-secondary btn-sm" data-recording-derived="${escapeHtml(recording.id)}" data-derived-operation="read">View stored joined-copy status</button>
+                        <button type="button" class="btn btn-secondary btn-sm" data-recording-derived-cancel>Cancel joined-copy request</button>
+                        <small>Explicit preparation only. Closed gaps are omitted, never recovered. Original parts remain available.</small>
+                    </div>` : ''}
                     ${exportInfo && exportInfo.exportable ? `<div style="display:flex;gap:0.4rem;flex-wrap:wrap;align-items:center;">
                         <label>Part <select class="form-input" style="width:auto;" data-recording-part="${escapeHtml(recording.id)}" aria-label="Part for estimated length">${exportInfo.indices.map(index => `<option value="${index}" ${index === recordingExportUI.selectedPart(recording.id) ? 'selected' : ''}>${index}</option>`).join('')}</select></label>
                         <button type="button" class="btn btn-secondary btn-sm" data-recording-timing="${escapeHtml(recording.id)}" data-timing-operation="read">View last estimate</button>
@@ -664,6 +700,7 @@ function escapeHtml(text) {
 
 document.getElementById('recordingProfile').addEventListener('change', async () => {
     recordingExportUI.invalidate();
+    recordingDerivedUI.invalidate();
     recordingPlanUI.invalidate();
     recordingListGeneration++;
     currentRecordingPlan = new Map();
@@ -686,7 +723,7 @@ document.getElementById('recordingChannel').addEventListener('change', () => {
 
 document.addEventListener('input', () => recordingPlanUI.invalidate());
 document.addEventListener('change', () => recordingPlanUI.invalidate());
-window.addEventListener('pagehide', () => { recordingPlanUI.invalidate(); recordingExportUI.invalidate(); });
+window.addEventListener('pagehide', () => { recordingPlanUI.invalidate(); recordingExportUI.invalidate(); recordingDerivedUI.invalidate(); });
 
 initProfiles();
 loadChannels().then(async () => {

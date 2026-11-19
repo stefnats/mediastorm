@@ -5715,6 +5715,116 @@ paths:
         '503':
           description: Export service is unavailable.
 
+  /api/live/recordings/{recordingID}/derived/join:
+    post:
+      tags: [live]
+      operationId: prepareJoinedRecording
+      summary: Prepare a separate checked medium from compatible closed parts
+      description: |
+        Explicit synchronous empty-body operation under the original current
+        full adult account/session, stored owner and profile PIN. One bounded
+        job is admitted with no queue. The complete contiguous closed part set
+        is copied privately and freshly inspected before stream-copy to a new
+        Matroska artifact; originals and recording capture metadata are retained.
+        Unknown or incompatible streams/timing, active/restored captures, source
+        changes and authorization loss reject the operation. Cancellation waits
+        for media processes before releasing the slot. No IPTV/provider request
+        is made. Known capture gaps are omitted only with explicit incomplete
+        source/gapsOmitted metadata. This does not recover lost content or prove
+        glitch-free device playback. GET never starts or refreshes preparation.
+      parameters:
+        - {name: recordingID, in: path, required: true, schema: {type: string}}
+        - {name: profileId, in: query, schema: {type: string}}
+      responses:
+        '200':
+          description: Current validated derived artifact descriptor.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/DerivedRecording'}
+        '400': {description: Nonempty body or invalid request.}
+        '401': {$ref: '#/components/responses/Error'}
+        '403': {$ref: '#/components/responses/Error'}
+        '404': {$ref: '#/components/responses/Error'}
+        '409': {description: 'Source set is unavailable, changed, unknown or incompatible.'}
+        '413': {description: The bounded operation cannot admit the complete source set.}
+        '416': {description: Range is unsupported for preparation.}
+        '429': {description: A preparation is already active. Retry explicitly later.}
+        '503': {description: Preparation is unconfigured or unavailable.}
+
+  /api/live/recordings/{recordingID}/derived:
+    get:
+      tags: [live]
+      operationId: getJoinedRecording
+      summary: Read current joined-medium status without media processing
+      parameters:
+        - {name: recordingID, in: path, required: true, schema: {type: string}}
+        - {name: profileId, in: query, schema: {type: string}}
+      responses:
+        '200':
+          description: Current ready descriptor or honest unknown state.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/DerivedRecording'}
+        '400': {description: Nonempty body or invalid request.}
+        '401': {$ref: '#/components/responses/Error'}
+        '403': {$ref: '#/components/responses/Error'}
+        '404': {$ref: '#/components/responses/Error'}
+        '409': {description: Source or current authority changed.}
+        '416': {description: Range is unsupported for status reads.}
+        '429': {description: Both current status reader slots are busy.}
+        '503': {description: Derived-media service is unavailable.}
+
+  /api/live/recordings/{recordingID}/derived/{derivedID}/stream:
+    parameters:
+      - {name: recordingID, in: path, required: true, schema: {type: string}}
+      - {name: derivedID, in: path, required: true, schema: {type: string, pattern: '^[a-f0-9]{32}$'}}
+      - {name: profileId, in: query, schema: {type: string}}
+    get:
+      tags: [live]
+      operationId: streamJoinedRecording
+      summary: Read an exact registered joined medium with current owner and PIN
+      description: |
+        The opaque ID is correlation, never authorization. The whole original
+        ledger/source versions and immutable output are checked for every read.
+        A fresh authenticated frame is required on each request. Supports one
+        canonical bytes range; multiple ranges are rejected. Late authority or
+        source loss aborts transfer rather than appending an error to media.
+        No raw filesystem URL or first-original-part fallback is exposed.
+      parameters:
+        - {name: Range, in: header, schema: {type: string}}
+      responses:
+        '200':
+          description: Complete derived media bytes.
+          content:
+            video/x-matroska:
+              schema: {type: string, format: binary}
+        '206': {description: One authenticated byte range.}
+        '400': {description: Invalid body or repeated Range header.}
+        '401': {$ref: '#/components/responses/Error'}
+        '403': {$ref: '#/components/responses/Error'}
+        '404': {$ref: '#/components/responses/Error'}
+        '409': {description: 'Registration, source set or output is unavailable or changed.'}
+        '413': {description: Bounded source or output size is unavailable.}
+        '429': {description: Both checked media reader slots are in use.}
+        '416': {description: Unsatisfiable or unsupported range.}
+        '503': {description: Derived-media service is unavailable.}
+    head:
+      tags: [live]
+      operationId: inspectJoinedRecordingStream
+      summary: Read authenticated derived-media headers without body bytes
+      responses:
+        '200': {description: Current full representation headers.}
+        '206': {description: Current single-range headers.}
+        '400': {description: Invalid body or repeated Range header.}
+        '401': {$ref: '#/components/responses/Error'}
+        '403': {$ref: '#/components/responses/Error'}
+        '404': {$ref: '#/components/responses/Error'}
+        '409': {description: Derived artifact is unavailable or changed.}
+        '413': {description: Bounded source or output size is unavailable.}
+        '429': {description: Both checked media reader slots are in use.}
+        '416': {description: Unsatisfiable or unsupported range.}
+        '503': {description: Derived-media service is unavailable.}
+
   /api/live/recordings/{recordingID}/parts/{partIndex}/timing:
     get:
       tags: [live]
@@ -6513,6 +6623,38 @@ components:
           $ref: '#/components/schemas/ProfileCreationManagementProfile'
         usersWriteBlocked: {type: boolean}
         settingsPendingUncertainty: {type: boolean}
+    DerivedRecording:
+      type: object
+      additionalProperties: false
+      required: [recordingId, state, sourceIncomplete, gapsOmitted, sourceStatus]
+      properties:
+        recordingId: {type: string}
+        id:
+          type: string
+          pattern: '^[a-f0-9]{32}$'
+          description: Process-local immutable output correlation, not access authority.
+        state: {type: string, enum: [unknown, ready]}
+        reason: {type: string}
+        durationMs: {type: integer, format: int64, minimum: 1}
+        bytes: {type: integer, format: int64, minimum: 1}
+        sourceIncomplete: {type: boolean}
+        gapsOmitted: {type: boolean}
+        sourceStatus: {type: string}
+        observedAt: {type: string, format: date-time}
+        expiresAt: {type: string, format: date-time}
+        partOffsets:
+          type: array
+          maxItems: 256
+          description: Measured recorded-media positions, not capture wall-clock continuity.
+          items:
+            type: object
+            additionalProperties: false
+            required: [partIndex, startMs, durationMs]
+            properties:
+              partIndex: {type: integer, minimum: 1, maximum: 256}
+              startMs: {type: integer, format: int64, minimum: 0}
+              durationMs: {type: integer, format: int64, minimum: 1}
+
     RecordingPartTiming:
       type: object
       required: [recordingId, partIndex, state]

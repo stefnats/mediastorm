@@ -79,6 +79,13 @@ func parsePartStreamPath(path string) (string, int, bool, bool) {
 		}
 	}
 	segments := strings.Split(tail, "/")
+	// Derived media is available only through its checked dedicated endpoint.
+	// Reserve this namespace so legacy informational tails cannot select part1.
+	for _, segment := range strings.Split(decoded, "/") {
+		if strings.EqualFold(segment, "derived") {
+			return id, 0, true, false
+		}
+	}
 	for _, segment := range segments {
 		if !strings.EqualFold(segment, "parts") {
 			continue

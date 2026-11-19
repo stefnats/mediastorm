@@ -83,6 +83,12 @@ func (h *RecordingsHandler) partTiming(w http.ResponseWriter, r *http.Request, r
 // This private capture deliberately keeps the same original authority as the
 // export endpoint, without recapturing a different owner during a probe.
 func (h *RecordingsHandler) partTimingAuthority(w http.ResponseWriter, r *http.Request) (context.Context, context.CancelFunc, func() error, bool) {
+	return h.recordingDerivedAuthority(w, r, false)
+}
+
+// A derived ranged read keeps the same original current owner frame as timing.
+// Allowing its Range header does not relax authentication or retarget the request.
+func (h *RecordingsHandler) recordingDerivedAuthority(w http.ResponseWriter, r *http.Request, allowRange bool) (context.Context, context.CancelFunc, func() error, bool) {
 	id := mux.Vars(r)["recordingID"]
 	path := "recording:" + id
 	access := h.recordingAccess
@@ -106,7 +112,7 @@ func (h *RecordingsHandler) partTimingAuthority(w http.ResponseWriter, r *http.R
 		http.Error(w, "recording export unavailable", http.StatusNotFound)
 		return nil, nil, nil, false
 	}
-	if r.Header.Get("Range") != "" {
+	if !allowRange && r.Header.Get("Range") != "" {
 		http.Error(w, "recording exports do not support byte ranges", http.StatusRequestedRangeNotSatisfiable)
 		return nil, nil, nil, false
 	}
