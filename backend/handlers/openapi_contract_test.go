@@ -388,6 +388,7 @@ func TestOpenAPIContract(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	parentLocalFileUnavailableContract(t, v)
 	now := time.Now().UTC().Truncate(time.Second)
 
 	t.Run("auth", func(t *testing.T) {

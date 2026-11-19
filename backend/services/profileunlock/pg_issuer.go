@@ -347,6 +347,7 @@ const (
 	parentConfirmationKidsFlag
 	parentConfirmationProfileCreation
 	parentConfirmationRegionalPolicy
+	parentConfirmationLocalFile
 )
 
 type parentModeEntry struct {
@@ -355,6 +356,7 @@ type parentModeEntry struct {
 	removal  *ParentListRemovalIntent
 	write    *ParentListWriteIntent
 	rating   *ParentRatingIntent
+	file     ParentFileAttachment
 	kids     *ParentKidsFlagIntent
 	creation *datastore.ParentProfileCreationIntent
 	actor    string
@@ -364,6 +366,9 @@ type parentModeEntry struct {
 }
 
 func (entry *parentModeEntry) close() {
+	if entry.file != nil {
+		entry.file.Close()
+	}
 	if entry.creation != nil {
 		entry.creation.Close()
 	}

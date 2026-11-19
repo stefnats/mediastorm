@@ -54,13 +54,16 @@ type approval struct {
 }
 
 type Service struct {
-	deps      Dependencies
-	seal      *serviceSeal
-	mu        sync.Mutex
-	epochs    map[string]uint64
-	nextEpoch uint64
-	grants    map[string]*approval
-	leases    map[*Lease]string
+	deps          Dependencies
+	seal          *serviceSeal
+	mu            sync.Mutex
+	epochs        map[string]uint64
+	nextEpoch     uint64
+	grants        map[string]*approval
+	leases        map[*Lease]string
+	fileGrants    map[string]*parentFileApproval
+	filePreparing map[*ParentFileIntent]struct{}
+	fileReaders   map[*ParentFileReader]*parentFileApproval
 }
 
 func New(deps Dependencies) (*Service, error) {
@@ -71,7 +74,7 @@ func New(deps Dependencies) (*Service, error) {
 	if deps.Clock == nil {
 		deps.Clock = realClock{}
 	}
-	return &Service{deps: deps, seal: seal, epochs: map[string]uint64{}, grants: map[string]*approval{}, leases: map[*Lease]string{}}, nil
+	return &Service{deps: deps, seal: seal, epochs: map[string]uint64{}, grants: map[string]*approval{}, leases: map[*Lease]string{}, fileGrants: map[string]*parentFileApproval{}, filePreparing: map[*ParentFileIntent]struct{}{}, fileReaders: map[*ParentFileReader]*parentFileApproval{}}, nil
 }
 func (s *Service) decision(outcome Outcome, code string) Decision {
 	if s == nil {
@@ -344,7 +347,7 @@ func (s *Service) IssueParentException(w http.ResponseWriter, r *http.Request, p
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.pruneLocked()
-	if s.epochs[profile] != after.epoch || !expires.After(s.deps.Clock.Now()) || len(s.grants) >= MaxGrants {
+	if s.epochs[profile] != after.epoch || !expires.After(s.deps.Clock.Now()) || len(s.grants)+len(s.fileGrants)+len(s.filePreparing) >= MaxGrants {
 		return nil, s.unknown(CodeContextChanged)
 	}
 	grant := &Grant{seal: s.seal, id: hex.EncodeToString(id[:]), expires: expires}
@@ -453,7 +456,8 @@ func (s *Service) InvalidateProfile(profile string) {
 		return
 	}
 	s.mu.Lock()
-	defer s.mu.Unlock()
+	var retired []*parentFileApproval
+	var pending []*ParentFileIntent
 	s.profileEpochLocked(profile)
 	s.nextEpoch++
 	s.epochs[profile] = s.nextEpoch
@@ -467,6 +471,23 @@ func (s *Service) InvalidateProfile(profile string) {
 			entry.revoked = true
 			s.cancelGrantLeasesLocked(id, CodeContextChanged)
 		}
+	}
+	for _, entry := range s.fileGrants {
+		if entry.intent.profile == profile {
+			retired = append(retired, entry)
+		}
+	}
+	for intent := range s.filePreparing {
+		if intent.profile == profile {
+			pending = append(pending, intent)
+		}
+	}
+	s.mu.Unlock()
+	for _, intent := range pending {
+		intent.Close()
+	}
+	for _, entry := range retired {
+		entry.close()
 	}
 }
 func (s *Service) pruneLocked() {
@@ -497,6 +518,30 @@ func (s *Service) profileEpochLocked(profile string) uint64 {
 			if !active {
 				for lease := range s.leases {
 					if lease.intent.profile == candidate && !lease.closed {
+						active = true
+						break
+					}
+				}
+			}
+			if !active {
+				for _, entry := range s.fileGrants {
+					if entry.intent.profile == candidate && entry.ctx.Err() == nil {
+						active = true
+						break
+					}
+				}
+			}
+			if !active {
+				for intent := range s.filePreparing {
+					if intent.profile == candidate {
+						active = true
+						break
+					}
+				}
+			}
+			if !active {
+				for reader, entry := range s.fileReaders {
+					if entry.intent.profile == candidate && reader.ctx.Err() == nil {
 						active = true
 						break
 					}
