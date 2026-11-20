@@ -97,8 +97,13 @@ func TestFreshParentFailsClosedWithoutContextVerifier(t *testing.T) {
 	if guard.RequireFresh(httptest.NewRecorder(), freshRequest(context.Background(), true, "", "fixture parent password")) {
 		t.Fatal("legacy-only verifier accepted")
 	}
-	if !guard.Require(httptest.NewRecorder(), freshRequest(context.Background(), true, "", "")) {
-		t.Fatal("existing master policy changed")
+	missing := httptest.NewRecorder()
+	if guard.Require(missing, freshRequest(context.Background(), true, "", "")) || missing.Code != http.StatusForbidden {
+		t.Fatal("master session bypassed the current account password rule")
+	}
+	confirmed := httptest.NewRecorder()
+	if !guard.Require(confirmed, freshRequest(context.Background(), true, "", "fixture parent password")) || confirmed.Code != http.StatusOK {
+		t.Fatal("ordinary guard rejected the master's current account password")
 	}
 	var unavailable *Guard
 	if unavailable.RequireFresh(httptest.NewRecorder(), freshRequest(context.Background(), true, "", "synthetic password")) {
