@@ -7,13 +7,47 @@ import (
 	"github.com/gorilla/mux"
 	"io"
 	"net/http"
+	"net/url"
 	"novastream/internal/apierror"
 	"novastream/internal/datastore"
 	"novastream/internal/parentauth"
+	"novastream/internal/requestsecurity"
 	"novastream/services/user_settings"
 	"novastream/services/users"
+	"strings"
 	"time"
 )
+
+// Cookie profile creation checks origin before reading a body or claiming its
+// one-shot parent intent. API and legacy adult/JSON dispatch remain unchanged.
+func parentProfileCreationCookieOrigin(r *http.Request) bool {
+	if r == nil || r.URL == nil {
+		return false
+	}
+	if !strings.HasPrefix(r.URL.Path, "/admin/") && !strings.HasPrefix(r.URL.Path, "/account/") {
+		return true
+	}
+	origins, sites := r.Header.Values("Origin"), r.Header.Values("Sec-Fetch-Site")
+	if len(origins) != 1 || len(sites) > 1 || len(sites) == 1 && sites[0] != "same-origin" {
+		return false
+	}
+	scheme := "http"
+	if requestsecurity.IsSecure(r) {
+		scheme = "https"
+	}
+	expected, expectedErr := url.Parse(scheme + "://" + r.Host)
+	origin, originErr := url.Parse(origins[0])
+	port := func(u *url.URL) string {
+		if p := u.Port(); p != "" {
+			return p
+		}
+		if u.Scheme == "https" {
+			return "443"
+		}
+		return "80"
+	}
+	return expectedErr == nil && originErr == nil && expected.User == nil && expected.Host != "" && origin.User == nil && origin.Scheme == scheme && origin.Host != "" && origin.Path == "" && origin.RawQuery == "" && origin.Fragment == "" && origin.Opaque == "" && !origin.ForceQuery && strings.EqualFold(origin.Hostname(), expected.Hostname()) && port(origin) == port(expected) && !strings.ContainsAny(origins[0], "?#")
+}
 
 type parentProfileCreationPersistence interface {
 	AcquireParentProfileCreationLease(context.Context, *datastore.ParentProfileCreationIntent) (*users.ParentProfileCreationLease, error)
@@ -24,6 +58,10 @@ type parentProfileCreationPersistence interface {
 func (h *UsersHandler) CreateProfileManagement(w http.ResponseWriter, r *http.Request, settings *user_settings.Service) {
 	original := r
 	w.Header().Set("Cache-Control", "no-store")
+	if !parentProfileCreationCookieOrigin(r) {
+		http.Error(w, "same-origin request required", http.StatusForbidden)
+		return
+	}
 	if h.pgPins == nil || settings == nil {
 		writeParentProfileCreationError(w, r, datastore.ErrParentProfileCreationUnavailable)
 		return

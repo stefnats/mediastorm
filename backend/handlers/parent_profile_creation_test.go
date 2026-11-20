@@ -176,6 +176,9 @@ func TestParentProfileCreationCookieExistingBodyOriginAndParentRefusals(t *testi
 			if w.Code == 200 {
 				t.Fatal("original cookie/body/parent refusal missing", kind)
 			}
+			if (kind == "wrong origin" || kind == "cross-site") && w.Code != http.StatusForbidden {
+				t.Fatal("cookie origin denial must be forbidden", kind, w.Code)
+			}
 			if kind == "trailing" && w.Code != 400 {
 				t.Fatal("whole Cookie-body boundary changed", w.Code)
 			}
@@ -186,6 +189,55 @@ func TestParentProfileCreationCookieExistingBodyOriginAndParentRefusals(t *testi
 				t.Fatal("denial wrote target")
 			}
 		})
+	}
+	for _, prefix := range []string{"/account", "/admin"} {
+		for _, originCase := range []struct {
+			name    string
+			origins []string
+			sites   []string
+		}{
+			{"missing", nil, []string{"same-origin"}},
+			{"empty", []string{""}, []string{"same-origin"}},
+			{"opaque", []string{"null"}, []string{"same-origin"}},
+			{"path", []string{"http://synthetic.test/"}, []string{"same-origin"}},
+			{"query", []string{"http://synthetic.test?"}, []string{"same-origin"}},
+			{"fragment", []string{"http://synthetic.test#"}, []string{"same-origin"}},
+			{"userinfo", []string{"http://synthetic@synthetic.test"}, []string{"same-origin"}},
+			{"suffix", []string{"http://synthetic.test.other.invalid"}, []string{"same-origin"}},
+			{"port", []string{"http://synthetic.test:81"}, []string{"same-origin"}},
+			{"scheme", []string{"https://synthetic.test"}, []string{"same-origin"}},
+			{"duplicate origin", []string{"http://synthetic.test", "http://synthetic.test"}, []string{"same-origin"}},
+			{"duplicate site", []string{"http://synthetic.test"}, []string{"same-origin", "same-origin"}},
+		} {
+			f := creationCookieFixture(t, false)
+			body := `{"name":"Origin-bound child","isKidsProfile":true}`
+			intent := creationCookieChallenge(t, f, prefix, body)
+			before := creationCookieRows(t, f)
+			r := creationCookieRequest(f, prefix, body, intent, "synthetic-parent-password")
+			r.Header.Del("Origin")
+			r.Header.Del("Sec-Fetch-Site")
+			for _, value := range originCase.origins {
+				r.Header.Add("Origin", value)
+			}
+			for _, value := range originCase.sites {
+				r.Header.Add("Sec-Fetch-Site", value)
+			}
+			w := httptest.NewRecorder()
+			f.router.ServeHTTP(w, r)
+			if w.Code != http.StatusForbidden || !bytes.Equal(before, creationCookieRows(t, f)) {
+				t.Fatal("invalid cookie origin changed profiles/settings", originCase.name, w.Code)
+			}
+			// Origin refusal precedes the one-shot Claim: the exact original intent
+			// remains usable with its original cookie/body and genuine password.
+			retry := creationCookieRequest(f, prefix, body, intent, "synthetic-parent-password")
+			retry.Header.Set("Origin", "http://SYNTHETIC.test:80")
+			retry.Header.Del("Sec-Fetch-Site")
+			accepted := httptest.NewRecorder()
+			f.router.ServeHTTP(accepted, retry)
+			if accepted.Code != http.StatusOK {
+				t.Fatal("origin refusal consumed original intent or changed default-port policy", originCase.name, accepted.Code)
+			}
+		}
 	}
 }
 func TestParentProfileCreationCookieAdultAndJSONRemainLegacy(t *testing.T) {
