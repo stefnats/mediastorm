@@ -133,7 +133,7 @@ func TestRecordingProgressHistoryExactTimeText(t *testing.T) {
 					v.expires = "2020-01-03T03:04:06.123456789Z"
 					invalid = true
 				case "nanosecond-change-digest":
-					v.observed = "2020-01-02T03:04:05.123456788Z"
+					v.observed = "2020-01-02T03:04:05.12345679Z"
 				}
 			})
 			if invalid {
