@@ -8,6 +8,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -16,6 +17,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"golang.org/x/crypto/bcrypt"
 	"novastream/config"
@@ -69,9 +71,26 @@ func progressPG(t *testing.T, enforce bool) *recordingProgressFixture {
 	f := &recordingProgressFixture{recordingStatePGFixture: base, closeEntered: make(chan struct{}), closeRelease: make(chan struct{})}
 	// A genuine one-connection runtime pool demonstrates there is no nested
 	// pool acquisition while the fixed writer transaction owns its backend.
-	cfg := base.ds.pool.Config().Copy()
+	// Encode the real startup role/schema in the same original URL whose
+	// fingerprint the coordinator binds. A copied AfterConnect SET ROLE hook is
+	// intentionally unsupported by the one-original-backend write protocol.
+	target, err := url.Parse(base.ds.pool.Config().ConnString())
+	if err != nil {
+		t.Fatal("parse own fixture runtime URL")
+	}
+	query := target.Query()
+	query.Set("search_path", pgx.Identifier{base.schema}.Sanitize()+",pg_catalog")
+	query.Set("application_name", base.schema)
+	query.Set("options", "-c role="+base.schema)
+	target.RawQuery = query.Encode()
+	runtimeURL := target.String()
+	cfg, err := pgxpool.ParseConfig(runtimeURL)
+	if err != nil {
+		t.Fatal("parse explicit own startup role/schema")
+	}
 	cfg.MaxConns = 1
 	cfg.MinConns = 0
+	configureQueryLifecycle(cfg.ConnConfig)
 	cfg.ConnConfig.DialFunc = func(ctx context.Context, network, address string) (net.Conn, error) {
 		c, err := (&net.Dialer{}).DialContext(ctx, network, address)
 		if err != nil {
@@ -85,10 +104,17 @@ func progressPG(t *testing.T, enforce bool) *recordingProgressFixture {
 	}
 	t.Cleanup(pool.Close)
 	base.ds = &DataStore{pool: pool}
+	if cfg.BeforeConnect != nil || cfg.AfterConnect != nil || cfg.BeforeAcquire != nil || cfg.PrepareConn != nil || cfg.AfterRelease != nil || cfg.BeforeClose != nil || cfg.ConnString() != runtimeURL {
+		t.Fatal("fixture runtime has a foreign lifecycle hook or mismatched original URL")
+	}
+	var role, schema, application string
+	if pool.QueryRow(t.Context(), `SELECT current_user,current_schema(),current_setting('application_name')`).Scan(&role, &schema, &application) != nil || role != base.schema || schema != base.schema || application != base.schema {
+		t.Fatal("own actual startup role/schema/application mismatch")
+	}
 	f.path = filepath.Join(t.TempDir(), "settings.json")
 	f.manager = config.NewManager(f.path)
 	f.settings = config.DefaultSettings()
-	f.settings.Database.URL = cfg.ConnString()
+	f.settings.Database.URL = runtimeURL
 	f.settings.Security.EnforceProfilePins = enforce
 	if err = f.manager.Save(f.settings); err != nil {
 		t.Fatal("save own original synthetic settings", err)
@@ -110,20 +136,20 @@ func progressPG(t *testing.T, enforce bool) *recordingProgressFixture {
 	}
 	f.coordinator, err = settingscommit.NewForPool(t.Context(), pool, f.objects)
 	if err != nil {
-		t.Fatal(err)
+		t.Fatal("create own original coordinator", err)
 	}
 	g, err := f.coordinator.TryWrite(t.Context())
 	if err != nil {
-		t.Fatal(err)
+		t.Fatal("acquire own actual startup write guard", err)
 	}
 	if err = f.coordinator.Arm(g); err != nil {
 		_ = g.Close()
-		t.Fatal(err)
+		t.Fatal("arm own original coordinator", err)
 	}
 	f.security, err = config.InstallManagedSecurity(f.manager, f.coordinator, "")
 	_ = g.Close()
 	if err != nil {
-		t.Fatal(err)
+		t.Fatal("install own managed policy", err)
 	}
 	f.core, err = NewRecordingProgressCore(base.ds, f.manager, f.security, f.coordinator)
 	if err != nil {
