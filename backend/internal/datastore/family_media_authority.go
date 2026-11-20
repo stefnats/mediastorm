@@ -54,6 +54,10 @@ type FamilyMediaOwner struct {
 	*familyMediaOwnerState
 }
 
+// A single original owner can acquire only one source, across all provider
+// kinds. The slot stays consumed after failure or source retirement.
+type familyMediaOwnedSource interface{ Close() }
+
 type familyMediaOwnerState struct {
 	mu             sync.Mutex
 	self           *FamilyMediaOwner
@@ -69,7 +73,7 @@ type familyMediaOwnerState struct {
 	setupDone      chan struct{}
 	handed, closed bool
 	once           sync.Once
-	localSource    *FamilyLocalSource
+	source         familyMediaOwnedSource
 }
 
 func (FamilyMediaOwner) MarshalJSON() ([]byte, error) { return []byte("null"), nil }
@@ -354,11 +358,11 @@ func (o *FamilyMediaOwner) Close() {
 		stop := o.setupStop
 		o.setupStop = nil
 		o.setupFrame = nil
-		localSource := o.localSource
-		o.localSource = nil
+		source := o.source
+		o.source = nil
 		o.mu.Unlock()
-		if localSource != nil {
-			localSource.Close()
+		if source != nil {
+			source.Close()
 		}
 		if stop != nil {
 			if stop() {

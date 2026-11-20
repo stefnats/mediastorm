@@ -91,14 +91,14 @@ func (o *FamilyMediaOwner) CaptureLocalSource(ctx context.Context, item string) 
 		return nil, ErrFamilyMediaChanged
 	}
 	o.mu.Lock()
-	if o.closed || o.ctx.Err() != nil || o.localSource != nil {
+	if o.closed || o.ctx.Err() != nil || o.source != nil {
 		o.mu.Unlock()
 		return nil, ErrFamilyMediaBusy
 	}
 	life, cancel := context.WithCancel(o.ctx)
 	value := &FamilyLocalSource{&familyLocalSourceState{owner: o, ctx: life, cancel: cancel, ready: make(chan struct{}), done: make(chan struct{})}}
 	value.self = value
-	o.localSource = value
+	o.source = value
 	o.mu.Unlock()
 	defer func() {
 		close(value.ready)
