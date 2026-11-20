@@ -40,19 +40,21 @@ type FamilyMediaRequest struct {
 	*familyMediaRequestState
 }
 type familyMediaRequestState struct {
-	mu          sync.Mutex
-	self        *FamilyMediaRequest
-	owner       *vodOwnerContext
-	target      string
-	ctx         context.Context
-	cancel      context.CancelFunc
-	closed      bool
-	once        sync.Once
-	openReady   chan struct{}
-	body        *familyMediaBody
-	writerReady chan struct{}
-	writer      *familyMediaWriter
-	watchDone   chan struct{}
+	mu           sync.Mutex
+	self         *FamilyMediaRequest
+	owner        *vodOwnerContext
+	target       string
+	ctx          context.Context
+	cancel       context.CancelFunc
+	closed       bool
+	once         sync.Once
+	openReady    chan struct{}
+	body         *familyMediaBody
+	writerReady  chan struct{}
+	writer       *familyMediaWriter
+	watchDone    chan struct{}
+	runtimeReady chan struct{}
+	runtime      *familyMediaRuntime
 }
 
 func (FamilyMediaRequest) MarshalJSON() ([]byte, error) { return []byte("null"), nil }
@@ -303,6 +305,28 @@ func (q *FamilyMediaRequest) Close() {
 	if !q.valid() {
 		return
 	}
+	q.mu.Lock()
+	q.closed = true
+	ready := q.runtimeReady
+	q.mu.Unlock()
+	q.cancel()
+	if ready != nil {
+		<-ready
+	}
+	q.mu.Lock()
+	runtime := q.runtime
+	q.mu.Unlock()
+	if runtime != nil {
+		runtime.Close()
+		return
+	}
+	q.closeRequestIO()
+}
+
+func (q *FamilyMediaRequest) cancelIO() { q.cancel() }
+
+// Only the runtime cleanup owner calls this after adopted IO has retired.
+func (q *FamilyMediaRequest) closeRequestIO() {
 	q.once.Do(func() {
 		q.cancel()
 		q.mu.Lock()

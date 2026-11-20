@@ -69,6 +69,7 @@ type familyMediaOwnerState struct {
 	setupDone      chan struct{}
 	handed, closed bool
 	once           sync.Once
+	localSource    *FamilyLocalSource
 }
 
 func (FamilyMediaOwner) MarshalJSON() ([]byte, error) { return []byte("null"), nil }
@@ -353,7 +354,12 @@ func (o *FamilyMediaOwner) Close() {
 		stop := o.setupStop
 		o.setupStop = nil
 		o.setupFrame = nil
+		localSource := o.localSource
+		o.localSource = nil
 		o.mu.Unlock()
+		if localSource != nil {
+			localSource.Close()
+		}
 		if stop != nil {
 			if stop() {
 				close(o.setupDone)

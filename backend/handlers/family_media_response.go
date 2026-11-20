@@ -10,6 +10,15 @@ import (
 	"novastream/services/profileunlock"
 )
 
+// familyMediaIO is deliberately private. A fresh consumer supplies its own
+// cancellation while retaining the same original request authority.
+type familyMediaIO interface {
+	Check(context.Context) error
+	Context() context.Context
+	ExpiresAt() time.Time
+	cancelIO()
+}
+
 // OpenBody admits one opener only. Close waits even for a late opener that
 // ignores cancellation, so the PG slot cannot be refunded before its FD closes.
 func (q *FamilyMediaRequest) OpenBody(open func(context.Context) (io.ReadCloser, error)) (io.ReadCloser, error) {
@@ -17,7 +26,7 @@ func (q *FamilyMediaRequest) OpenBody(open func(context.Context) (io.ReadCloser,
 		return nil, profileunlock.ErrFamilyMediaChanged
 	}
 	q.mu.Lock()
-	if q.closed || q.openReady != nil {
+	if q.closed || q.runtimeReady != nil || q.openReady != nil {
 		q.mu.Unlock()
 		return nil, profileunlock.ErrFamilyMediaChanged
 	}
@@ -50,7 +59,7 @@ func (q *FamilyMediaRequest) OpenBody(open func(context.Context) (io.ReadCloser,
 }
 
 type familyMediaBody struct {
-	request *FamilyMediaRequest
+	request familyMediaIO
 	source  io.ReadCloser
 	mu      sync.Mutex
 	readMu  sync.Mutex
@@ -72,8 +81,8 @@ func (b *familyMediaBody) Read(p []byte) (int, error) {
 	b.reads.Add(1)
 	b.mu.Unlock()
 	defer b.reads.Done()
-	if b.request.Check(b.request.ctx) != nil {
-		b.request.cancel()
+	if b.request.Check(b.request.Context()) != nil {
+		b.request.cancelIO()
 		return 0, profileunlock.ErrFamilyMediaChanged
 	}
 	if len(p) == 0 {
@@ -85,8 +94,8 @@ func (b *familyMediaBody) Read(p []byte) (int, error) {
 	b.mu.Lock()
 	closed := b.closed
 	b.mu.Unlock()
-	if n < 0 || n > len(buffer) || err != nil && err != io.EOF || closed || b.request.Check(b.request.ctx) != nil {
-		b.request.cancel()
+	if n < 0 || n > len(buffer) || err != nil && err != io.EOF || closed || b.request.Check(b.request.Context()) != nil {
+		b.request.cancelIO()
 		return 0, profileunlock.ErrFamilyMediaChanged
 	}
 	copy(p, buffer[:n])
@@ -117,7 +126,7 @@ func (q *FamilyMediaRequest) ResponseWriter(w http.ResponseWriter) (http.Respons
 		return nil, profileunlock.ErrFamilyMediaChanged
 	}
 	q.mu.Lock()
-	if q.closed || q.writerReady != nil {
+	if q.closed || q.runtimeReady != nil || q.writerReady != nil {
 		q.mu.Unlock()
 		return nil, profileunlock.ErrFamilyMediaChanged
 	}
@@ -148,7 +157,7 @@ func (q *FamilyMediaRequest) ResponseWriter(w http.ResponseWriter) (http.Respons
 
 type familyMediaWriter struct {
 	mu         sync.Mutex
-	request    *FamilyMediaRequest
+	request    familyMediaIO
 	target     http.ResponseWriter
 	controller *http.ResponseController
 	deadline   time.Time
@@ -168,9 +177,9 @@ func (w *familyMediaWriter) begin() error {
 	}
 	w.writes.Add(1)
 	w.mu.Unlock()
-	if err := w.request.Check(w.request.ctx); err != nil {
+	if err := w.request.Check(w.request.Context()); err != nil {
 		w.writes.Done()
-		w.request.cancel()
+		w.request.cancelIO()
 		return err
 	}
 	return nil
@@ -181,8 +190,8 @@ func (w *familyMediaWriter) WriteHeader(status int) {
 	}
 	defer w.writes.Done()
 	w.target.WriteHeader(status)
-	if w.request.Check(w.request.ctx) != nil {
-		w.request.cancel()
+	if w.request.Check(w.request.Context()) != nil {
+		w.request.cancelIO()
 		panic(http.ErrAbortHandler)
 	}
 }
@@ -193,19 +202,19 @@ func (w *familyMediaWriter) Write(p []byte) (int, error) {
 	defer w.writes.Done()
 	written := 0
 	for written < len(p) || written == 0 && len(p) == 0 {
-		if w.request.Check(w.request.ctx) != nil {
-			w.request.cancel()
+		if w.request.Check(w.request.Context()) != nil {
+			w.request.cancelIO()
 			return written, profileunlock.ErrFamilyMediaChanged
 		}
 		part := p[written:min(len(p), written+(32<<10))]
 		n, err := w.target.Write(part)
 		if n < 0 || n > len(part) {
-			w.request.cancel()
+			w.request.cancelIO()
 			return written, profileunlock.ErrFamilyMediaChanged
 		}
 		written += n
-		if w.request.Check(w.request.ctx) != nil {
-			w.request.cancel()
+		if w.request.Check(w.request.Context()) != nil {
+			w.request.cancelIO()
 			return written, profileunlock.ErrFamilyMediaChanged
 		}
 		if err != nil {
@@ -228,8 +237,8 @@ func (w *familyMediaWriter) FlushError() error {
 	if err := w.controller.Flush(); err != nil {
 		return err
 	}
-	if w.request.Check(w.request.ctx) != nil {
-		w.request.cancel()
+	if w.request.Check(w.request.Context()) != nil {
+		w.request.cancelIO()
 		return profileunlock.ErrFamilyMediaChanged
 	}
 	return nil
@@ -245,7 +254,7 @@ func (w *familyMediaWriter) SetWriteDeadline(deadline time.Time) error {
 	if deadline.IsZero() || deadline.After(w.deadline) {
 		deadline = w.deadline
 	}
-	if w.request.ctx.Err() != nil {
+	if w.request.Context().Err() != nil {
 		deadline = time.Now()
 	}
 	return w.controller.SetWriteDeadline(deadline)
