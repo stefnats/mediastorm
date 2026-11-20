@@ -4736,43 +4736,55 @@ func (h *AdminUIHandler) requireProfileScope(w http.ResponseWriter, r *http.Requ
 	return true, accountID
 }
 
-// RequireAuth is middleware that allows any authenticated account and passes session to context
+// RequireAuth keeps its existing cookie acquisition/error policy. The shared
+// post-auth path retains the same scope, onboarding, deadline and profile checks.
 func (h *AdminUIHandler) RequireAuth(next http.HandlerFunc) http.HandlerFunc {
+	owned := h.cookieOwnedHandler(next)
+	return func(w http.ResponseWriter, r *http.Request) {
+		checked, session, release := h.authenticateCookie(r)
+		defer release()
+		if session == nil {
+			http.Redirect(w, checked, h.serverBasePath+"/admin/login", http.StatusSeeOther)
+			return
+		}
+		h.serveAuthenticatedCookie(w, checked, session, owned)
+	}
+}
+
+type adminCookieGuardKey struct{}
+
+func (h *AdminUIHandler) cookieOwnedHandler(next http.HandlerFunc) http.Handler {
 	owned := profileaccess.Middleware(h.profileBelongsToAccount)(http.HandlerFunc(next))
 	if h.pgPins != nil {
 		owned = profileaccess.CurrentMiddleware(h.pgPins.Owns)(http.HandlerFunc(next))
 	}
-	return func(w http.ResponseWriter, r *http.Request) {
-		checked, session, release := h.authenticateCookie(r)
-		defer release()
-		r = checked
-		if session == nil {
-			http.Redirect(w, r, h.serverBasePath+"/admin/login", http.StatusSeeOther)
-			return
+	return owned
+}
+
+func (h *AdminUIHandler) serveAuthenticatedCookie(w http.ResponseWriter, r *http.Request, session *models.Session, owned http.Handler) {
+	if h.pgPins != nil {
+		if deadline, ok := r.Context().Deadline(); ok {
+			control := http.NewResponseController(w)
+			_ = control.SetReadDeadline(deadline)
+			defer control.SetReadDeadline(time.Time{})
 		}
-		if h.pgPins != nil {
-			if deadline, ok := r.Context().Deadline(); ok {
-				control := http.NewResponseController(w)
-				_ = control.SetReadDeadline(deadline)
-				defer control.SetReadDeadline(time.Time{})
-			}
-		}
-		if session.Scope != "" {
-			http.Error(w, "session not permitted for this endpoint", http.StatusForbidden)
-			return
-		}
-		if h.shouldGateOnboarding(r, session) {
-			http.Redirect(w, r, h.serverBasePath+"/admin/onboarding", http.StatusSeeOther)
-			return
-		}
-		// Add session to context for handlers to use
-		ctx := context.WithValue(r.Context(), adminSessionContextKey{}, session)
-		// Also set auth context keys so shared handlers (e.g., usersHandler) can access account info
-		ctx = context.WithValue(ctx, auth.ContextKeyAccountID, session.AccountID)
-		ctx = context.WithValue(ctx, auth.ContextKeyIsMaster, session.IsMaster)
-		ctx = context.WithValue(ctx, auth.ContextKeySession, *session)
-		owned.ServeHTTP(w, r.WithContext(ctx))
 	}
+	if session.Scope != "" {
+		http.Error(w, "session not permitted for this endpoint", http.StatusForbidden)
+		return
+	}
+	if h.shouldGateOnboarding(r, session) {
+		http.Redirect(w, r, h.serverBasePath+"/admin/onboarding", http.StatusSeeOther)
+		return
+	}
+	// Add session to context for handlers to use
+	ctx := context.WithValue(r.Context(), adminSessionContextKey{}, session)
+	// Also set auth context keys so shared handlers (e.g., usersHandler) can access account info
+	ctx = context.WithValue(ctx, auth.ContextKeyAccountID, session.AccountID)
+	ctx = context.WithValue(ctx, auth.ContextKeyIsMaster, session.IsMaster)
+	ctx = context.WithValue(ctx, auth.ContextKeySession, *session)
+	ctx = context.WithValue(ctx, adminCookieGuardKey{}, h)
+	owned.ServeHTTP(w, r.WithContext(ctx))
 }
 
 // CaptureDebugLog accepts browser debug logs through the admin/account session-auth routes.
@@ -4962,47 +4974,158 @@ func (h *AdminUIHandler) LoginSubmit(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// Logout handles logout requests
-func (h *AdminUIHandler) Logout(w http.ResponseWriter, r *http.Request) {
+// captureLogoutCookie performs one genuine capture, without the ordinary
+// Identity re-read that could discard A after a concurrent A-to-B refresh.
+func (h *AdminUIHandler) captureLogoutCookie(r *http.Request) (*http.Request, *models.Session, context.CancelFunc, error) {
+	noop := func() {}
+	if err := r.Context().Err(); err != nil {
+		return r, nil, noop, err
+	}
 	cookie, err := r.Cookie(adminSessionCookieName)
-	if err == nil {
-		if h.pgPins != nil {
-			checked := r
-			// A request already authenticated before refresh must retain that
-			// original frame. Reauthenticating the deleted A token would discard
-			// its proven lineage and leave the freshly rotated B session alive.
-			original, bound := auth.GetSession(r)
-			if !bound || original.Token != cookie.Value {
-				var release context.CancelFunc
-				checked, release, err = h.pgPins.Authenticate(r, cookie.Value, r.Header.Get("X-Client-ID"))
-				if err != nil {
-					http.Error(w, "Logout could not be confirmed", http.StatusUnauthorized)
+	if err != nil {
+		return r, nil, noop, err
+	}
+	// Existing guarded original requests retain their exact A frame. Local
+	// claims alone never grant logout: the same-store concrete core checks it.
+	if original, ok := auth.GetSession(r); ok && original.Token == cookie.Value {
+		return r, &original, noop, nil
+	}
+	checked, release, err := h.pgPins.Authenticate(r, cookie.Value, r.Header.Get("X-Client-ID"))
+	if err != nil {
+		return r, nil, noop, err
+	}
+	original, ok := auth.GetSession(checked)
+	if !ok || original.Token != cookie.Value {
+		release()
+		return r, nil, noop, datastore.ErrPGPinChanged
+	}
+	if err := checked.Context().Err(); err != nil {
+		release()
+		return r, nil, noop, err
+	}
+	return checked, &original, release, nil
+}
+
+func cookieLogoutInvalid(r *http.Request, err error) bool {
+	return r.Context().Err() == nil && !errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded) &&
+		(errors.Is(err, datastore.ErrPGPinChanged) || errors.Is(err, datastore.ErrPGPinUsed) || errors.Is(err, datastore.ErrProfilePinAccessChanged) || errors.Is(err, datastore.ErrProfilePinAccessUsed) || errors.Is(err, sessions.ErrInvalidToken) || errors.Is(err, sessions.ErrSessionNotFound) || errors.Is(err, sessions.ErrSessionExpired))
+}
+
+// RequireLogoutAuth is selected only by the existing PG account logout route.
+// It owns the original capture through actual guarded-handler cleanup, while
+// ordinary RequireAuth and its acquisition/redirect behavior remain unchanged.
+func (h *AdminUIHandler) RequireLogoutAuth(next http.HandlerFunc) http.HandlerFunc {
+	if h.pgPins == nil {
+		return h.RequireAuth(next)
+	}
+	owned := h.cookieOwnedHandler(next)
+	return func(w http.ResponseWriter, r *http.Request) {
+		checked, session, release, err := h.captureLogoutCookie(r)
+		defer release()
+		if err != nil {
+			if r.Context().Err() == nil && (errors.Is(err, http.ErrNoCookie) || cookieLogoutInvalid(r, err)) {
+				publication, ready := h.cookieLogoutPublicationWriter(w, r)
+				if !ready {
 					return
 				}
-				defer release()
-			}
-			if h.sessionsService == nil || h.sessionsService.LogoutProfilePinSession(checked) != nil {
-				http.Error(w, "Logout could not be confirmed", http.StatusUnauthorized)
+				http.Redirect(publication, r, h.serverBasePath+"/admin/login", http.StatusSeeOther)
 				return
 			}
-			if checked.Context().Err() != nil {
-				return
-			}
-		} else if h.sessionsService != nil {
-			h.sessionsService.Revoke(cookie.Value)
+			writeCookieLogoutFailure(w, r, err)
+			return
 		}
+		h.serveAuthenticatedCookie(w, checked, session, owned)
 	}
+}
 
-	// Clear the cookie
-	http.SetCookie(w, &http.Cookie{
-		Name:     adminSessionCookieName,
-		Value:    "",
-		Path:     "/",
-		MaxAge:   -1,
-		HttpOnly: true,
-	})
+// Logout handles the existing direct admin entry and the guarded account entry.
+func (h *AdminUIHandler) Logout(w http.ResponseWriter, r *http.Request) {
+	if h.pgPins != nil {
+		if err := r.Context().Err(); err != nil {
+			writeCookieLogoutFailure(w, r, err)
+			return
+		}
+		if r.Context().Value(adminCookieGuardKey{}) != h {
+			checked, session, release, err := h.captureLogoutCookie(r)
+			defer release()
+			if errors.Is(err, http.ErrNoCookie) {
+				// Missing admin cookie retains the existing clear/redirect behavior.
+				h.publishLogoutCookie(w, r)
+				return
+			}
+			if err != nil {
+				writeCookieLogoutFailure(w, r, err)
+				return
+			}
+			h.serveAuthenticatedCookie(w, checked, session, h.cookieOwnedHandler(h.Logout))
+			return
+		}
+		cookie, err := r.Cookie(adminSessionCookieName)
+		original, bound := auth.GetSession(r)
+		if err != nil || !bound || original.Token != cookie.Value {
+			writeCookieLogoutFailure(w, r, datastore.ErrPGPinChanged)
+			return
+		}
+		if h.sessionsService == nil {
+			writeCookieLogoutFailure(w, r, datastore.ErrPGPinUnavailable)
+			return
+		}
+		if err := h.sessionsService.LogoutProfilePinSession(r); err != nil {
+			writeCookieLogoutFailure(w, r, err)
+			return
+		}
+		h.publishLogoutCookie(w, r)
+		return
+	}
+	// The configured legacy JSON/memory behavior is not a PG error fallback.
+	if cookie, err := r.Cookie(adminSessionCookieName); err == nil && h.sessionsService != nil {
+		h.sessionsService.Revoke(cookie.Value)
+	}
+	h.publishLogoutCookie(w, r)
+}
 
-	http.Redirect(w, r, h.serverBasePath+"/admin/login", http.StatusSeeOther)
+// The physical Header is acquired exactly once for a PG logout publication.
+// SetCookie, Redirect and the unchanged API5 error helper all use this same map,
+// so no later Header callback can introduce a new wait after the context check.
+type cookieLogoutHeaderResponseWriter struct {
+	http.ResponseWriter
+	header http.Header
+}
+
+func (w *cookieLogoutHeaderResponseWriter) Header() http.Header         { return w.header }
+func (w *cookieLogoutHeaderResponseWriter) Unwrap() http.ResponseWriter { return w.ResponseWriter }
+
+func cachedCookieLogoutHeader(w http.ResponseWriter) *cookieLogoutHeaderResponseWriter {
+	if cached, ok := w.(*cookieLogoutHeaderResponseWriter); ok {
+		return cached
+	}
+	return &cookieLogoutHeaderResponseWriter{ResponseWriter: w, header: w.Header()}
+}
+
+func writeCookieLogoutFailure(w http.ResponseWriter, r *http.Request, err error) {
+	publication := cachedCookieLogoutHeader(w)
+	writePGLogoutFailure(publication, r, err)
+}
+
+func (h *AdminUIHandler) cookieLogoutPublicationWriter(w http.ResponseWriter, r *http.Request) (http.ResponseWriter, bool) {
+	if h.pgPins == nil {
+		return w, true
+	}
+	publication := cachedCookieLogoutHeader(w)
+	if err := r.Context().Err(); err != nil {
+		writeCookieLogoutFailure(publication, r, err)
+		return publication, false
+	}
+	return publication, true
+}
+
+func (h *AdminUIHandler) publishLogoutCookie(w http.ResponseWriter, r *http.Request) {
+	publication, ready := h.cookieLogoutPublicationWriter(w, r)
+	if !ready {
+		return
+	}
+	http.SetCookie(publication, &http.Cookie{Name: adminSessionCookieName, Value: "", Path: "/", MaxAge: -1, HttpOnly: true})
+	http.Redirect(publication, r, h.serverBasePath+"/admin/login", http.StatusSeeOther)
 }
 
 func (h *AdminUIHandler) renderLoginError(w http.ResponseWriter, errMsg string) {

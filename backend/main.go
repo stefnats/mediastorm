@@ -1412,7 +1412,7 @@ func main() {
 	r.HandleFunc("/admin/api/latency", adminUIHandler.RequireMasterAuth(latencyAdmin.ServePlaybackLatencyJSON)).Methods(http.MethodGet, http.MethodOptions)
 	r.HandleFunc("/admin/api/latency/clear", adminUIHandler.RequireMasterAuth(latencyAdmin.ClearLatencySamples)).Methods(http.MethodPost, http.MethodOptions)
 	r.HandleFunc("/admin/login", api.RateLimitHandlerFunc(adminLoginLimiter, adminUIHandler.LoginSubmit)).Methods(http.MethodPost)
-	r.HandleFunc("/admin/logout", adminUIHandler.Logout).Methods(http.MethodGet, http.MethodPost)
+	registerAdminLogoutRoute(r, adminUIHandler)
 
 	// Protected admin routes (require session authentication)
 	r.HandleFunc("/admin", adminUIHandler.RequireAuth(adminUIHandler.StatusPage)).Methods(http.MethodGet)
@@ -2798,12 +2798,18 @@ func recordingWebOrigin(next http.HandlerFunc) http.HandlerFunc {
 	}
 }
 
+// registerAdminLogoutRoute retains the existing direct admin entry while the
+// concrete handler owns original PG capture and its ordinary post-auth guards.
+func registerAdminLogoutRoute(r *mux.Router, adminUI *handlers.AdminUIHandler) {
+	r.HandleFunc("/admin/logout", adminUI.Logout).Methods(http.MethodGet, http.MethodPost)
+}
+
 // registerAccountLogoutRoute keeps JSON logout on its existing handler while
 // PG captures the original cookie frame before any body/read or refresh wait.
 func registerAccountLogoutRoute(r *mux.Router, accountUI *handlers.AccountUIHandler, adminUI *handlers.AdminUIHandler, currentPins *profileunlock.PGProfilePins) {
 	logout := accountUI.Logout
 	if currentPins != nil {
-		logout = adminUI.RequireAuth(adminUI.Logout)
+		logout = adminUI.RequireLogoutAuth(adminUI.Logout)
 	}
 	r.HandleFunc("/account/logout", logout).Methods(http.MethodGet, http.MethodPost)
 }
