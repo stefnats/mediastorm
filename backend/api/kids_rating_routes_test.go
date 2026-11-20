@@ -278,14 +278,26 @@ func TestKidsSplitRatingRegisteredRoutesPreserveMasterAndPreflightPolicy(t *test
 		if w.Code != http.StatusOK || !reflect.DeepEqual(before, after) {
 			t.Fatal("preflight required credentials or mutated a profile")
 		}
-		rating := "G"
+		rating := "PG"
 		if strings.HasSuffix(suffix, "/tv") {
-			rating = "TV-G"
+			rating = "TV-PG"
 		}
 		body, _ := json.Marshal(map[string]string{"rating": rating})
-		w = f.request(http.MethodPut, f.foreign, suffix, f.master, "", "", string(body))
+		foreignBefore, _ := f.users.Get(f.foreign)
+		for _, password := range []string{"", "synthetic-wrong-master-password"} {
+			w = f.request(http.MethodPut, f.foreign, suffix, f.master, "", password, string(body))
+			foreignAfter, _ := f.users.Get(f.foreign)
+			if w.Code != http.StatusForbidden || !strings.Contains(w.Body.String(), "parent_authorization_required") || !reflect.DeepEqual(foreignBefore, foreignAfter) {
+				t.Fatal("master without current password changed parental controls")
+			}
+		}
+		w = f.request(http.MethodPut, f.foreign, suffix, f.master, "", "synthetic-master-password", string(body))
 		if w.Code != http.StatusOK {
-			t.Fatalf("master authorization changed: %d %s", w.Code, w.Body.String())
+			t.Fatalf("confirmed master management failed: %d %s", w.Code, w.Body.String())
+		}
+		foreignAfter, _ := f.users.Get(f.foreign)
+		if strings.HasSuffix(suffix, "/movie") && foreignAfter.KidsMaxMovieRating != rating || strings.HasSuffix(suffix, "/tv") && foreignAfter.KidsMaxTVRating != rating {
+			t.Fatal("confirmed master did not update the selected rating")
 		}
 	}
 }
