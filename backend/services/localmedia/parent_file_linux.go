@@ -238,6 +238,29 @@ func (f *openedParentFile) OpenReader(ctx context.Context) (kidsvod.FileReadAtCl
 	}
 	return os.NewFile(uintptr(fd), "parent-approved-local-file"), nil
 }
+
+// The descriptor must be the actual held-file duplicate, never an expected
+// filename/version label pasted onto a newly opened process input.
+func (f *openedParentFile) CheckDescriptor(ctx context.Context, file *os.File) error {
+	if file == nil || f.Check(ctx) != nil {
+		return kidsvod.ErrParentFileChanged
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.closed || ctx.Err() != nil {
+		return kidsvod.ErrParentFileChanged
+	}
+	actual, err := file.Stat()
+	original, e := f.file.Stat()
+	if err != nil || e != nil || !os.SameFile(actual, original) {
+		return kidsvod.ErrParentFileChanged
+	}
+	version, ok := parentStat(actual)
+	if !ok || version != f.stat || ctx.Err() != nil {
+		return kidsvod.ErrParentFileChanged
+	}
+	return nil
+}
 func (f *openedParentFile) Close() error {
 	f.mu.Lock()
 	defer f.mu.Unlock()

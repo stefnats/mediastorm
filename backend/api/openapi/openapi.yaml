@@ -277,6 +277,184 @@ paths:
         '404': {$ref: '#/components/responses/Error'}
         '503': {$ref: '#/components/responses/Error'}
 
+  /api/users/{userId}/library/items/{itemId}/approved-hls:
+    post:
+      operationId: startParentLocalFileHLS
+      summary: Prepare bounded HLS from the exact parent-approved local file
+      description: |
+        Explicitly configured isolated PostgreSQL parent-file exception only;
+        Main does not install this media adapter. The approvalId stays in the
+        bounded JSON body, never an HLS URL or playlist. The actual original
+        full session/client/child/PIN/regional policy/library ACL/root/held FD
+        must still agree. No new parent grant or classification is created.
+        Only a finite approved local container with exactly one supported
+        H264 video and one AAC-LC audio stream is eligible. No source URL,
+        provider, network playlist, subtitle/data drop or codec fallback is
+        accepted. Admission is bounded, with no queue. Preparation may reject
+        unsupported media; a locator never grants access on its own. Session
+        expiry cannot outlive or renew the original approval (at most two hours).
+      security: [{bearerAuth: []}]
+      parameters:
+        - $ref: '#/components/parameters/UserID'
+        - in: path
+          name: itemId
+          required: true
+          schema: {type: string, minLength: 1, maxLength: 128}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [approvalId]
+              properties:
+                approvalId: {type: string, pattern: '^lfa_[0-9a-f]{64}$'}
+      responses:
+        '200':
+          description: Checked HLS locator for this original approved file/session only; not a bearer grant.
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                required: [sessionId, playlistUrl, expiresAt, outcome]
+                properties:
+                  sessionId: {type: string, pattern: '^[0-9a-f]{32}$'}
+                  playlistUrl: {type: string}
+                  expiresAt: {type: string, format: date-time}
+                  outcome: {type: string, enum: [parent-file-exception]}
+        '400': {$ref: '#/components/responses/Error'}
+        '401': {$ref: '#/components/responses/Error'}
+        '403': {$ref: '#/components/responses/Error'}
+        '404': {$ref: '#/components/responses/Error'}
+        '409': {$ref: '#/components/responses/Error'}
+        '429': {$ref: '#/components/responses/Error'}
+        '503': {$ref: '#/components/responses/Error'}
+
+  /api/users/{userId}/library/items/{itemId}/approved-hls/{hlsId}/{segment}:
+    get:
+      operationId: serveParentLocalFileHLS
+      summary: Read a checked parent-approved HLS playlist or segment
+      description: |
+        Every request rechecks the original full session/client/profile/item,
+        approval, current PG PIN/policy/library ACL, source FD/stat version,
+        output identity and configured tools. Session ID and filenames are
+        locators only. No query parameters, URL tokens, request body, byte
+        Range, conditional seek, external URI or alternate input are accepted.
+        Playlist entries name only canonical checked local TS segments.
+        Source retirement/expiry cancels blocked writes and joins readers.
+        HLS does not establish a new age rating, spoken language or permission
+        for another file. This adapter is not installed by Main.
+      security: [{bearerAuth: []}]
+      parameters:
+        - $ref: '#/components/parameters/UserID'
+        - in: path
+          name: itemId
+          required: true
+          schema: {type: string, minLength: 1, maxLength: 128}
+        - in: path
+          name: hlsId
+          required: true
+          schema: {type: string, pattern: '^[0-9a-f]{32}$'}
+        - in: path
+          name: segment
+          required: true
+          description: Only stream.m3u8 or a canonical segment000000.ts through segment002047.ts locator.
+          schema: {type: string, pattern: '^(stream\.m3u8|segment00([01][0-9]{3}|20[0-3][0-9]|204[0-7])\.ts)$'}
+      responses:
+        '200':
+          description: Current authorized original-file HLS headers and bytes.
+          headers:
+            Content-Length: {schema: {type: integer, minimum: 0}}
+          content:
+            application/vnd.apple.mpegurl:
+              schema: {type: string}
+            video/mp2t:
+              schema: {type: string, format: binary}
+        '400': {$ref: '#/components/responses/Error'}
+        '401': {$ref: '#/components/responses/Error'}
+        '403': {$ref: '#/components/responses/Error'}
+        '404': {$ref: '#/components/responses/Error'}
+        '409': {$ref: '#/components/responses/Error'}
+        '429': {$ref: '#/components/responses/Error'}
+        '503': {$ref: '#/components/responses/Error'}
+        '416': {description: Byte ranges are unsupported after current authorization.}
+
+    head:
+      operationId: headParentLocalFileHLS
+      summary: Read checked parent-approved HLS headers without media bytes
+      description: |
+        Every request rechecks the original full session/client/profile/item,
+        approval, current PG PIN/policy/library ACL, source FD/stat version,
+        output identity and configured tools. Session ID and filenames are
+        locators only. No query parameters, URL tokens, request body, byte
+        Range, conditional seek, external URI or alternate input are accepted.
+        Playlist entries name only canonical checked local TS segments.
+        Source retirement/expiry cancels blocked writes and joins readers.
+        HLS does not establish a new age rating, spoken language or permission
+        for another file. This adapter is not installed by Main.
+      security: [{bearerAuth: []}]
+      parameters:
+        - $ref: '#/components/parameters/UserID'
+        - in: path
+          name: itemId
+          required: true
+          schema: {type: string, minLength: 1, maxLength: 128}
+        - in: path
+          name: hlsId
+          required: true
+          schema: {type: string, pattern: '^[0-9a-f]{32}$'}
+        - in: path
+          name: segment
+          required: true
+          description: Only stream.m3u8 or a canonical segment000000.ts through segment002047.ts locator.
+          schema: {type: string, pattern: '^(stream\.m3u8|segment00([01][0-9]{3}|20[0-3][0-9]|204[0-7])\.ts)$'}
+      responses:
+        '200':
+          description: Current authorized original-file HLS headers. No response body.
+          headers:
+            Content-Length: {schema: {type: integer, minimum: 0}}
+        '400': {$ref: '#/components/responses/Error'}
+        '401': {$ref: '#/components/responses/Error'}
+        '403': {$ref: '#/components/responses/Error'}
+        '404': {$ref: '#/components/responses/Error'}
+        '409': {$ref: '#/components/responses/Error'}
+        '429': {$ref: '#/components/responses/Error'}
+        '503': {$ref: '#/components/responses/Error'}
+        '416': {description: Byte ranges are unsupported after current authorization.}
+
+  /api/users/{userId}/library/items/{itemId}/approved-hls/{hlsId}:
+    delete:
+      operationId: stopParentLocalFileHLS
+      summary: Retire this same-session HLS output and its workers
+      description: |
+        Original full session/client/profile/item and current approval authority
+        must still agree. No query or request body. Stops only this HLS session;
+        it neither renews nor silently revokes the underlying parent file
+        exception. All subprocesses/readers and private output retirement join
+        before completion. Unknown/foreign locators fail closed.
+      security: [{bearerAuth: []}]
+      parameters:
+        - $ref: '#/components/parameters/UserID'
+        - in: path
+          name: itemId
+          required: true
+          schema: {type: string, minLength: 1, maxLength: 128}
+        - in: path
+          name: hlsId
+          required: true
+          schema: {type: string, pattern: '^[0-9a-f]{32}$'}
+      responses:
+        '204': {description: Original HLS session retired; no response body.}
+        '400': {$ref: '#/components/responses/Error'}
+        '401': {$ref: '#/components/responses/Error'}
+        '403': {$ref: '#/components/responses/Error'}
+        '404': {$ref: '#/components/responses/Error'}
+        '409': {$ref: '#/components/responses/Error'}
+        '429': {$ref: '#/components/responses/Error'}
+        '503': {$ref: '#/components/responses/Error'}
+
   /api/users/{userId}/kids/regional-policy:
     get:
       operationId: getAPIRegionalChildPolicy

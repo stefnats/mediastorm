@@ -343,6 +343,9 @@ func Register(
 	profileProtected.HandleFunc("/{userID}/kids/local-file-approvals", options.parentLocalFiles.Approve).Methods(http.MethodPost)
 	profileProtected.HandleFunc("/{userID}/library/items/{itemID}/approved-file", options.parentLocalFiles.Stream).Methods(http.MethodGet, http.MethodHead)
 	profileProtected.HandleFunc("/{userID}/library/items/{itemID}/approved-file", options.parentLocalFiles.Revoke).Methods(http.MethodDelete)
+	profileProtected.HandleFunc("/{userID}/library/items/{itemID}/approved-hls", options.parentLocalFiles.StartHLS).Methods(http.MethodPost)
+	profileProtected.HandleFunc("/{userID}/library/items/{itemID}/approved-hls/{hlsID}/{segment}", options.parentLocalFiles.ServeHLS).Methods(http.MethodGet, http.MethodHead)
+	profileProtected.HandleFunc("/{userID}/library/items/{itemID}/approved-hls/{hlsID}", options.parentLocalFiles.StopHLS).Methods(http.MethodDelete)
 	if localMediaHandler != nil && options.parentLocalFiles != nil {
 		localMediaHandler.SetParentLocalFiles(options.parentLocalFiles)
 	}
