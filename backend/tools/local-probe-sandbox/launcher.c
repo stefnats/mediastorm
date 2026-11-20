@@ -93,7 +93,7 @@ int main(int argc,char **argv) {
     if(check){close(4);close(5);return verify();}
     char *args[40];int n=0;
     args[n++]="ffprobe";args[n++]="-v";args[n++]="error";args[n++]="-threads";args[n++]="1";
-    args[n++]="-probesize";args[n++]="32768";args[n++]="-analyzeduration";args[n++]="100000";
+    args[n++]="-probesize";args[n++]="32768";args[n++]="-analyzeduration";args[n++]=!strcmp(argv[2],"mpegts")?"1000000":"100000";
     args[n++]="-protocol_whitelist";args[n++]="fd";args[n++]="-format_whitelist";args[n++]=argv[2];
     args[n++]="-f";args[n++]=argv[2];args[n++]="-fd";args[n++]="3";args[n++]="-blocksize";args[n++]="32768";
     if(!strcmp(argv[2],"mov")){args[n++]="-enable_drefs";args[n++]="0";args[n++]="-use_absolute_path";args[n++]="0";}

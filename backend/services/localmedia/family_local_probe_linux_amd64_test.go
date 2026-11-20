@@ -183,7 +183,7 @@ func TestFamilyLocalProbeActualPGFourMediaVariants(t *testing.T) {
 				if s.Kind == "video" && s.Codec == wantVideo && s.Width == 64 && s.Height == 48 {
 					video = true
 				}
-				if s.Kind == "audio" && s.Codec == wantAudio && s.SampleRate == 48000 {
+				if s.Kind == "audio" && s.Codec == wantAudio && s.SampleRate == 48000 && s.Channels == 1 {
 					audio = true
 				}
 			}
