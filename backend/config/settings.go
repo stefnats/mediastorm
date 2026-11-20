@@ -3355,6 +3355,8 @@ func isZeroRawValue(value interface{}) bool {
 
 // Save writes the provided settings to disk atomically.
 func (m *Manager) Save(s Settings) error {
+	finishMutation := beginManagedConfigMutation()
+	defer finishMutation()
 	if m.path == "" {
 		return errors.New("config path not set")
 	}

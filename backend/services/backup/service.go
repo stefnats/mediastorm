@@ -601,7 +601,13 @@ func (s *Service) restoreBackupFile(backupPath, sourceName string) error {
 			}
 		}
 		// Atomic rename
-		if err := os.Rename(tmpPath, destPath); err != nil {
+		var replaceErr error
+		if file.Name == "settings.json" {
+			replaceErr = config.ReplaceManagedSettingsFile(tmpPath, destPath)
+		} else {
+			replaceErr = os.Rename(tmpPath, destPath)
+		}
+		if err := replaceErr; err != nil {
 			os.Remove(tmpPath)
 			return fmt.Errorf("finalize %s: %w", file.Name, err)
 		}
