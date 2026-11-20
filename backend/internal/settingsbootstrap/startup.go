@@ -15,21 +15,25 @@ import (
 )
 
 type Startup struct {
-	self        *Startup
-	manager     *config.Manager
-	objects     *settingscommit.LockObjects
-	source      *datastore.SettingsStartupStore
-	security    *config.ManagedSecurity
-	guard       *settingscommit.WriteGuard
-	reservation *config.ManagedWriteReservation
-	finish      sync.Once
-	close       sync.Once
-	err         error
-	mu          sync.Mutex
-	finishing   bool
-	operations  sync.WaitGroup
-	ctx         context.Context
-	cancel      context.CancelFunc
+	self                      *Startup
+	manager                   *config.Manager
+	objects                   *settingscommit.LockObjects
+	source                    *datastore.SettingsStartupStore
+	security                  *config.ManagedSecurity
+	guard                     *settingscommit.WriteGuard
+	reservation               *config.ManagedWriteReservation
+	finish                    sync.Once
+	close                     sync.Once
+	err                       error
+	mu                        sync.Mutex
+	finishing                 bool
+	operations                sync.WaitGroup
+	recordingProgress         recordingProgressCleanup
+	recordingProgressBuilding *recordingProgressBuildState
+	recordingProgressReady    chan struct{}
+	recordingProgressClosing  bool
+	ctx                       context.Context
+	cancel                    context.CancelFunc
 }
 
 func Begin(ctx context.Context, manager *config.Manager, override string) (*Startup, error) {
@@ -229,6 +233,7 @@ func (s *Startup) Close() error {
 			s.cancel()
 		}
 		_ = s.Finish()
+		s.closeRecordingProgress()
 		if s.security != nil {
 			_ = s.security.Close()
 		}

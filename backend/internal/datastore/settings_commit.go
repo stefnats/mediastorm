@@ -325,22 +325,25 @@ func (t *settingsProgressTx) Close() error {
 // Its repositories use the one session-locked backend, never a supplied TX.
 type SettingsRestoreTransaction struct{ *settingsRestoreState }
 type settingsRestoreState struct {
-	self          *SettingsRestoreTransaction
-	guard         *settingscommit.WriteGuard
-	connection    *pgxpool.Conn
-	tx            pgx.Tx
-	ctx           context.Context
-	cancel        context.CancelFunc
-	finishContext func()
-	finishGuard   func()
-	mu            sync.Mutex
-	claimed       bool
-	closing       bool
-	committed     bool
-	bodyDone      chan struct{}
-	operations    sync.WaitGroup
-	done          chan struct{}
-	err           error
+	self             *SettingsRestoreTransaction
+	guard            *settingscommit.WriteGuard
+	connection       *pgxpool.Conn
+	tx               pgx.Tx
+	ctx              context.Context
+	cancel           context.CancelFunc
+	finishContext    func()
+	finishGuard      func()
+	mu               sync.Mutex
+	claimed          bool
+	bodyFinishing    bool
+	positionsClaimed bool
+	repositoryBody   *Tx
+	closing          bool
+	committed        bool
+	bodyDone         chan struct{}
+	operations       sync.WaitGroup
+	done             chan struct{}
+	err              error
 }
 
 func (SettingsRestoreTransaction) Format(f fmt.State, _ rune) {
@@ -392,8 +395,20 @@ func (t *SettingsRestoreTransaction) Repositories() (*Tx, func(), error) {
 		return nil, nil, settingscommit.ErrCoordinatorRequired
 	}
 	t.claimed = true
+	t.repositoryBody = &Tx{tx: t.tx}
 	var once sync.Once
-	return &Tx{tx: t.tx}, func() { once.Do(func() { close(t.bodyDone) }) }, nil
+	return t.repositoryBody, func() {
+		once.Do(func() {
+			t.mu.Lock()
+			t.bodyFinishing = true
+			t.mu.Unlock()
+			// Commit cannot enter before bodyDone. No new fixed restore-body
+			// operation can enter after bodyFinishing, so this joins only real
+			// admitted body work, outside the state mutex and before SQL release.
+			t.operations.Wait()
+			close(t.bodyDone)
+		})
+	}, nil
 }
 func (t *SettingsRestoreTransaction) Commit() error {
 	if t == nil || t.settingsRestoreState == nil || t.self != t {

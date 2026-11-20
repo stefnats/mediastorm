@@ -1271,6 +1271,16 @@ func main() {
 		}
 	}
 
+	// The DVR runtime shares the actual startup policy/native domain and PG
+	// store. A failed dependency disables these operations without a fallback.
+	recordingProgressHandler, progressErr := newRecordingProgressRuntime(managedStartup, store, recordingsService, currentProfilePins)
+	if progressErr != nil {
+		log.Printf("[recordings] current progress is unavailable")
+	}
+	if recordingProgressHandler != nil {
+		defer recordingProgressHandler.Close()
+	}
+
 	api.Register(
 		r,
 		settingsHandler,
@@ -1317,6 +1327,7 @@ func main() {
 		api.WithProfileUnlocks(profileUnlockService, profileSecurityPolicy),
 		api.WithPGProfilePins(currentProfilePins),
 		api.WithProfileRecovery(profileRecoveryHandler),
+		api.WithRecordingProgress(recordingProgressHandler),
 	)
 	log.Printf("[startup] phase=primary-api-routes duration=%s", time.Since(startupPhaseStarted))
 	startupPhaseStarted = time.Now()
@@ -2571,6 +2582,11 @@ func main() {
 	log.Println("🧹 Stopping scheduler service...")
 	if err := schedulerService.Stop(shutdownCtx); err != nil {
 		log.Printf("Scheduler shutdown error: %v", err)
+	}
+	// Stop new progress admission and join actual source/Core/transport work
+	// before the recordings service or deferred original settings store closes.
+	if recordingProgressHandler != nil {
+		recordingProgressHandler.Close()
 	}
 	if recordingsService != nil {
 		log.Println("🧹 Stopping recordings service...")

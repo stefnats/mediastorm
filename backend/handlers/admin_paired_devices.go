@@ -2,6 +2,7 @@ package handlers
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"sort"
@@ -11,6 +12,7 @@ import (
 	"github.com/gorilla/mux"
 
 	"novastream/config"
+	"novastream/internal/datastore"
 	"novastream/models"
 )
 
@@ -130,14 +132,48 @@ func (h *AdminUIHandler) RevokePairedDevice(w http.ResponseWriter, r *http.Reque
 		http.Error(w, `{"error":"paired device not found"}`, http.StatusNotFound)
 		return
 	}
-	revokedInvites, err := h.remoteAccessService.RevokePeer(r.Context(), peerID)
-	revokedSessions := h.sessionsService.RevokeAllForClient(peerID)
-	if err != nil {
-		http.Error(w, `{"error":"failed to revoke paired device"}`, http.StatusInternalServerError)
+	// These are two distinct operations. Either can have durable partial effects;
+	// no transaction or retry spanning invites and sessions is claimed.
+	revokedInvites, inviteErr := h.remoteAccessService.RevokePeer(r.Context(), peerID)
+	var revokedSessions int64
+	var sessionErr error
+	if h.sessionsService.UsesPostgres() {
+		revokedSessions, sessionErr = h.sessionsService.RevokeAllForClientContext(r.Context(), peerID)
+	} else {
+		// Explicit configured file/memory compatibility, never a PG-error fallback.
+		revokedSessions = int64(h.sessionsService.RevokeAllForClient(peerID))
+	}
+	if r.Context().Err() != nil {
+		w.WriteHeader(http.StatusServiceUnavailable)
 		return
 	}
+	result := struct {
+		OK              bool   `json:"ok"`
+		PeerID          string `json:"peerId"`
+		InviteOutcome   string `json:"inviteOutcome"`
+		SessionOutcome  string `json:"sessionOutcome"`
+		RevokedInvites  int    `json:"revokedInvites"`
+		RevokedSessions *int64 `json:"revokedSessions,omitempty"`
+		OutcomeUnknown  bool   `json:"outcomeUnknown,omitempty"`
+		Error           string `json:"error,omitempty"`
+	}{OK: inviteErr == nil && sessionErr == nil, PeerID: peerID, InviteOutcome: "known", SessionOutcome: "known", RevokedInvites: revokedInvites}
+	if inviteErr != nil {
+		// Count is only the completed updates reported by RevokePeer; failure
+		// does not prove that all remaining invites or pairings stayed unchanged.
+		result.InviteOutcome = "failed"
+	}
+	if sessionErr == nil {
+		result.RevokedSessions = &revokedSessions
+	} else if errors.Is(sessionErr, datastore.ErrSessionTargetRevokeUnknown) {
+		result.SessionOutcome = "unknown"
+		result.OutcomeUnknown = true
+	} else {
+		result.SessionOutcome = "unavailable"
+	}
 	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(map[string]interface{}{
-		"ok": true, "peerId": peerID, "revokedInvites": revokedInvites, "revokedSessions": revokedSessions,
-	})
+	if !result.OK {
+		result.Error = "Paired device revocation could not be fully confirmed"
+		w.WriteHeader(http.StatusServiceUnavailable)
+	}
+	_ = json.NewEncoder(w).Encode(result)
 }

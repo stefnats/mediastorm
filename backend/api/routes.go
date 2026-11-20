@@ -59,7 +59,7 @@ func apiSecurityMiddleware(next http.Handler) http.Handler {
 		if requestsecurity.IsSecure(r) {
 			w.Header().Set("Strict-Transport-Security", "max-age=31536000; includeSubDomains")
 		}
-		if r.Body != nil {
+		if r.Body != nil && r.Body != http.NoBody {
 			r.Body = http.MaxBytesReader(w, r.Body, maxAPIRequestBodyBytes)
 		}
 		next.ServeHTTP(w, r)
@@ -102,11 +102,12 @@ func masterOnlySportsMutation(handler http.HandlerFunc) http.Handler {
 type RegisterOption func(*registerOptions)
 
 type registerOptions struct {
-	parentLocalFiles *handlers.ParentLocalFileHandler
-	pgPins           *profileunlock.PGProfilePins
-	unlocks          *profileunlock.Service
-	security         SecuritySettingsFunc
-	recovery         *handlers.ProfileRecoveryHandler
+	recordingProgress *handlers.RecordingProgressHandler
+	parentLocalFiles  *handlers.ParentLocalFileHandler
+	pgPins            *profileunlock.PGProfilePins
+	unlocks           *profileunlock.Service
+	security          SecuritySettingsFunc
+	recovery          *handlers.ProfileRecoveryHandler
 }
 
 // WithParentLocalFiles selects the isolated raw-local parent exception. Main
@@ -135,6 +136,12 @@ func WithPGProfilePins(current *profileunlock.PGProfilePins) RegisterOption {
 // Omission keeps the new endpoint unavailable, never a legacy cache reload.
 func WithProfileRecovery(handler *handlers.ProfileRecoveryHandler) RegisterOption {
 	return func(options *registerOptions) { options.recovery = handler }
+}
+
+// WithRecordingProgress selects only the concrete original-runtime DVR handler.
+// Missing readiness keeps the two operations unavailable without a legacy path.
+func WithRecordingProgress(handler *handlers.RecordingProgressHandler) RegisterOption {
+	return func(options *registerOptions) { options.recordingProgress = handler }
 }
 
 // Register mounts API endpoints onto the provided router.
@@ -574,6 +581,19 @@ func Register(
 	protected.HandleFunc("/video/live-direct/{ticket}/stream.ts", videoHandler.ServeLiveDirect).Methods(http.MethodGet, http.MethodHead)
 	protected.HandleFunc("/live/usage", videoHandler.GetLiveUsage).Methods(http.MethodGet)
 	protected.HandleFunc("/live/usage", handleOptions).Methods(http.MethodOptions)
+	protected.HandleFunc("/live/recordings/{recordingID}/progress", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Cache-Control", "private, no-store")
+		if r.Method != http.MethodGet && r.Method != http.MethodPost {
+			w.Header().Set("Allow", "GET, POST")
+			w.WriteHeader(http.StatusMethodNotAllowed)
+			return
+		}
+		if options.recordingProgress == nil {
+			http.Error(w, "recording progress unavailable", http.StatusServiceUnavailable)
+			return
+		}
+		options.recordingProgress.ServeHTTP(w, r)
+	})
 	if recordingsHandler != nil {
 		protected.HandleFunc("/live/recording-rules", recordingsHandler.ListRules).Methods(http.MethodGet)
 		protected.HandleFunc("/live/recording-rules", recordingsHandler.CreateRule).Methods(http.MethodPost)

@@ -1,6 +1,7 @@
 package jellyfinbridge
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"log"
@@ -11,8 +12,10 @@ import (
 	"sync"
 	"time"
 
+	"novastream/internal/datastore"
 	"novastream/internal/jellyfinbridge/dto"
 	"novastream/models"
+	"novastream/services/sessions"
 )
 
 // bridgeTokenTTL is the lifetime of a Jellyfin bridge token. Jellyfin clients
@@ -339,9 +342,36 @@ func (s *Server) handleUsers(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, []dto.UserDto{s.userDto(principalFrom(r).Profile)})
 }
 
+// This optional capability distinguishes configured storage, not a failed read.
+// Unknown implementations cannot silently choose the memory compatibility path.
+type checkedBridgeSessionRevoker interface {
+	UsesPostgres() bool
+	RevokeContext(context.Context, string) error
+}
+
 func (s *Server) handleLogout(w http.ResponseWriter, r *http.Request) {
-	if p := principalFrom(r); p != nil {
-		_ = s.deps.Sessions.Revoke(p.Session.Token)
+	p := principalFrom(r)
+	revoker, configured := s.deps.Sessions.(checkedBridgeSessionRevoker)
+	if p == nil || !configured {
+		writeError(w, http.StatusServiceUnavailable, "Logout could not be confirmed")
+		return
+	}
+	var err error
+	if revoker.UsesPostgres() {
+		err = revoker.RevokeContext(r.Context(), p.Session.Token)
+	} else {
+		err = s.deps.Sessions.Revoke(p.Session.Token)
+	}
+	if r.Context().Err() != nil {
+		w.WriteHeader(http.StatusServiceUnavailable)
+		return
+	}
+	if err != nil && !errors.Is(err, sessions.ErrSessionNotFound) {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]any{
+			"error":          "Logout could not be confirmed",
+			"outcomeUnknown": errors.Is(err, datastore.ErrSessionTargetRevokeUnknown),
+		})
+		return
 	}
 	w.WriteHeader(http.StatusNoContent)
 }

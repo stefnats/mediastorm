@@ -913,37 +913,38 @@ type localMediaItemExport struct {
 // Global app settings (scheduled tasks / automations / scrapers / indexers / etc.)
 // live in settings.json and are backed up as a separate archive member.
 type databaseExport struct {
-	RegionalChildPolicies    []models.RegionalChildPolicyBackup     `json:"regionalChildPolicies"`
-	Reminders                map[string]models.ReminderProfileState `json:"reminders,omitempty"`
-	Version                  string                                 `json:"version"`
-	ExportedAt               time.Time                              `json:"exportedAt"`
-	Accounts                 []models.AccountStorage                `json:"accounts"`
-	Users                    []rawUser                              `json:"users"`
-	Sessions                 []models.Session                       `json:"sessions"`
-	Invitations              []models.Invitation                    `json:"invitations"`
-	RemoteAccessInvites      []rawRemoteAccessInvite                `json:"remoteAccessInvites,omitempty"`
-	RemoteAccessPairings     []rawRemoteAccessPairing               `json:"remoteAccessPairings,omitempty"`
-	ShareLinks               []rawShareLink                         `json:"shareLinks,omitempty"`
-	Clients                  []models.Client                        `json:"clients"`
-	ClientSettings           map[string]models.ClientFilterSettings `json:"clientSettings"`
-	UserSettings             map[string]models.UserSettings         `json:"userSettings"`
-	Watchlist                map[string][]models.WatchlistItem      `json:"watchlist"`
-	WatchlistTombstones      map[string][]models.WatchlistTombstone `json:"watchlistTombstones,omitempty"`
-	HiddenItems              map[string][]models.HiddenItem         `json:"hiddenItems,omitempty"`
-	WatchHistory             map[string][]models.WatchHistoryItem   `json:"watchHistory"`
-	PlaybackProgress         map[string][]models.PlaybackProgress   `json:"playbackProgress"`
-	ContentPreferences       map[string][]models.ContentPreference  `json:"contentPreferences"`
-	SeriesOrdering           map[string][]models.SeriesOrderingPref `json:"seriesOrdering,omitempty"`
-	CustomLists              map[string][]customListExport          `json:"customLists"`
-	NotificationChannels     []models.NotificationChannel           `json:"notificationChannels,omitempty"`
-	NotificationObservations []models.NotificationObservation       `json:"notificationObservations,omitempty"`
-	LocalMediaLibraries      []models.LocalMediaLibrary             `json:"localMediaLibraries,omitempty"`
-	LocalMediaItems          []localMediaItemExport                 `json:"localMediaItems,omitempty"`
-	RemoteMediaLibraries     []models.RemoteMediaLibrary            `json:"remoteMediaLibraries,omitempty"`
-	RemoteMediaItems         []models.RemoteMediaItem               `json:"remoteMediaItems,omitempty"`
-	LibraryAccessPolicies    map[string]models.LibraryAccessPolicy  `json:"libraryAccessPolicies,omitempty"`
-	Recordings               []models.Recording                     `json:"recordings,omitempty"`
-	NumbersStationProgress   []models.NumbersStationProgress        `json:"numbersStationProgress"`
+	RegionalChildPolicies      []models.RegionalChildPolicyBackup            `json:"regionalChildPolicies"`
+	Reminders                  map[string]models.ReminderProfileState        `json:"reminders,omitempty"`
+	Version                    string                                        `json:"version"`
+	ExportedAt                 time.Time                                     `json:"exportedAt"`
+	Accounts                   []models.AccountStorage                       `json:"accounts"`
+	Users                      []rawUser                                     `json:"users"`
+	Sessions                   []models.Session                              `json:"sessions"`
+	Invitations                []models.Invitation                           `json:"invitations"`
+	RemoteAccessInvites        []rawRemoteAccessInvite                       `json:"remoteAccessInvites,omitempty"`
+	RemoteAccessPairings       []rawRemoteAccessPairing                      `json:"remoteAccessPairings,omitempty"`
+	ShareLinks                 []rawShareLink                                `json:"shareLinks,omitempty"`
+	Clients                    []models.Client                               `json:"clients"`
+	ClientSettings             map[string]models.ClientFilterSettings        `json:"clientSettings"`
+	UserSettings               map[string]models.UserSettings                `json:"userSettings"`
+	Watchlist                  map[string][]models.WatchlistItem             `json:"watchlist"`
+	WatchlistTombstones        map[string][]models.WatchlistTombstone        `json:"watchlistTombstones,omitempty"`
+	HiddenItems                map[string][]models.HiddenItem                `json:"hiddenItems,omitempty"`
+	WatchHistory               map[string][]models.WatchHistoryItem          `json:"watchHistory"`
+	PlaybackProgress           map[string][]models.PlaybackProgress          `json:"playbackProgress"`
+	ContentPreferences         map[string][]models.ContentPreference         `json:"contentPreferences"`
+	SeriesOrdering             map[string][]models.SeriesOrderingPref        `json:"seriesOrdering,omitempty"`
+	CustomLists                map[string][]customListExport                 `json:"customLists"`
+	NotificationChannels       []models.NotificationChannel                  `json:"notificationChannels,omitempty"`
+	NotificationObservations   []models.NotificationObservation              `json:"notificationObservations,omitempty"`
+	LocalMediaLibraries        []models.LocalMediaLibrary                    `json:"localMediaLibraries,omitempty"`
+	LocalMediaItems            []localMediaItemExport                        `json:"localMediaItems,omitempty"`
+	RemoteMediaLibraries       []models.RemoteMediaLibrary                   `json:"remoteMediaLibraries,omitempty"`
+	RemoteMediaItems           []models.RemoteMediaItem                      `json:"remoteMediaItems,omitempty"`
+	LibraryAccessPolicies      map[string]models.LibraryAccessPolicy         `json:"libraryAccessPolicies,omitempty"`
+	Recordings                 []models.Recording                            `json:"recordings,omitempty"`
+	RecordingPlaybackPositions datastore.RecordingPlaybackPositionBackupRows `json:"recordingPlaybackPositions"`
+	NumbersStationProgress     []models.NumbersStationProgress               `json:"numbersStationProgress"`
 }
 
 type customListExport struct {
@@ -982,6 +983,7 @@ var databaseExportSections = []string{
 	"remoteMediaItems",
 	"libraryAccessPolicies",
 	"recordings",
+	"recordingPlaybackPositions",
 	"numbersStationProgress",
 }
 
@@ -992,6 +994,11 @@ func (s *Service) exportDatabaseBytes() ([]byte, error) {
 		Version:    "2.1",
 		ExportedAt: time.Now().UTC(),
 	}
+	positions, err := s.store.ExportRecordingPlaybackPositions(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("export recording playback positions: %w", err)
+	}
+	export.RecordingPlaybackPositions = positions
 
 	accounts, err := s.store.Accounts().List(ctx)
 	if err != nil {
@@ -1234,6 +1241,13 @@ func (s *Service) exportDatabaseBytes() ([]byte, error) {
 		}
 	}
 
+	// The surrounding export is indented. Charge the actual encoded subset at
+	// that same nesting depth as well as its compact datastore representation;
+	// otherwise a successful export could exceed its own restore byte budget.
+	encodedPositions, err := json.MarshalIndent(export.RecordingPlaybackPositions, "  ", "  ")
+	if err != nil || len(encodedPositions) > datastore.RecordingPlaybackPositionBackupByteLimit {
+		return nil, fmt.Errorf("export recording playback positions: %w", datastore.ErrRecordingPositionBackup)
+	}
 	return json.MarshalIndent(export, "", "  ")
 }
 
@@ -1562,6 +1576,9 @@ func (s *Service) importDatabaseBytesReserved(data []byte, reservation *config.M
 			if err := tx.Recordings().Create(ctx, &recording); err != nil {
 				return fmt.Errorf("restore recording %s: %w", recording.ID, err)
 			}
+		}
+		if err := restore.RestoreRecordingPlaybackPositions(tx, export.RecordingPlaybackPositions); err != nil {
+			return fmt.Errorf("restore recording playback positions: %w", err)
 		}
 		return nil
 	}()

@@ -200,6 +200,10 @@ func (s *Service) createScopedWithResource(accountID string, isMaster bool, user
 
 // RevokeAllForClient invalidates every session issued to a physical app device.
 func (s *Service) RevokeAllForClient(clientID string) int {
+	if s.useDB() {
+		count, _ := s.RevokeAllForClientContext(context.Background(), clientID)
+		return int(count)
+	}
 	clientID = strings.TrimSpace(clientID)
 	if clientID == "" {
 		return 0
@@ -353,6 +357,9 @@ func (s *Service) sessionForValidation(token string) (models.Session, bool, erro
 
 // Revoke invalidates a session by its token.
 func (s *Service) Revoke(token string) error {
+	if s.useDB() {
+		return s.RevokeContext(context.Background(), token)
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 

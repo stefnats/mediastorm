@@ -5,11 +5,13 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"net/http"
 	"sort"
 	"strconv"
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"novastream/config"
 )
 
 // Commit consumes exactly one original prepared intent before acquiring SQL.
@@ -18,67 +20,17 @@ import (
 // inside it. Unknown ACK is terminal and is never retried on another backend.
 func (c *RecordingProgressCore) Commit(i *RecordingProgressIntent) (RecordingProgressResult, error) {
 	var zero RecordingProgressResult
-	if !c.valid() || i == nil || i.state == nil || i.state.self != i || i.state.core != c {
-		return zero, ErrRecordingProgressChanged
-	}
-	s := i.state
-	s.mu.Lock()
-	if s.consumed || s.closing {
-		s.mu.Unlock()
-		return zero, ErrRecordingProgressChanged
-	}
-	s.consumed = true
-	s.operations.Add(1)
-	s.mu.Unlock()
-	defer s.operations.Done()
-	ctx, cancel := context.WithDeadline(s.ctx, s.deadline)
-	defer cancel()
-	current := func() bool {
-		return ctx.Err() == nil && s.ctx.Err() == nil && s.frame.ctx.Err() == nil && s.deadline.After(time.Now()) && c.valid()
-	}
-	if !current() {
-		return zero, ErrRecordingProgressChanged
-	}
-	guard, err := c.state.store.beginSettingsProgressTx(ctx, c.state.coordinator)
+	s, ctx, finish, err := c.beginProgressOperation(i, false)
 	if err != nil {
-		return zero, ErrRecordingProgressUnavailable
-	}
-	defer guard.Close()
-	fence, err := c.state.security.BindPolicy(guard.ctx, s.policy, guard.hold)
-	if err != nil {
-		return zero, ErrRecordingProgressChanged
-	}
-	enforce, err := fence.EnforceProfilePins()
-	if err != nil {
-		return zero, ErrRecordingProgressChanged
-	}
-	if err = lockRecordingProgressAuthority(guard.ctx, guard.tx, s); err != nil {
 		return zero, err
 	}
-	frame, _, err := readPGRequestFrame(guard.ctx, guard.tx, s.original.Token)
-	if err != nil || frame.session != s.original || !sameParentMutationRow(frame.sessionRow, s.frame.sessionRow) || !sameParentMutationRow(frame.actorRow, s.frame.actorRow) {
-		return zero, ErrRecordingProgressChanged
+	defer finish()
+	guard, fence, state, deadline, err := c.lockProgressTransaction(ctx, s)
+	if err != nil {
+		return zero, err
 	}
-	tuple, outcome, accessDeadline, err := readProfilePinAccess(guard.ctx, guard.tx, s.original, s.identity.owner, s.hashes, true)
-	if err != nil || !sameParentModeTuple(tuple, s.tuple) || !progressAdult(tuple) {
-		return zero, ErrRecordingProgressChanged
-	}
-	switch outcome {
-	case ProfilePinNoPin:
-	case ProfilePinUnlocked:
-	case ProfilePinLocked:
-		if enforce {
-			return zero, ErrRecordingProgressLocked
-		}
-	default:
-		return zero, ErrRecordingProgressChanged
-	}
-	deadline := s.deadline
-	if enforce && outcome == ProfilePinUnlocked {
-		deadline = parentMutationMin(deadline, &accessDeadline)
-	}
-	state, err := lockRecordingPlaybackState(guard.ctx, guard.tx, s.identity.recordingID)
-	if err != nil || state.ownerID != s.identity.owner || state.incarnation != s.identity.incarnation.String() || !state.createdAt.Equal(s.identity.createdAt) || !bytes.Equal(state.runID, s.identity.run) || !bytes.Equal(state.receipt, s.identity.receipt) || state.revision != s.command.ExpectedRevision || state.generation != s.command.WriterGeneration {
+	defer guard.Close()
+	if state.revision != s.command.ExpectedRevision || state.generation != s.command.WriterGeneration {
 		return zero, ErrRecordingProgressChanged
 	}
 	catalog, err := readRecordingPlaybackCatalog(guard.ctx, guard.tx)
@@ -97,7 +49,7 @@ func (c *RecordingProgressCore) Commit(i *RecordingProgressIntent) (RecordingPro
 	if err != nil {
 		return zero, ErrRecordingProgressChanged
 	}
-	if !current() || guard.ctx.Err() != nil {
+	if !s.current(ctx) || guard.ctx.Err() != nil {
 		return zero, ErrRecordingProgressChanged
 	}
 	if _, err = fence.EnforceProfilePins(); err != nil {
@@ -117,7 +69,7 @@ func (c *RecordingProgressCore) Commit(i *RecordingProgressIntent) (RecordingPro
 	if err != nil || tag.RowsAffected() != 1 {
 		return zero, ErrRecordingProgressUnavailable
 	}
-	if !current() || guard.ctx.Err() != nil || !deadline.After(time.Now()) {
+	if !s.current(ctx) || guard.ctx.Err() != nil || !deadline.After(time.Now()) {
 		return zero, ErrRecordingProgressChanged
 	}
 	if _, err = fence.EnforceProfilePins(); err != nil {
@@ -129,7 +81,7 @@ func (c *RecordingProgressCore) Commit(i *RecordingProgressIntent) (RecordingPro
 		}
 		return zero, ErrRecordingProgressUnknown
 	}
-	return RecordingProgressResult{RecordingID: s.identity.recordingID, Incarnation: updated.incarnation, ArtifactID: s.observation.ArtifactID, MappingSHA256: s.observation.MappingSHA256, DurationMS: s.observation.DurationMS, PositionMS: position, AtDerivedEnd: position == s.observation.DurationMS, Revision: strconv.FormatInt(updated.revision, 10), WriterGeneration: strconv.FormatInt(updated.generation, 10), OperationID: *updated.operationID}, nil
+	return RecordingProgressResult{ValidUntil: deadline.UTC().Round(0), RecordingID: s.identity.recordingID, Incarnation: updated.incarnation, ArtifactID: s.observation.ArtifactID, MappingSHA256: s.observation.MappingSHA256, DurationMS: s.observation.DurationMS, PositionMS: position, AtDerivedEnd: position == s.observation.DurationMS, Revision: strconv.FormatInt(updated.revision, 10), WriterGeneration: strconv.FormatInt(updated.generation, 10), OperationID: *updated.operationID}, nil
 }
 
 func lockRecordingProgressAuthority(ctx context.Context, tx pgx.Tx, s *recordingProgressIntentState) error {
@@ -195,16 +147,184 @@ func recordingProgressPosition(ctx context.Context, tx pgx.Tx, schema string, s 
 	if s.command.Action == RecordingProgressFromStart {
 		return 0, nil
 	}
-	var incarnation, artifact, mapping, operation string
-	var duration, position, revision, generation int64
-	// Historical descriptor expiry is deliberately not a durable-position TTL.
-	// A NEW intent already carries a currently validated exact observation.
-	query := `SELECT incarnation::text,artifact_id,mapping_sha256,duration_ms,position_ms,revision,writer_generation,operation_id::text FROM ` + pgx.Identifier{schema, "recording_playback_positions"}.Sanitize() + ` WHERE recording_id=$1 FOR UPDATE`
-	if tx.QueryRow(ctx, query, s.identity.recordingID).Scan(&incarnation, &artifact, &mapping, &duration, &position, &revision, &generation, &operation) != nil || state.tombstone || state.operationID == nil || incarnation != state.incarnation || artifact != s.observation.ArtifactID || mapping != s.observation.MappingSHA256 || duration != s.observation.DurationMS || position < 0 || position > duration || revision != state.revision || generation != state.generation || operation != *state.operationID {
+	payload, err := readRecordingProgressPayload(ctx, tx, schema, s.identity.recordingID)
+	if err != nil || !payload.matches(s, state) {
 		return 0, ErrRecordingProgressChanged
 	}
 	if s.command.Action == RecordingProgressTouch {
 		return s.command.PositionMS, nil
 	}
-	return position, nil
+	return payload.position, nil
+}
+
+func (s *recordingProgressIntentState) current(ctx context.Context) bool {
+	return ctx.Err() == nil && s.ctx.Err() == nil && s.frame.ctx.Err() == nil && s.deadline.After(time.Now()) && s.core.valid()
+}
+
+func (c *RecordingProgressCore) beginProgressOperation(i *RecordingProgressIntent, reader bool) (*recordingProgressIntentState, context.Context, func(), error) {
+	if !c.valid() || i == nil || i.state == nil || i.state.self != i || i.state.core != c || i.state.reader != reader {
+		return nil, nil, nil, ErrRecordingProgressChanged
+	}
+	s := i.state
+	s.mu.Lock()
+	if s.consumed || s.closing {
+		s.mu.Unlock()
+		return nil, nil, nil, ErrRecordingProgressChanged
+	}
+	s.consumed = true
+	s.operations.Add(1)
+	s.mu.Unlock()
+	ctx, cancel := context.WithDeadline(s.ctx, s.deadline)
+	finish := func() { cancel(); s.operations.Done() }
+	if !s.current(ctx) {
+		finish()
+		return nil, nil, nil, ErrRecordingProgressChanged
+	}
+	return s, ctx, finish, nil
+}
+
+// Shared original authority and lock order, independent of caller CAS data.
+func (c *RecordingProgressCore) lockProgressTransaction(ctx context.Context, s *recordingProgressIntentState) (*settingsProgressTx, *config.SecurityPolicyFence, *recordingPlaybackState, time.Time, error) {
+	guard, err := c.state.store.beginSettingsProgressTx(ctx, c.state.coordinator)
+	if err != nil {
+		return nil, nil, nil, time.Time{}, ErrRecordingProgressUnavailable
+	}
+	fail := func(err error) (*settingsProgressTx, *config.SecurityPolicyFence, *recordingPlaybackState, time.Time, error) {
+		_ = guard.Close()
+		return nil, nil, nil, time.Time{}, err
+	}
+	fence, err := c.state.security.BindPolicy(guard.ctx, s.policy, guard.hold)
+	if err != nil {
+		return fail(ErrRecordingProgressChanged)
+	}
+	enforce, err := fence.EnforceProfilePins()
+	if err != nil {
+		return fail(ErrRecordingProgressChanged)
+	}
+	if err = lockRecordingProgressAuthority(guard.ctx, guard.tx, s); err != nil {
+		return fail(err)
+	}
+	frame, _, err := readPGRequestFrame(guard.ctx, guard.tx, s.original.Token)
+	if err != nil || frame.session != s.original || !sameParentMutationRow(frame.sessionRow, s.frame.sessionRow) || !sameParentMutationRow(frame.actorRow, s.frame.actorRow) {
+		return fail(ErrRecordingProgressChanged)
+	}
+	tuple, outcome, accessDeadline, err := readProfilePinAccess(guard.ctx, guard.tx, s.original, s.identity.owner, s.hashes, true)
+	if err != nil || !sameParentModeTuple(tuple, s.tuple) || !progressAdult(tuple) {
+		return fail(ErrRecordingProgressChanged)
+	}
+	switch outcome {
+	case ProfilePinNoPin:
+	case ProfilePinUnlocked:
+	case ProfilePinLocked:
+		if enforce {
+			return fail(ErrRecordingProgressLocked)
+		}
+	default:
+		return fail(ErrRecordingProgressChanged)
+	}
+	deadline := s.deadline
+	if enforce && outcome == ProfilePinUnlocked {
+		deadline = parentMutationMin(deadline, &accessDeadline)
+	}
+	state, err := lockRecordingPlaybackState(guard.ctx, guard.tx, s.identity.recordingID)
+	if err != nil || state.ownerID != s.identity.owner || state.incarnation != s.identity.incarnation.String() || !state.createdAt.Equal(s.identity.createdAt) || !bytes.Equal(state.runID, s.identity.run) || !bytes.Equal(state.receipt, s.identity.receipt) {
+		return fail(ErrRecordingProgressChanged)
+	}
+	return guard, fence, state, deadline, nil
+}
+
+type recordingProgressPayload struct {
+	incarnation, artifact, mapping, operation string
+	duration, position, revision, generation  int64
+}
+
+func readRecordingProgressPayload(ctx context.Context, tx pgx.Tx, schema, id string) (*recordingProgressPayload, error) {
+	var p recordingProgressPayload
+	query := `SELECT incarnation::text,artifact_id,mapping_sha256,duration_ms,position_ms,revision,writer_generation,operation_id::text FROM ` + pgx.Identifier{schema, "recording_playback_positions"}.Sanitize() + ` WHERE recording_id=$1 FOR UPDATE`
+	err := tx.QueryRow(ctx, query, id).Scan(&p.incarnation, &p.artifact, &p.mapping, &p.duration, &p.position, &p.revision, &p.generation, &p.operation)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, ErrRecordingProgressUnavailable
+	}
+	return &p, nil
+}
+func (p *recordingProgressPayload) matches(s *recordingProgressIntentState, state *recordingPlaybackState) bool {
+	return p != nil && !state.tombstone && state.operationID != nil && p.incarnation == state.incarnation && p.artifact == s.observation.ArtifactID && p.mapping == s.observation.MappingSHA256 && p.duration == s.observation.DurationMS && p.position >= 0 && p.position <= p.duration && p.revision == state.revision && p.generation == state.generation && p.operation == *state.operationID
+}
+
+// ReadSnapshot returns DATA after the original transaction has acknowledged
+// ROLLBACK and all owned cleanup has joined. It never claims/touches progress.
+// A trusted future attachment still must supply genuine current GetDerived.
+func (c *RecordingProgressCore) ReadSnapshot(r *http.Request, identity RecordingTimelineIdentity, observation RecordingProgressObservation) (RecordingProgressSnapshot, error) {
+	var zero RecordingProgressSnapshot
+	i, err := c.prepareOriginal(r, identity, observation, nil)
+	if err != nil {
+		return zero, err
+	}
+	defer i.Close()
+	value, deadline, err := c.readSnapshotIntent(i)
+	// readSnapshotIntent has ended its active operation before this Close.
+	i.Close()
+	if err != nil {
+		return zero, err
+	}
+	// Own guard/intent contexts were intentionally canceled by cleanup. Only
+	// ORIGINAL request/frame signals and original effective deadlines apply now.
+	if r.Context().Err() != nil || i.state.frame.ctx.Err() != nil || !deadline.After(time.Now()) || !c.valid() {
+		return zero, ErrRecordingProgressChanged
+	}
+	return value, nil
+}
+
+func (c *RecordingProgressCore) readSnapshotIntent(i *RecordingProgressIntent) (RecordingProgressSnapshot, time.Time, error) {
+	var zero RecordingProgressSnapshot
+	s, ctx, finish, err := c.beginProgressOperation(i, true)
+	if err != nil {
+		return zero, time.Time{}, err
+	}
+	defer finish()
+	guard, fence, state, deadline, err := c.lockProgressTransaction(ctx, s)
+	if err != nil {
+		return zero, time.Time{}, err
+	}
+	defer guard.Close()
+	catalog, err := readRecordingPlaybackCatalog(guard.ctx, guard.tx)
+	if err != nil {
+		return zero, deadline, ErrRecordingProgressUnavailable
+	}
+	payload, err := readRecordingProgressPayload(guard.ctx, guard.tx, catalog.schema, s.identity.recordingID)
+	if err != nil {
+		return zero, deadline, err
+	}
+	value := RecordingProgressSnapshot{ValidUntil: deadline.UTC().Round(0), RecordingID: s.identity.recordingID, Incarnation: state.incarnation, ArtifactID: s.observation.ArtifactID, MappingSHA256: s.observation.MappingSHA256, DurationMS: s.observation.DurationMS, Revision: strconv.FormatInt(state.revision, 10), WriterGeneration: strconv.FormatInt(state.generation, 10), PositionState: "none"}
+	if payload != nil {
+		value.PositionState = "conflict"
+		if payload.matches(s, state) {
+			value.PositionState = "matching"
+			position := payload.position
+			end := position == s.observation.DurationMS
+			value.PositionMS = &position
+			value.AtDerivedEnd = &end
+		}
+	}
+	var databaseNow time.Time
+	if guard.tx.QueryRow(guard.ctx, `SELECT clock_timestamp()`).Scan(&databaseNow) != nil || !deadline.After(databaseNow) || !s.current(guard.ctx) {
+		return zero, deadline, ErrRecordingProgressChanged
+	}
+	if _, err = fence.EnforceProfilePins(); err != nil {
+		return zero, deadline, ErrRecordingProgressChanged
+	}
+	// Existing epoch locks may INSERT missing zero rows. Always roll this
+	// transaction back, including success: no durable auth/CAS/payload mutation.
+	// A failed/lost ACK or ErrTxClosed is not a successful read publication.
+	cleanup, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	rollbackErr := guard.tx.Rollback(cleanup)
+	cancel()
+	closeErr := guard.Close()
+	if rollbackErr != nil || closeErr != nil {
+		return zero, deadline, ErrRecordingProgressUnavailable
+	}
+	return value, deadline, nil
 }

@@ -52,16 +52,35 @@ type RecordingProgressCommand struct {
 // chunk is not a programme-completion or watched assertion. Decimal strings
 // preserve counters for consumers whose numbers cannot represent int64 exactly.
 type RecordingProgressResult struct {
-	RecordingID      string `json:"recordingId"`
-	Incarnation      string `json:"incarnation"`
-	ArtifactID       string `json:"artifactId"`
-	MappingSHA256    string `json:"mappingSha256"`
-	DurationMS       int64  `json:"durationMs"`
-	PositionMS       int64  `json:"positionMs"`
-	AtDerivedEnd     bool   `json:"atDerivedEnd"`
-	Revision         string `json:"revision"`
-	WriterGeneration string `json:"writerGeneration"`
-	OperationID      string `json:"operationId"`
+	// ValidUntil is original effective transaction-deadline DATA, not permission.
+	ValidUntil       time.Time `json:"validUntil"`
+	RecordingID      string    `json:"recordingId"`
+	Incarnation      string    `json:"incarnation"`
+	ArtifactID       string    `json:"artifactId"`
+	MappingSHA256    string    `json:"mappingSha256"`
+	DurationMS       int64     `json:"durationMs"`
+	PositionMS       int64     `json:"positionMs"`
+	AtDerivedEnd     bool      `json:"atDerivedEnd"`
+	Revision         string    `json:"revision"`
+	WriterGeneration string    `json:"writerGeneration"`
+	OperationID      string    `json:"operationId"`
+}
+
+// RecordingProgressSnapshot is observed DATA. Actual zero CAS counters are
+// distinct from a missing state row; an absent position is never default zero.
+type RecordingProgressSnapshot struct {
+	// ValidUntil is original effective transaction-deadline DATA, not permission.
+	ValidUntil       time.Time `json:"validUntil"`
+	RecordingID      string    `json:"recordingId"`
+	Incarnation      string    `json:"incarnation"`
+	ArtifactID       string    `json:"artifactId"`
+	MappingSHA256    string    `json:"mappingSha256"`
+	DurationMS       int64     `json:"durationMs"`
+	Revision         string    `json:"revision"`
+	WriterGeneration string    `json:"writerGeneration"`
+	PositionState    string    `json:"positionState"`
+	PositionMS       *int64    `json:"positionMs,omitempty"`
+	AtDerivedEnd     *bool     `json:"atDerivedEnd,omitempty"`
 }
 
 type RecordingProgressCore struct{ state *recordingProgressCoreState }
@@ -123,6 +142,7 @@ type recordingProgressIntentState struct {
 	identity          RecordingTimelineIdentity
 	observation       RecordingProgressObservation
 	command           RecordingProgressCommand
+	reader            bool
 	tuple             profilePinAccessTuple
 	hashes            []string
 	policy            *config.SecurityPolicyObservation
@@ -154,10 +174,13 @@ func progressHex(value string, size int) bool {
 	return err == nil
 }
 func validProgressData(o RecordingProgressObservation, command RecordingProgressCommand, at time.Time) bool {
-	return progressHex(o.ArtifactID, 32) && progressHex(o.MappingSHA256, 64) && o.DurationMS > 0 && o.DurationMS <= 43200000 &&
-		!o.ObservedAt.IsZero() && !o.ObservedAt.After(at) && o.ExpiresAt.After(at) && o.ExpiresAt.After(o.ObservedAt) && !o.ExpiresAt.After(o.ObservedAt.Add(24*time.Hour)) &&
+	return validProgressObservation(o, at) &&
 		command.ExpectedRevision >= 0 && command.WriterGeneration >= 0 && command.PositionMS >= 0 && command.PositionMS <= o.DurationMS &&
 		(command.Action == RecordingProgressTouch || (command.Action == RecordingProgressFromStart || command.Action == RecordingProgressResume) && command.PositionMS == 0)
+}
+
+func validProgressObservation(o RecordingProgressObservation, at time.Time) bool {
+	return progressHex(o.ArtifactID, 32) && progressHex(o.MappingSHA256, 64) && o.DurationMS > 0 && o.DurationMS <= 43200000 && !o.ObservedAt.IsZero() && !o.ObservedAt.After(at) && o.ExpiresAt.After(at) && o.ExpiresAt.After(o.ObservedAt) && !o.ExpiresAt.After(o.ObservedAt.Add(24*time.Hour))
 }
 
 func progressAdult(tuple profilePinAccessTuple) bool {
@@ -215,7 +238,20 @@ func progressBaseExpiry(tuple profilePinAccessTuple, original models.Session, de
 // independent HTTP authority, accept a viewer selector, or prepare media. The
 // caller must Close even a consumed intent, after its actual work is complete.
 func (c *RecordingProgressCore) Prepare(r *http.Request, identity RecordingTimelineIdentity, observation RecordingProgressObservation, command RecordingProgressCommand) (*RecordingProgressIntent, error) {
-	if !c.valid() || r == nil || r.URL == nil || r.Method != http.MethodPost || r.URL.RawQuery != "" || len(r.URL.EscapedPath()) > 4096 || !validProgressData(observation, command, time.Now()) || identity.incarnation.String() == "00000000-0000-0000-0000-000000000000" || !parentMutationID(identity.owner) || identity.recordingID == "" || len(identity.recordingID) > 128 {
+	if !validProgressData(observation, command, time.Now()) {
+		return nil, ErrRecordingProgressChanged
+	}
+	return c.prepareOriginal(r, identity, observation, &command)
+}
+
+// Only the fixed GET snapshot entry supplies nil. It neither fabricates a
+// zero-count write command nor publishes a reader intent to callers.
+func (c *RecordingProgressCore) prepareOriginal(r *http.Request, identity RecordingTimelineIdentity, observation RecordingProgressObservation, command *RecordingProgressCommand) (*RecordingProgressIntent, error) {
+	method := http.MethodPost
+	if command == nil {
+		method = http.MethodGet
+	}
+	if !c.valid() || r == nil || r.URL == nil || r.Method != method || r.URL.RawQuery != "" || len(r.URL.EscapedPath()) > 4096 || !validProgressObservation(observation, time.Now()) || identity.incarnation.String() == "00000000-0000-0000-0000-000000000000" || !parentMutationID(identity.owner) || identity.recordingID == "" || len(identity.recordingID) > 128 {
 		return nil, ErrRecordingProgressChanged
 	}
 	frame, _ := r.Context().Value(pgRequestFrameKey{}).(*pgRequestFrame)
@@ -252,7 +288,10 @@ func (c *RecordingProgressCore) Prepare(r *http.Request, identity RecordingTimel
 		deadline = parentMutationMin(deadline, &at)
 	}
 	ctx, cancel := context.WithDeadline(r.Context(), deadline)
-	s := &recordingProgressIntentState{core: c, frame: frame, original: original, identity: identity, observation: observation, command: command, hashes: hashes, ctx: ctx, cancel: cancel, deadline: deadline, frameDone: make(chan struct{}), done: make(chan struct{})}
+	s := &recordingProgressIntentState{core: c, frame: frame, original: original, identity: identity, observation: observation, reader: command == nil, hashes: hashes, ctx: ctx, cancel: cancel, deadline: deadline, frameDone: make(chan struct{}), done: make(chan struct{})}
+	if command != nil {
+		s.command = *command
+	}
 	v := &RecordingProgressIntent{state: s}
 	s.self = v
 	s.frameStop = context.AfterFunc(frame.ctx, func() { cancel(); close(s.frameDone) })
