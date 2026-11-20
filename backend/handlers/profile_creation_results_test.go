@@ -167,7 +167,7 @@ func profileCreationResultsOpenAPIContract(t *testing.T, v *openapi.Validator) {
 	handler := NewUsersHandler(nil)
 	locator := "pcr_" + strings.Repeat("1", 64)
 	for _, prefix := range []string{"/admin", "/account"} {
-		create := contractCall{method: http.MethodPost, target: prefix + "/api/profiles", body: map[string]any{"name": "Synthetic unavailable contract child", "isKidsProfile": true}}
+		create := contractCall{method: http.MethodPost, target: prefix + "/api/profiles", headers: map[string]string{"Origin": "http://example.com", "Sec-Fetch-Site": "same-origin"}, body: map[string]any{"name": "Synthetic unavailable contract child", "isKidsProfile": true}}
 		response := exercise(t, v, create, func(w http.ResponseWriter, r *http.Request) { handler.CreateProfileManagement(w, r, nil) }, 503)
 		if got := decodeContract[struct {
 			Code string `json:"code"`

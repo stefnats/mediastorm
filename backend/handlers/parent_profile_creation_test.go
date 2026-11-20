@@ -191,6 +191,7 @@ func TestParentProfileCreationCookieExistingBodyOriginAndParentRefusals(t *testi
 		})
 	}
 	for _, prefix := range []string{"/account", "/admin"} {
+		f := creationCookieFixture(t, false)
 		for _, originCase := range []struct {
 			name    string
 			origins []string
@@ -209,8 +210,7 @@ func TestParentProfileCreationCookieExistingBodyOriginAndParentRefusals(t *testi
 			{"duplicate origin", []string{"http://synthetic.test", "http://synthetic.test"}, []string{"same-origin"}},
 			{"duplicate site", []string{"http://synthetic.test"}, []string{"same-origin", "same-origin"}},
 		} {
-			f := creationCookieFixture(t, false)
-			body := `{"name":"Origin-bound child","isKidsProfile":true}`
+			body := fmt.Sprintf(`{"name":"Origin-bound child %s","isKidsProfile":true}`, originCase.name)
 			intent := creationCookieChallenge(t, f, prefix, body)
 			before := creationCookieRows(t, f)
 			r := creationCookieRequest(f, prefix, body, intent, "synthetic-parent-password")
