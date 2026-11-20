@@ -36,6 +36,7 @@ import (
 	"novastream/internal/mediaidentity"
 	"novastream/internal/pool"
 	"novastream/internal/requestsecurity"
+	"novastream/internal/settingsbootstrap"
 	"novastream/internal/slogutil"
 	internalusenet "novastream/internal/usenet"
 	"novastream/internal/webdav"
@@ -154,13 +155,18 @@ func main() {
 
 	// Init config manager and load settings (creates defaults if missing)
 	cfgManager := config.NewManager(configPath)
-	settings, err := cfgManager.Load()
+	managedStartup, err := settingsbootstrap.Begin(context.Background(), cfgManager, os.Getenv("DATABASE_URL"))
+	if err != nil {
+		log.Fatalf("failed to coordinate settings startup: %v", err)
+	}
+	defer managedStartup.Close()
+	settings, err := managedStartup.Load()
 	if err != nil {
 		log.Fatalf("failed to load settings: %v", err)
 	}
 	applyRuntimeOverrides(&settings)
 	if config.MigrateGlobalLiveProxyToDefaultSource(&settings) {
-		if err := cfgManager.Save(settings); err != nil {
+		if err := managedStartup.Save(settings); err != nil {
 			log.Printf("warning: failed to persist global Live TV proxy migration: %v", err)
 		}
 	}
@@ -202,43 +208,36 @@ func main() {
 		dbURL = settings.Database.URL
 	}
 	if dbURL != "" {
-		var dsOpts []datastore.Option
-		if settings.Database.MaxOpenConns > 0 {
-			dsOpts = append(dsOpts, datastore.WithMaxConns(settings.Database.MaxOpenConns))
-		}
-		if settings.Database.MaxIdleConns > 0 {
-			dsOpts = append(dsOpts, datastore.WithMinConns(settings.Database.MaxIdleConns))
-		}
-		if settings.Database.ConnMaxLifetimeMinutes > 0 {
-			dsOpts = append(dsOpts, datastore.WithMaxConnLifetime(time.Duration(settings.Database.ConnMaxLifetimeMinutes)*time.Minute))
-		}
+
 		var dsErr error
-		store, dsErr = datastore.New(context.Background(), dbURL, dsOpts...)
+		store, dsErr = managedStartup.Migrate(context.Background())
 		if dsErr != nil {
 			log.Fatalf("failed to initialize PostgreSQL datastore: %v", dsErr)
 		}
-		defer store.Close()
-		mappingCtx, stopMappings := context.WithCancel(context.Background())
-		defer stopMappings()
-		mappingService := mediaidentity.NewEpisodeMappingService(store.EpisodeMappings(), nil)
-		mediaidentity.SetEpisodeMappingService(mappingService)
-		go mappingService.Run(mappingCtx)
 
 		fmt.Println("🐘 PostgreSQL datastore initialized")
 		log.Printf("[startup] phase=datastore-connect-and-schema-migrations duration=%s", time.Since(startupPhaseStarted))
 		startupPhaseStarted = time.Now()
 
 		// Run one-time JSON→PostgreSQL migration for existing users
-		if migrateErr := datastore.MigrateFromJSON(context.Background(), store, settings.Cache.Directory); migrateErr != nil {
+		if migrateErr := managedStartup.MigrateFromJSON(context.Background(), settings.Cache.Directory); migrateErr != nil {
 			log.Printf("Warning: JSON migration encountered errors: %v", migrateErr)
 		}
 		log.Printf("[startup] phase=legacy-json-migrations duration=%s", time.Since(startupPhaseStarted))
 		startupPhaseStarted = time.Now()
-		if migrateErr := datastore.RunDataMigrations(context.Background(), store); migrateErr != nil {
+		if migrateErr := managedStartup.RunDataMigrations(context.Background()); migrateErr != nil {
 			log.Printf("Warning: datastore data migration encountered errors: %v", migrateErr)
 		}
 		log.Printf("[startup] phase=data-migration-recheck duration=%s", time.Since(startupPhaseStarted))
 		startupPhaseStarted = time.Now()
+		if err := managedStartup.Finish(); err != nil {
+			log.Fatalf("failed to finish settings startup: %v", err)
+		}
+		mappingCtx, stopMappings := context.WithCancel(context.Background())
+		defer stopMappings()
+		mappingService := mediaidentity.NewEpisodeMappingService(store.EpisodeMappings(), nil)
+		mediaidentity.SetEpisodeMappingService(mappingService)
+		go mappingService.Run(mappingCtx)
 	} else {
 		fmt.Println("")
 		fmt.Println("╔══════════════════════════════════════════════════════════════════════╗")

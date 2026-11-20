@@ -456,7 +456,12 @@ func (s *Service) RestoreBackup(filename string) error {
 		return errors.New("backup not found")
 	}
 
-	return s.restoreBackupFile(backupPath, filename)
+	reservation, err := s.reserveRestore()
+	if err != nil {
+		return err
+	}
+	defer reservation.Close()
+	return s.restoreBackupFileReserved(backupPath, filename, reservation)
 }
 
 // RestoreBackupUpload restores a backup supplied by the caller without adding it
@@ -473,6 +478,11 @@ func (s *Service) RestoreBackupUpload(reader io.Reader, sourceName string) error
 		return errors.New("backup file must be a ZIP archive")
 	}
 
+	reservation, reserveErr := s.reserveRestore()
+	if reserveErr != nil {
+		return reserveErr
+	}
+	defer reservation.Close()
 	tmpFile, err := os.CreateTemp(s.backupDir, ".restore-upload-*.zip")
 	if err != nil {
 		return fmt.Errorf("stage uploaded backup: %w", err)
@@ -488,10 +498,30 @@ func (s *Service) RestoreBackupUpload(reader io.Reader, sourceName string) error
 		return fmt.Errorf("stage uploaded backup: %w", err)
 	}
 
-	return s.restoreBackupFile(tmpPath, filepath.Base(sourceName))
+	return s.restoreBackupFileReserved(tmpPath, filepath.Base(sourceName), reservation)
+}
+
+func (s *Service) reserveRestore() (*config.ManagedWriteReservation, error) {
+	manager := s.configManager
+	if manager == nil {
+		manager = config.NewManager(s.sourcePath("settings.json"))
+	}
+	if s.store != nil {
+		return config.ReserveStoreReplacement(manager, s.store.Pool())
+	}
+	return config.BeginManagedReplacement(manager)
 }
 
 func (s *Service) restoreBackupFile(backupPath, sourceName string) error {
+	reservation, err := s.reserveRestore()
+	if err != nil {
+		return err
+	}
+	defer reservation.Close()
+	return s.restoreBackupFileReserved(backupPath, sourceName, reservation)
+}
+
+func (s *Service) restoreBackupFileReserved(backupPath, sourceName string, reservation *config.ManagedWriteReservation) error {
 	if !s.useDB() {
 		unlock := reminders.LockFileRestore()
 		defer unlock()
@@ -510,6 +540,32 @@ func (s *Service) restoreBackupFile(backupPath, sourceName string) error {
 		return fmt.Errorf("open backup: %w", err)
 	}
 	defer reader.Close()
+	// Reject an effective active-store switch before the original DB import.
+	for _, file := range reader.File {
+		if file.Name != "settings.json" {
+			continue
+		}
+		if file.UncompressedSize64 > 4<<20 {
+			return config.ErrSecurityCoordinator
+		}
+		input, err := file.Open()
+		if err != nil {
+			return err
+		}
+		raw, readErr := io.ReadAll(io.LimitReader(input, (4<<20)+1))
+		closeErr := input.Close()
+		if readErr != nil {
+			return readErr
+		}
+		if closeErr != nil {
+			return closeErr
+		}
+		err = reservation.ValidateReplacement(raw, s.sourcePath("settings.json"))
+		clear(raw)
+		if err != nil {
+			return err
+		}
+	}
 
 	// In DB mode, restore database.json before mutating file-based settings.
 	// This avoids reporting a failed restore after settings have already changed.
@@ -523,7 +579,7 @@ func (s *Service) restoreBackupFile(backupPath, sourceName string) error {
 			if !ok {
 				return fmt.Errorf("database.json missing from manifest")
 			}
-			checksum, err := s.importDatabaseFromZip(file)
+			checksum, err := s.importDatabaseFromZipReserved(file, reservation)
 			if err != nil {
 				return fmt.Errorf("restore database: %w", err)
 			}
@@ -603,7 +659,7 @@ func (s *Service) restoreBackupFile(backupPath, sourceName string) error {
 		// Atomic rename
 		var replaceErr error
 		if file.Name == "settings.json" {
-			replaceErr = config.ReplaceManagedSettingsFile(tmpPath, destPath)
+			replaceErr = reservation.Replace(tmpPath, destPath)
 		} else {
 			replaceErr = os.Rename(tmpPath, destPath)
 		}
@@ -1183,6 +1239,14 @@ func (s *Service) exportDatabaseBytes() ([]byte, error) {
 
 // importDatabaseBytes parses JSON data and restores all tables in a transaction.
 func (s *Service) importDatabaseBytes(data []byte) error {
+	reservation, err := s.reserveRestore()
+	if err != nil {
+		return err
+	}
+	defer reservation.Close()
+	return s.importDatabaseBytesReserved(data, reservation)
+}
+func (s *Service) importDatabaseBytesReserved(data []byte, reservation *config.ManagedWriteReservation) error {
 	export, err := decodeDatabaseExport(data)
 	if err != nil {
 		return fmt.Errorf("unmarshal database export: %w", err)
@@ -1206,7 +1270,22 @@ func (s *Service) importDatabaseBytes(data []byte) error {
 			break
 		}
 	}
-	err = s.store.WithTx(ctx, func(tx *datastore.Tx) error {
+	guard, err := reservation.StoreMutationGuard(s.store.Pool())
+	if err != nil {
+		return err
+	}
+	restore, err := s.store.BeginSettingsRestore(ctx, guard)
+	if err != nil {
+		return err
+	}
+	defer restore.Close()
+	tx, finishRepositories, err := restore.Repositories()
+	if err != nil {
+		return err
+	}
+	ctx = restore.Context()
+	err = func() error {
+		defer finishRepositories()
 		if err := tx.LockRemindersForRestore(ctx); err != nil {
 			return err
 		}
@@ -1485,7 +1564,10 @@ func (s *Service) importDatabaseBytes(data []byte) error {
 			}
 		}
 		return nil
-	})
+	}()
+	if err == nil {
+		err = restore.Commit()
+	}
 	if err != nil {
 		return fmt.Errorf("database restore transaction: %w", err)
 	}
@@ -1562,6 +1644,14 @@ func (s *Service) exportDatabaseToZip(zipWriter *zip.Writer) (string, error) {
 
 // importDatabaseFromZip reads database.json from the ZIP and restores all tables.
 func (s *Service) importDatabaseFromZip(file *zip.File) (string, error) {
+	reservation, err := s.reserveRestore()
+	if err != nil {
+		return "", err
+	}
+	defer reservation.Close()
+	return s.importDatabaseFromZipReserved(file, reservation)
+}
+func (s *Service) importDatabaseFromZipReserved(file *zip.File, reservation *config.ManagedWriteReservation) (string, error) {
 	rc, err := file.Open()
 	if err != nil {
 		return "", fmt.Errorf("open database.json: %w", err)
@@ -1577,7 +1667,7 @@ func (s *Service) importDatabaseFromZip(file *zip.File) (string, error) {
 	hasher.Write(data)
 	checksum := hex.EncodeToString(hasher.Sum(nil))
 
-	if err := s.importDatabaseBytes(data); err != nil {
+	if err := s.importDatabaseBytesReserved(data, reservation); err != nil {
 		return "", err
 	}
 	return checksum, nil

@@ -2416,15 +2416,23 @@ func (m *Manager) EnsureDir() error {
 }
 
 // Load reads settings.json from disk or creates defaults if missing.
-func (m *Manager) Load() (Settings, error) {
+func (m *Manager) Load() (Settings, error) { return m.loadWithReservation(nil) }
+
+func (m *Manager) loadWithReservation(reservation *ManagedWriteReservation) (Settings, error) {
 	if m.path == "" {
 		return Settings{}, errors.New("config path not set")
 	}
 	if _, err := os.Stat(m.path); errors.Is(err, fs.ErrNotExist) {
 		// create with defaults
 		defaults := DefaultSettings()
-		if err := m.Save(defaults); err != nil {
-			return Settings{}, err
+		var saveErr error
+		if reservation != nil {
+			saveErr = reservation.Save(m, defaults)
+		} else {
+			saveErr = m.Save(defaults)
+		}
+		if saveErr != nil {
+			return Settings{}, saveErr
 		}
 		return defaults, nil
 	}
@@ -3359,11 +3367,20 @@ func isZeroRawValue(value interface{}) bool {
 
 // Save writes the provided settings to disk atomically.
 func (m *Manager) Save(s Settings) error {
-	finishMutation := beginManagedConfigMutation()
-	defer finishMutation()
-	if m.path == "" {
-		return errors.New("config path not set")
+	beginSettingsAttempt()
+	owned, err := preflightSettings(m, s)
+	if err != nil {
+		return err
 	}
+	reservation, err := beginManagedWrite(m, &owned)
+	if err != nil {
+		return err
+	}
+	defer reservation.Close()
+	return m.savePrepared(owned, reservation)
+}
+
+func normalizeSettingsForSave(s *Settings) error {
 	s.Metadata.NormalizeAISettings()
 	s.Metadata.NormalizeLanguages()
 	s.Playback.NormalizeAllowedTrackLanguages()
@@ -3382,8 +3399,21 @@ func (m *Manager) Save(s Settings) error {
 	if s.Playback.Thumbnails.Workers < 1 {
 		s.Playback.Thumbnails.Workers = 1
 	}
-	if err := m.EnsureDir(); err != nil {
-		return err
+	return nil
+}
+
+// The accepted payload is normalized exactly once on its owned copy. The
+// historic EnsureDir/tmp/encode/Sync/Close/Rename body stays here.
+func (m *Manager) savePrepared(s Settings, reservation *ManagedWriteReservation) error {
+	if reservation.current() != nil {
+		return ErrSecurityCoordinator
+	}
+	finishMutation := beginManagedConfigMutation()
+	defer finishMutation()
+	if !reservation.ensured {
+		if err := m.EnsureDir(); err != nil {
+			return err
+		}
 	}
 	tmp := m.path + ".tmp"
 	f, err := os.Create(tmp)
@@ -3405,6 +3435,14 @@ func (m *Manager) Save(s Settings) error {
 	if err := f.Close(); err != nil {
 		_ = os.Remove(tmp)
 		return err
+	}
+	if reservation.current() != nil {
+		_ = os.Remove(tmp)
+		return ErrSecurityCoordinator
+	}
+	if reservation.coordinator != nil && reservation.coordinator.Protected(m.path) {
+		_ = os.Remove(tmp)
+		return ErrSecurityCoordinator
 	}
 	return os.Rename(tmp, m.path)
 }

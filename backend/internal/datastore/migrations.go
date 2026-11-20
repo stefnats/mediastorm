@@ -28,9 +28,14 @@ type dataMigrationMarkerStore interface {
 	QueryRow(ctx context.Context, sql string, args ...any) pgx.Row
 }
 
-func runMigrations(ctx context.Context, pool *pgxpool.Pool) error {
+func runMigrations(ctx context.Context, pool *pgxpool.Pool) (result error) {
 	// goose needs a *sql.DB, so wrap the pgx pool via stdlib
 	db := stdlib.OpenDBFromPool(pool)
+	defer func() {
+		if err := db.Close(); result == nil && err != nil {
+			result = fmt.Errorf("close migration database: %w", err)
+		}
+	}()
 
 	goose.SetBaseFS(embedMigrations)
 	if err := goose.SetDialect("postgres"); err != nil {
