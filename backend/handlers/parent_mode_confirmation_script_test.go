@@ -33,13 +33,14 @@ func parentModeOpenAPIContract(t *testing.T, v *openapi.Validator) {
 	if _, err = service.SetKidsProfile(profile.ID, true); err != nil {
 		t.Fatal(err)
 	}
-	handler := NewUsersHandler(service)
+	handler := NewUsersHandler(service, parentLegacyContractAccounts(t))
 	for _, prefix := range []string{"/api", "/admin/api", "/account/api"} {
 		for _, mode := range []string{"", "rating", "content_list"} {
 			exercise(t, v, contractCall{
 				method: "PUT", target: prefix + "/users/" + profile.ID + "/kids/mode",
 				vars: map[string]string{"userID": profile.ID}, master: true,
-				body: map[string]string{"mode": mode},
+				headers: map[string]string{"X-Account-Password": parentLegacyFixturePassword},
+				body:    map[string]string{"mode": mode},
 			}, handler.SetKidsMode, 200)
 		}
 	}

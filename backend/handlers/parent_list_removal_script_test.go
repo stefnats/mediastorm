@@ -31,13 +31,13 @@ func parentListRemovalOpenAPIContract(t *testing.T, v *openapi.Validator) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	handler := NewUsersHandler(service)
+	handler := NewUsersHandler(service, parentLegacyContractAccounts(t))
 	identity := "https://mdblist.com/lists/synthetic/quote-'\"-雪?encoded=%2F&literal=+"
 	for _, prefix := range []string{"/api", "/admin/api", "/account/api"} {
 		if _, err = service.SetKidsAllowedLists(profile.ID, []string{identity, "keep", identity}); err != nil {
 			t.Fatal(err)
 		}
-		call := contractCall{method: "DELETE", target: prefix + "/users/" + profile.ID + "/kids/lists?url=" + url.QueryEscape(identity), vars: map[string]string{"userID": profile.ID}, master: true}
+		call := contractCall{method: "DELETE", target: prefix + "/users/" + profile.ID + "/kids/lists?url=" + url.QueryEscape(identity), vars: map[string]string{"userID": profile.ID}, master: true, headers: map[string]string{"X-Account-Password": parentLegacyFixturePassword}}
 		exercise(t, v, call, handler.RemoveKidsAllowedList, 200)
 		// Preserve the existing successful originally-absent identity contract.
 		exercise(t, v, call, handler.RemoveKidsAllowedList, 200)

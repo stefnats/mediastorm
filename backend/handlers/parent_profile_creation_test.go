@@ -154,9 +154,11 @@ func TestParentProfileCreationCookieExistingBodyOriginAndParentRefusals(t *testi
 				body = `{"name":"Child","isKidsProfile":true,"padding":"` + strings.Repeat("x", 17000) + `"}`
 			}
 			token := profileunlock.ParentProfileCreationChallengeBundle{}
-			password := ""
-			if kind == "wrong password" {
+			password := "synthetic-parent-password"
+			if kind == "wrong password" || kind == "wrong origin" || kind == "cross-site" || kind == "no cookie" {
 				token = creationCookieChallenge(t, f, "/account", body)
+			}
+			if kind == "wrong password" {
 				password = "incorrect synthetic password"
 			}
 			r := creationCookieRequest(f, "/account", body, token, password)
@@ -190,16 +192,19 @@ func TestParentProfileCreationCookieAdultAndJSONRemainLegacy(t *testing.T) {
 	for _, pg := range []bool{true, false} {
 		t.Run(fmt.Sprintf("pg=%t", pg), func(t *testing.T) {
 			f := creationCookieFixture(t, true)
-			password := ""
+			password := "synthetic-parent-password"
 			if !pg {
 				f.admin.SetPGProfilePins(nil)
 				f.shared.SetPGProfilePins(nil)
-				// This PG fixture promotes the Account but keeps the original
-				// persisted non-master Session. Legacy auth retains that Session
-				// role, so its old Guard requires the actual account password.
-				password = "synthetic-parent-password"
 			}
 			body := `{"name":"Legacy adult","accountId":"actor","isKidsProfile":false}`
+			before := creationCookieRows(t, f)
+			for _, missingOrWrong := range []string{"", "synthetic-wrong-parent-password"} {
+				denied := creationCookieCall(f, "/admin", body, profileunlock.ParentProfileCreationChallengeBundle{}, missingOrWrong)
+				if denied.Code != http.StatusForbidden || !bytes.Equal(before, creationCookieRows(t, f)) {
+					t.Fatal("unconfirmed adult creation changed profiles/settings")
+				}
+			}
 			w := creationCookieCall(f, "/admin", body, profileunlock.ParentProfileCreationChallengeBundle{}, password)
 			if w.Code != 200 {
 				t.Fatal("adult no-intent compatibility changed", w.Code)
@@ -247,8 +252,35 @@ func TestParentProfileCreationActualJSONLegacyMasterKeepsSingleDecoder(t *testin
 	admin.SetSessionsService(authSessions)
 	admin.SetParentKidsHandler(NewUsersHandler(profiles, as))
 	body := `{"name":" Legacy JSON child ","accountId":"` + master.ID + `","isKidsProfile":true,"unknown":"permitted"} {"second":"ignored by legacy decoder"}`
+	rows := func() []byte {
+		state := map[string]any{}
+		for _, user := range profiles.List() {
+			preferences, err := settings.Get(user.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			state[user.ID] = []any{user, preferences}
+		}
+		raw, err := json.Marshal(state)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return raw
+	}
+	before := rows()
+	for _, password := range []string{"", "synthetic-wrong-json-parent"} {
+		denied := httptest.NewRequest(http.MethodPost, "http://synthetic.test/account/api/profiles", strings.NewReader(body))
+		denied.AddCookie(&http.Cookie{Name: adminSessionCookieName, Value: session.Token})
+		denied.Header.Set("X-Account-Password", password)
+		w := httptest.NewRecorder()
+		admin.RequireAuth(admin.CreateProfile)(w, denied)
+		if w.Code != http.StatusForbidden || !bytes.Equal(before, rows()) {
+			t.Fatal("unconfirmed JSON master created profile/defaults")
+		}
+	}
 	r := httptest.NewRequest(http.MethodPost, "http://synthetic.test/account/api/profiles", strings.NewReader(body))
 	r.AddCookie(&http.Cookie{Name: adminSessionCookieName, Value: session.Token})
+	r.Header.Set("X-Account-Password", "synthetic-json-creation-parent")
 	w := httptest.NewRecorder()
 	admin.RequireAuth(admin.CreateProfile)(w, r)
 	var response ProfileWithPinStatus

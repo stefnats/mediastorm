@@ -5,13 +5,44 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"os/exec"
+	"path/filepath"
+	"reflect"
 	"testing"
 
+	"golang.org/x/crypto/bcrypt"
 	"novastream/api/openapi"
 	"novastream/models"
+	"novastream/services/accounts"
 	"novastream/services/users"
 )
+
+const parentLegacyFixturePassword = "synthetic-legacy-parent-password"
+
+// The schema fixture's explicit acct-1 context has a real JSON account and
+// password verifier. This creates no PG authority and never adds request proof.
+func parentLegacyContractAccounts(t *testing.T) *accounts.Service {
+	t.Helper()
+	directory := t.TempDir()
+	hash, err := bcrypt.GenerateFromPassword([]byte(parentLegacyFixturePassword), bcrypt.MinCost)
+	if err != nil {
+		t.Fatal("hash synthetic legacy password")
+	}
+	stored := []models.AccountStorage{{ID: contractAccountID, Username: "synthetic-legacy-parent", PasswordHash: string(hash), IsMaster: true}}
+	raw, err := json.Marshal(stored)
+	if err != nil {
+		t.Fatal("encode synthetic account storage")
+	}
+	if err := os.WriteFile(filepath.Join(directory, "accounts.json"), raw, 0600); err != nil {
+		t.Fatal("write own synthetic account storage")
+	}
+	service, err := accounts.NewService(directory)
+	if err != nil {
+		t.Fatal("load actual legacy account service")
+	}
+	return service
+}
 
 func TestParentKidsFlagClientActualScript(t *testing.T) {
 	node, err := exec.LookPath("node")
@@ -41,12 +72,14 @@ func parentKidsFlagClientOpenAPIContract(t *testing.T, v *openapi.Validator) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	handler := NewUsersHandler(service)
+	actualAccounts := parentLegacyContractAccounts(t)
+	handler := NewUsersHandler(service, actualAccounts)
 	admin := NewAdminUIHandler("", "", nil, service, nil, nil)
+	admin.SetAccountsService(actualAccounts)
 	for _, desired := range []bool{true, false} {
-		exercise(t, v, contractCall{method: "PUT", target: "/api/users/" + profile.ID + "/kids-profile", vars: map[string]string{"userID": profile.ID}, master: true, body: map[string]bool{"isKidsProfile": desired}}, handler.SetKidsProfile, 200)
+		exercise(t, v, contractCall{method: "PUT", target: "/api/users/" + profile.ID + "/kids-profile", vars: map[string]string{"userID": profile.ID}, master: true, headers: map[string]string{"X-Account-Password": parentLegacyFixturePassword}, body: map[string]bool{"isKidsProfile": desired}}, handler.SetKidsProfile, 200)
 		for _, prefix := range []string{"/admin", "/account"} {
-			exercise(t, v, contractCall{method: "PUT", target: prefix + "/api/profiles/kids?profileId=" + profile.ID, master: true, body: map[string]bool{"isKidsProfile": desired}}, func(w http.ResponseWriter, r *http.Request) {
+			exercise(t, v, contractCall{method: "PUT", target: prefix + "/api/profiles/kids?profileId=" + profile.ID, master: true, headers: map[string]string{"X-Account-Password": parentLegacyFixturePassword}, body: map[string]bool{"isKidsProfile": desired}}, func(w http.ResponseWriter, r *http.Request) {
 				admin.SetKidsProfile(w, parentKidsFlagClientLegacySession(r))
 			}, 200)
 		}
@@ -68,7 +101,21 @@ func TestParentKidsFlagClientLegacyReplyAndProfilesRights(t *testing.T) {
 		t.Fatal(err)
 	}
 	admin := NewAdminUIHandler("", "", nil, service, nil, nil)
+	admin.SetAccountsService(parentLegacyContractAccounts(t))
 	call := contractCall{method: "PUT", target: "/account/api/profiles/kids?profileId=" + user.ID, master: true, body: map[string]bool{"isKidsProfile": false}}
+	before, _ := service.Get(user.ID)
+	for _, password := range []string{"", "synthetic-wrong-parent-password"} {
+		denied := call
+		denied.headers = map[string]string{"X-Account-Password": password}
+		r, _ := denied.request(t)
+		w := httptest.NewRecorder()
+		admin.SetKidsProfile(w, parentKidsFlagClientLegacySession(r))
+		after, _ := service.Get(user.ID)
+		if w.Code != http.StatusForbidden || !reflect.DeepEqual(before, after) {
+			t.Fatal("unconfirmed master changed legacy rights")
+		}
+	}
+	call.headers = map[string]string{"X-Account-Password": parentLegacyFixturePassword}
 	r, _ := call.request(t)
 	w := httptest.NewRecorder()
 	admin.SetKidsProfile(w, parentKidsFlagClientLegacySession(r))

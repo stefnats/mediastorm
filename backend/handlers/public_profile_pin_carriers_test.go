@@ -1,6 +1,7 @@
 package handlers
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -317,9 +318,33 @@ func TestPublicPinAdministrativeIntentUsesExistingParentPolicy(t *testing.T) {
 					method = "DELETE"
 					body = ""
 				}
+				var original []byte
+				if err := f.store.Pool().QueryRow(t.Context(), "SELECT to_jsonb(u) FROM users u WHERE id=$1", f.profile.ID).Scan(&original); err != nil {
+					t.Fatal(err)
+				}
+				if mode == "genuine-master" {
+					for _, password := range []string{"", "synthetic-wrong-parent-password"} {
+						r := httptest.NewRequest(method, "/account/api/profiles/pin?profileId="+url.QueryEscape(f.profile.ID), strings.NewReader(body))
+						r.AddCookie(&http.Cookie{Name: adminSessionCookieName, Value: f.session.Token})
+						r.Header.Set("X-Account-Password", password)
+						w := httptest.NewRecorder()
+						next := h.SetProfilePin
+						if clearing {
+							next = h.ClearProfilePin
+						}
+						h.RequireAuth(next)(w, r)
+						var unchanged []byte
+						if err := f.store.Pool().QueryRow(t.Context(), "SELECT to_jsonb(u) FROM users u WHERE id=$1", f.profile.ID).Scan(&unchanged); err != nil {
+							t.Fatal(err)
+						}
+						if w.Code != http.StatusForbidden || !bytes.Equal(original, unchanged) {
+							t.Fatal("unconfirmed genuine master changed the PIN row")
+						}
+					}
+				}
 				r := httptest.NewRequest(method, "/account/api/profiles/pin?profileId="+url.QueryEscape(f.profile.ID), strings.NewReader(body))
 				r.AddCookie(&http.Cookie{Name: adminSessionCookieName, Value: f.session.Token})
-				if mode == "correct-password" {
+				if mode == "correct-password" || mode == "genuine-master" {
 					r.Header.Set("X-Account-Password", "synthetic-parent-password")
 				}
 				w := httptest.NewRecorder()
@@ -331,6 +356,12 @@ func TestPublicPinAdministrativeIntentUsesExistingParentPolicy(t *testing.T) {
 				want := mode == "correct-password" || mode == "genuine-master"
 				if (w.Code == 200) != want {
 					t.Fatalf("mode%s clear%v status%d", mode, clearing, w.Code)
+				}
+				if !want {
+					var unchanged []byte
+					if err := f.store.Pool().QueryRow(t.Context(), "SELECT to_jsonb(u) FROM users u WHERE id=$1", f.profile.ID).Scan(&unchanged); err != nil || !bytes.Equal(original, unchanged) {
+						t.Fatal("denied administrative request changed the PIN row")
+					}
 				}
 				var storedHash string
 				var storedLength int

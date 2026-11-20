@@ -31,7 +31,7 @@ func parentRatingsOpenAPIContract(t *testing.T, v *openapi.Validator) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	handler := NewUsersHandler(service)
+	handler := NewUsersHandler(service, parentLegacyContractAccounts(t))
 	for _, prefix := range []string{"/api", "/admin/api", "/account/api"} {
 		path := prefix + "/users/" + profile.ID + "/kids/"
 		for _, single := range []struct {
@@ -42,9 +42,9 @@ func parentRatingsOpenAPIContract(t *testing.T, v *openapi.Validator) {
 			{"rating/movie", handler.SetKidsMaxMovieRating},
 			{"rating/tv", handler.SetKidsMaxTVRating},
 		} {
-			exercise(t, v, contractCall{method: "PUT", target: path + single.suffix, vars: map[string]string{"userID": profile.ID}, master: true, body: map[string]string{"rating": " saved arbitrary scalar 雪 "}}, single.handler, 200)
+			exercise(t, v, contractCall{method: "PUT", target: path + single.suffix, vars: map[string]string{"userID": profile.ID}, master: true, headers: map[string]string{"X-Account-Password": parentLegacyFixturePassword}, body: map[string]string{"rating": " saved arbitrary scalar 雪 "}}, single.handler, 200)
 		}
-		pair := contractCall{method: "PUT", target: path + "ratings", vars: map[string]string{"userID": profile.ID}, master: true, body: map[string]string{"movieRating": " saved movie ", "tvRating": " saved TV "}}
+		pair := contractCall{method: "PUT", target: path + "ratings", vars: map[string]string{"userID": profile.ID}, master: true, headers: map[string]string{"X-Account-Password": parentLegacyFixturePassword}, body: map[string]string{"movieRating": " saved movie ", "tvRating": " saved TV "}}
 		exercise(t, v, pair, handler.SetKidsRatings, 200)
 		pair.body = map[string]string{"movieRating": "", "tvRating": ""}
 		exercise(t, v, pair, handler.SetKidsRatings, 200)

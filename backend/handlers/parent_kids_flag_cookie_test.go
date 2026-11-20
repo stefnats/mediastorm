@@ -562,8 +562,31 @@ func TestParentKidsFlagCookieJSONKeepsLegacyPolicyAndDecoder(t *testing.T) {
 	router := mux.NewRouter()
 	router.HandleFunc("/account/api/profiles/kids", admin.RequireAuth(admin.SetKidsProfile)).Methods("PUT")
 	for _, body := range []string{`{"isKidsProfile":true,"ignored":1} {"ignored":2}`, `null`} {
+		before, _ := us.Get(target.ID)
+		beforeSettings, err := settings.Get(target.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		original, _ := json.Marshal([]any{before, beforeSettings})
+		for _, password := range []string{"", "synthetic-wrong-json-parent"} {
+			r := httptest.NewRequest("PUT", "http://synthetic.test/account/api/profiles/kids?profileId="+target.ID, strings.NewReader(body))
+			r.AddCookie(&http.Cookie{Name: adminSessionCookieName, Value: session.Token})
+			r.Header.Set("X-Account-Password", password)
+			w := httptest.NewRecorder()
+			router.ServeHTTP(w, r)
+			after, _ := us.Get(target.ID)
+			afterSettings, err := settings.Get(target.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			current, _ := json.Marshal([]any{after, afterSettings})
+			if w.Code != http.StatusForbidden || !bytes.Equal(original, current) {
+				t.Fatal("unconfirmed JSON master changed profile/defaults")
+			}
+		}
 		r := httptest.NewRequest("PUT", "http://synthetic.test/account/api/profiles/kids?profileId="+target.ID, strings.NewReader(body))
 		r.AddCookie(&http.Cookie{Name: adminSessionCookieName, Value: session.Token})
+		r.Header.Set("X-Account-Password", "synthetic-json-flag-parent")
 		w := httptest.NewRecorder()
 		router.ServeHTTP(w, r)
 		if w.Code != 200 || strings.Contains(w.Body.String(), "parentIntent") {

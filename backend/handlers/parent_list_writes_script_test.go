@@ -30,10 +30,10 @@ func parentListWritesOpenAPIContract(t *testing.T, v *openapi.Validator) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	handler := NewUsersHandler(service)
+	handler := NewUsersHandler(service, parentLegacyContractAccounts(t))
 	for _, prefix := range []string{"/api", "/admin/api", "/account/api"} {
 		path := prefix + "/users/" + profile.ID + "/kids/lists"
-		call := contractCall{method: "POST", target: path, vars: map[string]string{"userID": profile.ID}, master: true, body: map[string]string{"url": " https://mdblist.com/lists/synthetic/雪?literal=%2F+ "}}
+		call := contractCall{method: "POST", target: path, vars: map[string]string{"userID": profile.ID}, master: true, headers: map[string]string{"X-Account-Password": parentLegacyFixturePassword}, body: map[string]string{"url": " https://mdblist.com/lists/synthetic/雪?literal=%2F+ "}}
 		exercise(t, v, call, handler.AddKidsAllowedList, 200)
 		before, _ := service.Get(profile.ID)
 		exercise(t, v, call, handler.AddKidsAllowedList, 200)
