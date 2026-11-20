@@ -133,6 +133,51 @@ func TestManagedJellyfinSnapshotMissingAndNonregularFilesDenyWithoutWrites(t *te
 	}
 }
 
+func TestManagedJellyfinSnapshotRetainsOriginalRawFilePathSemantics(t *testing.T) {
+	for _, kind := range []string{"trailing-separator", "final-dot", "oversized-dot-alias"} {
+		t.Run(kind, func(t *testing.T) {
+			raw := managedSyntheticJSON(managedSyntheticToken)
+			original := managedFileFixture(t, raw)
+			path := original.ConfigPath()
+			wantError := unix.ENOTDIR
+			switch kind {
+			case "trailing-separator":
+				path += "/"
+			case "final-dot":
+				path += "/."
+			case "oversized-dot-alias":
+				path = filepath.Dir(path) + strings.Repeat("/.", 2100) + "/settings.json"
+				wantError = unix.ENAMETOOLONG
+			}
+			manager := NewManager(path)
+			read := false
+			lease, err := captureManagedJellyfin(managedCoordinatorContext(t), manager, "integration", func(context.Context, string, string) (managedSnapshotFile, managedJellyfinCredentials, error) {
+				read = true
+				return nil, managedJellyfinCredentials{}, nil
+			})
+			if lease != nil || !errors.Is(err, ErrManagedConfigurationUnavailable) || read {
+				t.Fatal("capture normalized a rejected raw file path before reading")
+			}
+			if lease, err := manager.CaptureManagedJellyfin(managedCoordinatorContext(t), "integration"); lease != nil || !errors.Is(err, ErrManagedConfigurationUnavailable) {
+				t.Fatal("actual capture adopted a different normalized file path")
+			}
+			if _, err := manager.Load(); !errors.Is(err, wantError) {
+				t.Fatal("actual legacy Load did not reject the original raw path")
+			}
+			if err := manager.Save(managedSyntheticSettings(managedSyntheticToken)); !errors.Is(err, wantError) {
+				t.Fatal("actual legacy Save changed its raw path rejection")
+			}
+			after, err := os.ReadFile(original.ConfigPath())
+			if err != nil || !bytes.Equal(raw, after) {
+				t.Fatal("rejected raw paths changed the actual regular-file canary")
+			}
+			if current := managedActualLease(t, original); current.Check(context.Background()) != nil {
+				t.Fatal("the exact original regular path was incorrectly denied")
+			}
+		})
+	}
+}
+
 func TestManagedJellyfinSnapshotRejectsAmbiguousMalformedAndUnboundedJSON(t *testing.T) {
 	valid := string(managedSyntheticJSON(managedSyntheticToken))
 	account := `{"id":"integration","serverUrl":"https://provider.invalid/base","token":"synthetic","userId":"synthetic-user"}`

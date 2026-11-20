@@ -174,12 +174,16 @@ func (lease *ManagedJellyfinLease) Close() error {
 }
 
 func captureManagedJellyfin(ctx context.Context, manager *Manager, integrationID string, read func(context.Context, string, string) (managedSnapshotFile, managedJellyfinCredentials, error)) (*ManagedJellyfinLease, error) {
-	if ctx == nil || ctx.Err() != nil || manager == nil || manager.path == "" || len(integrationID) == 0 || len(integrationID) > 128 || strings.TrimSpace(integrationID) != integrationID {
+	if ctx == nil || ctx.Err() != nil || manager == nil || manager.path == "" || len(manager.path) > 4096 || len(integrationID) == 0 || len(integrationID) > 128 || strings.TrimSpace(integrationID) != integrationID {
+		return nil, ErrManagedConfigurationUnavailable
+	}
+	rawParts := strings.Split(manager.path, string(filepath.Separator))
+	if last := rawParts[len(rawParts)-1]; last == "" || last == "." {
 		return nil, ErrManagedConfigurationUnavailable
 	}
 	// Do not clean away traversal that could have a different kernel meaning
 	// through a symlink. Legacy writers retain their original path semantics.
-	for _, part := range strings.Split(manager.path, string(filepath.Separator)) {
+	for _, part := range rawParts {
 		if part == ".." {
 			return nil, ErrManagedConfigurationUnavailable
 		}
