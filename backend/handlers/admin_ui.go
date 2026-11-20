@@ -313,7 +313,7 @@ var SettingsSchema = map[string]interface{}{
 			"homeWifiSSID": map[string]interface{}{
 				"type":        "text",
 				"label":       "Home WiFi Name",
-				"description": "WiFi network name (SSID) to detect for home network. When connected, app uses Home URL.",
+				"description": "WiFi network name (SSID) to detect for home network. When connected, app uses Home URL. The native iOS and Android apps accept several names separated by commas.",
 				"placeholder": "MyHomeWiFi",
 				"order":       0,
 			},
@@ -1086,6 +1086,8 @@ var SettingsSchema = map[string]interface{}{
 			"hideContinueWatchingHeroMetadata": map[string]interface{}{"type": "boolean", "label": "Hide Continue Watching Hero Details", "description": "Keep the logo but hide year and overview text in the Continue Watching hero on TV platforms.", "order": 20},
 			"moveDetailsRatingsToMetadata":     map[string]interface{}{"type": "boolean", "label": "Move Details Ratings Up", "description": "Move ratings from beneath the poster back to the title and genre metadata area on TV platforms. Ratings also move up automatically when the poster is hidden.", "order": 21},
 			"hideDetailsPoster":                map[string]interface{}{"type": "boolean", "label": "Hide Details Poster", "description": "Hide the bottom-right poster on the Details page on TV platforms. Ratings automatically move to the title metadata area.", "order": 22},
+			"showDetailsPrequeueFilename":      map[string]interface{}{"type": "boolean", "label": "Show Details Filename", "description": "Show the prequeued release filename beneath the Details button row on the native TV apps (a loading state while a source is found).", "order": 22.1},
+			"showDetailsSelectedTracks":        map[string]interface{}{"type": "boolean", "label": "Show Details Selected Tracks", "description": "Show the audio and subtitle tracks playback will use beneath the Details button row on the native TV apps.", "order": 22.3},
 			"hideTvDrawerRail":                 map[string]interface{}{"type": "boolean", "label": "Hide TV Drawer Rail", "description": "Fully hide the collapsed left navigation rail on TV platforms instead of leaving its icons peeking out. The drawer still opens normally.", "order": 23},
 			"simpleMode":                       map[string]interface{}{"type": "boolean", "label": "M.O.M. Mode™", "description": "Minimal Options for MediaStorm: reduce the frontend to essential browsing, watchlist, Live TV, profile, and playback choices.", "order": 24},
 			"simpleModeHomeShelves": map[string]interface{}{
@@ -4233,6 +4235,8 @@ func (h *AdminUIHandler) GetUserSettings(w http.ResponseWriter, r *http.Request)
 			HideContinueWatchingHeroMetadata:             models.BoolPtr(globalSettings.Display.HideContinueWatchingHeroMetadata),
 			MoveDetailsRatingsToMetadata:                 models.BoolPtr(globalSettings.Display.MoveDetailsRatingsToMetadata),
 			HideDetailsPoster:                            models.BoolPtr(globalSettings.Display.HideDetailsPoster),
+			ShowDetailsPrequeueFilename:                  models.BoolPtr(globalSettings.Display.ShowDetailsPrequeueFilename),
+			ShowDetailsSelectedTracks:                    models.BoolPtr(globalSettings.Display.ShowDetailsSelectedTracks),
 			HideTVDrawerRail:                             models.BoolPtr(globalSettings.Display.HideTVDrawerRail),
 			SimpleMode:                                   models.BoolPtr(globalSettings.Display.SimpleMode),
 			SimpleModeHomeShelves:                        models.StringSlicePtr(globalSettings.Display.SimpleModeHomeShelves),

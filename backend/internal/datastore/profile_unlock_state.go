@@ -725,6 +725,9 @@ func readPGRequestFrame(ctx context.Context, q parentMutationQuerier, token stri
 	if cancelled := ctx.Err(); cancelled != nil {
 		return nil, now, cancelled
 	}
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, now, ErrProfilePinAccessChanged
+	}
 	if err != nil {
 		return nil, now, ErrProfilePinAccessUnavailable
 	}
@@ -755,8 +758,11 @@ func readPGRequestFrame(ctx context.Context, q parentMutationQuerier, token stri
 // publishing the original normalized frame. No grant cache is read or changed.
 // Existing request frames are checked, never silently replaced after waiting.
 func (ds *DataStore) AuthenticateProfilePinRequest(r *http.Request, rawToken, clientID string) (*http.Request, context.CancelFunc, error) {
-	if ds == nil || ds.pool == nil || r == nil || !parentMutationID(rawToken) {
+	if ds == nil || ds.pool == nil || r == nil {
 		return nil, nil, ErrProfilePinAccessUnavailable
+	}
+	if !parentMutationID(rawToken) {
+		return nil, nil, ErrProfilePinAccessChanged
 	}
 	if existing, _ := r.Context().Value(pgRequestFrameKey{}).(*pgRequestFrame); existing != nil {
 		if existing.session.Token != rawToken {
@@ -785,13 +791,22 @@ func (ds *DataStore) AuthenticateProfilePinRequest(r *http.Request, rawToken, cl
 		defer rollbackPinTx(tx, ctx)
 		var found string
 		if err = tx.QueryRow(ctx, `SELECT id FROM accounts WHERE id=$1 FOR UPDATE`, initial.session.AccountID).Scan(&found); err != nil {
-			return nil, nil, pinContextError(ctx, ErrProfilePinAccessChanged)
+			if errors.Is(err, pgx.ErrNoRows) {
+				return nil, nil, pinContextError(ctx, ErrProfilePinAccessChanged)
+			}
+			return nil, nil, pinContextError(ctx, ErrProfilePinAccessUnavailable)
 		}
 		if err = tx.QueryRow(ctx, `SELECT token FROM sessions WHERE token=$1 FOR UPDATE`, rawToken).Scan(&found); err != nil {
-			return nil, nil, pinContextError(ctx, ErrProfilePinAccessChanged)
+			if errors.Is(err, pgx.ErrNoRows) {
+				return nil, nil, pinContextError(ctx, ErrProfilePinAccessChanged)
+			}
+			return nil, nil, pinContextError(ctx, ErrProfilePinAccessUnavailable)
 		}
 		current, _, err := readPGRequestFrame(ctx, tx, rawToken)
-		if err != nil || !sameParentMutationRow(initial.actorRow, current.actorRow) || !sameParentMutationRow(initial.sessionRow, current.sessionRow) {
+		if err != nil {
+			return nil, nil, err
+		}
+		if !sameParentMutationRow(initial.actorRow, current.actorRow) || !sameParentMutationRow(initial.sessionRow, current.sessionRow) {
 			return nil, nil, pinContextError(ctx, ErrProfilePinAccessChanged)
 		}
 		if _, err = tx.Exec(ctx, `UPDATE sessions SET client_id=CASE WHEN client_id='' THEN $1 ELSE client_id END, pin_unlock_lineage=COALESCE(pin_unlock_lineage,$3) WHERE token=$2`, clientID, rawToken, profileUnlockDigest(rawToken)); err != nil {

@@ -47,6 +47,8 @@ type Service struct {
 	sessions                    map[string]models.Session
 	sessionDuration             time.Duration
 	watchPartyPlaybackValidator WatchPartyPlaybackValidator
+	watchPartyAuthority         map[string]time.Time
+	watchPartyAuthorityTTL      time.Duration
 }
 
 type sessionReader interface {
@@ -67,6 +69,8 @@ func NewServiceWithStore(store *datastore.DataStore, defaultDuration time.Durati
 		sessionReader:   store.Sessions(),
 		sessions:        make(map[string]models.Session),
 		sessionDuration: defaultDuration,
+
+		watchPartyAuthorityTTL: watchPartyAuthorityTTL,
 	}
 
 	if err := svc.load(); err != nil {
@@ -756,6 +760,12 @@ func (s *Service) ResolveProfilePinStreamResource(ctx context.Context, envelope 
 	bounded, cancel := context.WithTimeout(ctx, 3*time.Second)
 	defer cancel()
 	if err := validator(bounded, binding.RoomID, binding.GuestID, binding.Resource); err != nil {
+		if bounded.Err() != nil {
+			return "", bounded.Err()
+		}
+		if errors.Is(err, ErrAuthorityUnavailable) || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+			return "", err
+		}
 		return "", ErrSessionNotFound
 	}
 	if err := bounded.Err(); err != nil {

@@ -1651,25 +1651,10 @@ func (m *HLSManager) SetConfigManager(cfgManager ConfigProvider) {
 }
 
 func (m *HLSManager) applyExternalUsenetWebDAVAuth(req *http.Request) {
-	if m == nil || m.configManager == nil || req == nil || req.URL == nil {
+	if m == nil || m.configManager == nil {
 		return
 	}
-	settings, err := m.configManager.Load()
-	if err != nil {
-		return
-	}
-	for _, engine := range settings.UsenetEngines {
-		if !engine.Enabled || strings.TrimSpace(engine.WebDAVBaseURL) == "" {
-			continue
-		}
-		if !externalURLMatchesBase(req.URL, engine.WebDAVBaseURL) {
-			continue
-		}
-		if engine.WebDAVUsername != "" || engine.WebDAVPassword != "" {
-			req.SetBasicAuth(engine.WebDAVUsername, engine.WebDAVPassword)
-		}
-		return
-	}
+	applyExternalUsenetWebDAVAuthFromConfig(m.configManager, req)
 }
 
 func (m *HLSManager) externalFFmpegHeaders(rawURL string) []string {
@@ -3051,14 +3036,22 @@ func (m *HLSManager) startLiveTranscoding(ctx context.Context, session *HLSSessi
 	if isNativeLivePlaybackTarget(session.PlaybackTarget) {
 		session.VideoEncoder = "copy"
 		recordLiveOutputPlan(session, true)
-		log.Printf("[hls] live session %s: using native transmux mode (video=copy audio=copy target=%q)", session.ID, session.PlaybackTarget)
+		audioMode := "copy"
+		if session.LiveTuning.TimeshiftWindow > 0 {
+			audioMode = "aac"
+			session.outputPlan.AudioCopied = false
+			session.outputPlan.AudioCodec = "aac"
+		}
+		log.Printf("[hls] live session %s: using native transmux mode (video=copy audio=%s target=%q)", session.ID, audioMode, session.PlaybackTarget)
 	} else {
 		session.VideoEncoder = "libx264"
 		recordLiveOutputPlan(session, false)
 		log.Printf("[hls] live session %s: using compatibility transcode mode (video=libx264 audio=aac target=%q)", session.ID, session.PlaybackTarget)
 	}
 	session.mu.Unlock()
-	args = append(args, applyTimeshiftListSize(liveHLSOutputArgs(session.PlaybackTarget, segmentPattern, playlistPath, resumeFrom), session.LiveTuning.TimeshiftWindow)...)
+	outputArgs := liveHLSOutputArgs(session.PlaybackTarget, segmentPattern, playlistPath, resumeFrom)
+	outputArgs = applyTimeshiftAudio(applyTimeshiftListSize(outputArgs, session.LiveTuning.TimeshiftWindow), session.LiveTuning.TimeshiftWindow)
+	args = append(args, outputArgs...)
 
 	log.Printf("[hls] live session %s: starting FFmpeg with args: %v", session.ID, args)
 
@@ -3479,8 +3472,12 @@ func liveHLSOutputArgs(playbackTarget, segmentPattern, playlistPath string, resu
 	}
 	// Live subtitles are handled separately. Automatic stream selection also picks
 	// DVB teletext, which the HLS muxer's default WebVTT encoder cannot encode and
-	// aborts playback before any audio/video segments are written.
-	args := []string{"-map", "0:v:0?", "-map", "0:a:0?", "-sn", "-dn"}
+	// aborts playback before any audio/video segments are written, so -sn/-dn drop
+	// subtitle and data streams. Video and audio stay on FFmpeg's automatic selection
+	// (highest resolution, most audio channels): an explicit -map 0:a:0 takes the
+	// first audio PID, which on many IPTV channels is a silent, described-video or
+	// secondary-language track, and native targets copy it straight to the player.
+	args := []string{"-sn", "-dn"}
 	// Compatibility (cast/web) retention is the default; the native branch overrides.
 	hlsFlags := "independent_segments+temp_file"
 	listSize := strconv.Itoa(liveNativeHLSListSize)

@@ -207,7 +207,7 @@ func (c *AllDebridClient) AddMagnet(ctx context.Context, magnetURL string) (*Add
 	if result.Status != "success" {
 		errMsg := "unknown error"
 		if result.Error != nil {
-			errMsg = result.Error.Message
+			errMsg = allDebridErrorText(result.Error.Code, result.Error.Message)
 		}
 		return nil, fmt.Errorf("add magnet failed: %s", errMsg)
 	}
@@ -296,7 +296,7 @@ func (c *AllDebridClient) AddTorrentFile(ctx context.Context, torrentData []byte
 	if result.Status != "success" {
 		errMsg := "unknown error"
 		if result.Error != nil {
-			errMsg = result.Error.Message
+			errMsg = allDebridErrorText(result.Error.Code, result.Error.Message)
 		}
 		return nil, fmt.Errorf("add torrent failed: %s", errMsg)
 	}
@@ -361,7 +361,7 @@ func (c *AllDebridClient) GetTorrentInfo(ctx context.Context, torrentID string) 
 	if result.Status != "success" {
 		errMsg := "unknown error"
 		if result.Error != nil {
-			errMsg = result.Error.Message
+			errMsg = allDebridErrorText(result.Error.Code, result.Error.Message)
 		}
 		return nil, fmt.Errorf("get torrent info failed: %s", errMsg)
 	}
@@ -517,7 +517,7 @@ func (c *AllDebridClient) DeleteTorrent(ctx context.Context, torrentID string) e
 	if result.Status != "success" {
 		errMsg := "unknown error"
 		if result.Error != nil {
-			errMsg = result.Error.Message
+			errMsg = allDebridErrorText(result.Error.Code, result.Error.Message)
 		}
 		return fmt.Errorf("delete torrent failed: %s", errMsg)
 	}
@@ -527,6 +527,10 @@ func (c *AllDebridClient) DeleteTorrent(ctx context.Context, torrentID string) e
 }
 
 // UnrestrictLink converts an AllDebrid link to an actual download URL.
+//
+// Every /link/unlock call counts as a generated link on AllDebrid, so results
+// are cached and concurrent requests for the same link are collapsed (see
+// alldebrid_link_cache.go).
 func (c *AllDebridClient) UnrestrictLink(ctx context.Context, link string) (*UnrestrictResult, error) {
 	if c.apiKey == "" {
 		return nil, fmt.Errorf("alldebrid API key not configured")
@@ -537,6 +541,35 @@ func (c *AllDebridClient) UnrestrictLink(ctx context.Context, link string) (*Unr
 		return nil, fmt.Errorf("link is required")
 	}
 
+	key := allDebridUnlockCacheKey(c.apiKey, trimmedLink)
+	if cached, ok := allDebridUnlocks.get(key); ok {
+		log.Printf("[alldebrid] reusing cached unlock for %s", trimmedLink)
+		return cached, nil
+	}
+
+	value, err, _ := allDebridUnlocks.group.Do(key, func() (interface{}, error) {
+		// A concurrent caller may have filled the cache while we waited.
+		if cached, ok := allDebridUnlocks.get(key); ok {
+			return cached, nil
+		}
+		// Detach from the first caller's cancellation so one aborted request
+		// (e.g. a player seek) does not fail every waiter sharing this unlock.
+		result, err := c.unlockLink(context.WithoutCancel(ctx), trimmedLink)
+		if err != nil {
+			return nil, err
+		}
+		allDebridUnlocks.put(key, result)
+		return result, nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	result := *value.(*UnrestrictResult)
+	return &result, nil
+}
+
+// unlockLink performs the actual /link/unlock request.
+func (c *AllDebridClient) unlockLink(ctx context.Context, trimmedLink string) (*UnrestrictResult, error) {
 	endpoint := c.buildURL("/link/unlock")
 
 	formData := url.Values{}
@@ -573,7 +606,7 @@ func (c *AllDebridClient) UnrestrictLink(ctx context.Context, link string) (*Unr
 	if result.Status != "success" {
 		errMsg := "unknown error"
 		if result.Error != nil {
-			errMsg = result.Error.Message
+			errMsg = allDebridErrorText(result.Error.Code, result.Error.Message)
 		}
 		return nil, fmt.Errorf("unrestrict failed: %s", errMsg)
 	}
@@ -606,5 +639,21 @@ func (c *AllDebridClient) CheckInstantAvailability(_ context.Context, infoHash s
 		return false, fmt.Errorf("info hash is required")
 	}
 
-	return false, fmt.Errorf("alldebrid does not support non-mutating instant cache checks for %s", normalizedHash)
+	return false, fmt.Errorf("alldebrid has no non-mutating cache check for %s: %w", normalizedHash, ErrInstantAvailabilityUnsupported)
+}
+
+// allDebridErrorText keeps AllDebrid's machine-readable error code (e.g.
+// AUTH_USER_BANNED, MUST_BE_PREMIUM) next to its message so account-level
+// denials can be recognised by the resolution circuit.
+func allDebridErrorText(code, message string) string {
+	code = strings.TrimSpace(code)
+	message = strings.TrimSpace(message)
+	switch {
+	case code == "":
+		return message
+	case message == "":
+		return code
+	default:
+		return message + " (" + code + ")"
+	}
 }

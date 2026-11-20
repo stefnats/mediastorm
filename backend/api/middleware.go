@@ -3,6 +3,7 @@ package api
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"strings"
 	"time"
@@ -11,6 +12,7 @@ import (
 
 	"novastream/internal/apierror"
 	"novastream/internal/auth"
+	"novastream/internal/datastore"
 	"novastream/models"
 	"novastream/services/accounts"
 	"novastream/services/profileunlock"
@@ -133,6 +135,10 @@ func AccountAuthMiddleware(sessionsSvc *sessions.Service, accountsSvc *accounts.
 			if current != nil {
 				checked, release, err := current.Authenticate(r, token, r.Header.Get("X-Client-ID"))
 				if err != nil {
+					if errors.Is(err, sessions.ErrAuthorityUnavailable) || errors.Is(err, datastore.ErrProfilePinAccessUnavailable) || errors.Is(err, datastore.ErrPGPinOutcomeUnknown) || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+						apierror.Write(w, http.StatusServiceUnavailable, apierror.CodeServiceUnavailable, "session check temporarily unavailable")
+						return
+					}
 					apierror.Write(w, http.StatusUnauthorized, apierror.CodeSessionExpired, "invalid or expired session")
 					return
 				}
@@ -148,6 +154,10 @@ func AccountAuthMiddleware(sessionsSvc *sessions.Service, accountsSvc *accounts.
 				var err error
 				session, err = sessionsSvc.Validate(token)
 				if err != nil {
+					if sessionUnavailable(err) {
+						apierror.Write(w, http.StatusServiceUnavailable, apierror.CodeServiceUnavailable, "session check temporarily unavailable")
+						return
+					}
 					apierror.Write(w, http.StatusUnauthorized, apierror.CodeSessionExpired, "invalid or expired session")
 					return
 				}
@@ -322,4 +332,11 @@ func queryTokenAllowed(path string) bool {
 		return true
 	}
 	return false
+}
+
+// sessionUnavailable reports a Validate failure that is not an authentication
+// decision, such as the session store or a watch-party room being unreachable.
+func sessionUnavailable(err error) bool {
+	return !errors.Is(err, sessions.ErrSessionNotFound) && !errors.Is(err, sessions.ErrSessionExpired) &&
+		!errors.Is(err, sessions.ErrInvalidToken)
 }

@@ -1596,6 +1596,10 @@ type DisplaySettings struct {
 	MoveDetailsRatingsToMetadata bool `json:"moveDetailsRatingsToMetadata,omitempty"`
 	// HideDetailsPoster hides the poster on the TV Details page.
 	HideDetailsPoster bool `json:"hideDetailsPoster,omitempty"`
+	// ShowDetailsPrequeueFilename shows the prequeued release filename beneath the native TV Details button row.
+	ShowDetailsPrequeueFilename bool `json:"showDetailsPrequeueFilename,omitempty"`
+	// ShowDetailsSelectedTracks shows the audio and subtitle tracks playback will use beneath the native TV Details button row.
+	ShowDetailsSelectedTracks bool `json:"showDetailsSelectedTracks,omitempty"`
 	// HideTVDrawerRail fully hides the collapsed TV navigation drawer instead of leaving its icon rail visible.
 	HideTVDrawerRail bool `json:"hideTvDrawerRail,omitempty"`
 	// SimpleMode reduces the frontend to essential browsing and playback choices.
@@ -2200,7 +2204,7 @@ func DefaultSettings() Settings {
 		SABnzbd:            SABnzbdSettings{Enabled: &sabnzbdEnabled, FallbackHost: "", FallbackAPIKey: ""},
 		AltMount:           nil,
 		Transmux:           TransmuxSettings{Enabled: true, FFmpegPath: "ffmpeg", FFprobePath: "ffprobe", HLSTempDirectory: "/tmp/novastream-hls", HardwareAcceleration: "auto"},
-		Playback:           PlaybackSettings{PreferredPlayer: "native", PreferredAudioLanguage: "eng", PauseWhenAppInactive: false, UseLoadingScreen: false, SubtitleSize: 1.0, SubtitleUseCropDetectPosition: false, SubtitleColor: "#FFFFFF", SubtitleOpacity: 1.0, SubtitleBold: false, SubtitleOutlineEnabled: false, SubtitleOutlineColor: "#000000", SubtitleOutlineWeight: 0.35, SubtitleBackgroundEnabled: true, SubtitleBackgroundColor: "#000000", SubtitleBackgroundOpacity: 0.6, SeekForwardSeconds: 30, SeekBackwardSeconds: 10, PrerollMode: "artwork", PrerollMediaScope: "all", StreamMigrationEnabled: true, CreditsDetectionEnabled: false, MatchFrameRate: false, LiveClosedCaptionExtraction: true, Thumbnails: PlaybackThumbnailSettings{Enabled: false, Workers: 1}},
+		Playback:           PlaybackSettings{PreferredPlayer: "native", PreferredAudioLanguage: "eng", PauseWhenAppInactive: false, UseLoadingScreen: false, SubtitleSize: 1.0, SubtitleUseCropDetectPosition: false, SubtitleColor: "#FFFFFF", SubtitleOpacity: 1.0, SubtitleBold: false, SubtitleOutlineEnabled: false, SubtitleOutlineColor: "#000000", SubtitleOutlineWeight: 0.35, SubtitleBackgroundEnabled: true, SubtitleBackgroundColor: "#000000", SubtitleBackgroundOpacity: 0.6, SeekForwardSeconds: 30, SeekBackwardSeconds: 10, DisablePrequeue: true, PrerollMode: "artwork", PrerollMediaScope: "all", StreamMigrationEnabled: true, CreditsDetectionEnabled: false, MatchFrameRate: false, LiveClosedCaptionExtraction: true, Thumbnails: PlaybackThumbnailSettings{Enabled: false, Workers: 1}},
 		Live:               LiveSettings{Mode: "m3u", PlaylistURL: "", MaxStreams: 0, PlaylistCacheTTLHours: 24, EPG: EPGSettings{RefreshIntervalHours: 12, RetentionDays: 7}},
 		Sports:             SportsSettings{EnabledLeagues: append([]string(nil), defaultEnabledLeagueIDs...)},
 		HomeShelves: HomeShelvesSettings{

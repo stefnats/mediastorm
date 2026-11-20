@@ -126,6 +126,8 @@ func TestTVDisplayOptionsMakeClientSettingsNonEmpty(t *testing.T) {
 		"hideContinueWatchingHeroMetadata":       {HideContinueWatchingHeroMetadata: models.BoolPtr(false)},
 		"moveDetailsRatingsToMetadata":           {MoveDetailsRatingsToMetadata: models.BoolPtr(false)},
 		"hideDetailsPoster":                      {HideDetailsPoster: models.BoolPtr(false)},
+		"showDetailsPrequeueFilename":            {ShowDetailsPrequeueFilename: models.BoolPtr(false)},
+		"showDetailsSelectedTracks":              {ShowDetailsSelectedTracks: models.BoolPtr(false)},
 		"hideTvDrawerRail":                       {HideTVDrawerRail: models.BoolPtr(false)},
 		"simpleMode":                             {SimpleMode: models.BoolPtr(false)},
 		"simpleModeHomeShelves":                  {SimpleModeHomeShelves: models.StringSlicePtr([]string{"watchlist"})},
