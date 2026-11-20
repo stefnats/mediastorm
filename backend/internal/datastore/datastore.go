@@ -44,6 +44,7 @@ func New(ctx context.Context, databaseURL string, opts ...Option) (*DataStore, e
 	if o.maxConnLifetime > 0 {
 		cfg.MaxConnLifetime = o.maxConnLifetime
 	}
+	configureQueryLifecycle(cfg.ConnConfig)
 
 	pool, err := pgxpool.NewWithConfig(ctx, cfg)
 	if err != nil {
