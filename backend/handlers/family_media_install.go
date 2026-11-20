@@ -27,6 +27,14 @@ func InstallFamilyMedia(deps FamilyMediaDependencies) (*FamilyMediaInstallation,
 	if deps.Store == nil || deps.Store.Pool() == nil || deps.Pins == nil || !deps.Pins.FamilyMediaReady(deps.Store) || deps.Local == nil || deps.Parent == nil {
 		return nil, profileunlock.ErrFamilyMediaUnavailable
 	}
+	// The audited LOCAL port is platform-specific. Its absence, including on
+	// unsupported platforms, cannot publish a partial family installation.
+	local, ok := any(deps.Local).(interface {
+		FamilyLocalSourceReady(*datastore.DataStore) bool
+	})
+	if !ok || !local.FamilyLocalSourceReady(deps.Store) || !deps.Parent.FamilyMediaReady(deps.Store) {
+		return nil, profileunlock.ErrFamilyMediaUnavailable
+	}
 	files, err := NewParentLocalFileHandler(deps.Store, deps.Pins, deps.Local, deps.Parent)
 	if err != nil {
 		return nil, err
