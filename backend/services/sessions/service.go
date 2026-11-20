@@ -369,6 +369,10 @@ func (s *Service) Revoke(token string) error {
 
 // RevokeAllForAccount invalidates all sessions for an account.
 func (s *Service) RevokeAllForAccount(accountID string) int {
+	if s.useDB() {
+		count, _ := s.RevokeAllForAccountContext(context.Background(), accountID)
+		return int(count)
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -380,10 +384,6 @@ func (s *Service) RevokeAllForAccount(accountID string) int {
 		}
 	}
 	if count > 0 {
-		if s.useDB() {
-			_ = s.store.Sessions().DeleteByAccount(context.Background(), accountID)
-			return count
-		}
 		_ = s.saveLocked()
 	}
 	return count
@@ -392,6 +392,10 @@ func (s *Service) RevokeAllForAccount(accountID string) int {
 // RevokeAllForAccountExcept invalidates an account's other sessions, preserving
 // the token used to perform a sensitive authenticated operation.
 func (s *Service) RevokeAllForAccountExcept(accountID, keepToken string) int {
+	if s.useDB() {
+		count, _ := s.RevokeAllForAccountExceptContext(context.Background(), accountID, keepToken)
+		return int(count)
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -404,10 +408,6 @@ func (s *Service) RevokeAllForAccountExcept(accountID, keepToken string) int {
 	}
 	if count == 0 {
 		return 0
-	}
-	if s.useDB() {
-		_ = s.store.Sessions().DeleteByAccountExcept(context.Background(), accountID, keepToken)
-		return count
 	}
 	_ = s.saveLocked()
 	return count
