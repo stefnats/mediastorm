@@ -11,7 +11,7 @@ import (
 	"unicode"
 
 	"novastream/config"
-	"novastream/internal/datastore"
+	"novastream/internal/settingsbootstrap"
 	"novastream/models"
 	"novastream/services/accounts"
 	"novastream/services/sessions"
@@ -70,24 +70,21 @@ func ParseFlags(args []string, getenv func(string) string) (Options, error) {
 }
 
 func RunWithOptions(opts Options, stdout io.Writer, getenv func(string) string) error {
-	settings, err := config.NewManager(opts.ConfigPath).Load()
+	startup, err := settingsbootstrap.BeginRecovery(context.Background(), config.NewManager(opts.ConfigPath), getenv("DATABASE_URL"))
 	if err != nil {
+		return fmt.Errorf("coordinate recovery settings: %w", err)
+	}
+	defer startup.Close()
+	if _, err = startup.Load(); err != nil {
 		return fmt.Errorf("load config: %w", err)
 	}
-
-	dbURL := strings.TrimSpace(getenv("DATABASE_URL"))
-	if dbURL == "" {
-		dbURL = strings.TrimSpace(settings.Database.URL)
-	}
-	if dbURL == "" {
-		return errors.New("DATABASE_URL is required for account recovery")
-	}
-
-	store, err := datastore.New(context.Background(), dbURL)
+	store, err := startup.Migrate(context.Background())
 	if err != nil {
 		return fmt.Errorf("connect datastore: %w", err)
 	}
-	defer store.Close()
+	if err = startup.Finish(); err != nil {
+		return fmt.Errorf("finish recovery settings: %w", err)
+	}
 
 	accountsSvc, err := accounts.NewServiceWithStore(store)
 	if err != nil {

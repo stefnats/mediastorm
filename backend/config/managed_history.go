@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"os"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -59,9 +58,13 @@ func beginManagedConfigMutation() func() {
 // semantics while placing the actual backup settings replacement under the same
 // history fence as Manager.Save. Failed attempts also retire original leases.
 func ReplaceManagedSettingsFile(staged, destination string) error {
-	finishMutation := beginManagedConfigMutation()
-	defer finishMutation()
-	return os.Rename(staged, destination)
+	beginSettingsAttempt()
+	reservation, err := BeginManagedReplacement(NewManager(destination))
+	if err != nil {
+		return err
+	}
+	defer reservation.Close()
+	return reservation.Replace(staged, destination)
 }
 
 type managedSnapshotFile interface {
@@ -90,6 +93,7 @@ type managedJellyfinState struct {
 	cancel      context.CancelFunc
 	deadline    time.Time
 	epoch       *managedConfigEpoch
+	attempt     *securityAttempt
 	path        string
 	file        managedSnapshotFile
 	credentials managedJellyfinCredentials
@@ -137,7 +141,7 @@ func (lease *ManagedJellyfinLease) Check(ctx context.Context) error {
 		return ErrManagedConfigurationUnavailable
 	}
 	defer managedConfigHistory.RUnlock()
-	if state.epoch != managedConfigHistory.epoch || state.file == nil || state.file.check(ctx) != nil || state.ctx.Err() != nil || !state.deadline.After(time.Now()) || ctx.Err() != nil {
+	if !settingsAttemptCurrent(state.attempt) || state.epoch != managedConfigHistory.epoch || state.file == nil || state.file.check(ctx) != nil || state.ctx.Err() != nil || !state.deadline.After(time.Now()) || ctx.Err() != nil {
 		return ErrManagedConfigurationUnavailable
 	}
 	return nil
@@ -219,6 +223,7 @@ func captureManagedJellyfin(ctx context.Context, manager *Manager, integrationID
 		return nil, ErrManagedConfigurationUnavailable
 	}
 	path = filepath.Clean(path)
+	attempt := settingsAttemptNow()
 	if !managedConfigHistory.TryRLock() {
 		return nil, ErrManagedConfigurationBusy
 	}
@@ -263,9 +268,15 @@ func captureManagedJellyfin(ctx context.Context, manager *Manager, integrationID
 		return nil, ErrManagedConfigurationUnavailable
 	}
 	lease := &ManagedJellyfinLease{}
-	state := &managedJellyfinState{self: lease, ctx: lifetime, cancel: cancel, deadline: deadline, epoch: managedConfigHistory.epoch, path: path, file: file, credentials: credentials, closeDone: make(chan struct{})}
+	state := &managedJellyfinState{self: lease, ctx: lifetime, cancel: cancel, deadline: deadline, epoch: managedConfigHistory.epoch, attempt: attempt, path: path, file: file, credentials: credentials, closeDone: make(chan struct{})}
 	lease.state = state
 	managedConfigAdmission.Lock()
+	if !settingsAttemptCurrent(attempt) {
+		// The existing read fence pinned these exact original bytes before the
+		// writer. Preserve that opaque capture contract, but return it retired:
+		// never adopt the new attempt or allow Check, Bind or transport IO.
+		cancel()
+	}
 	managedConfigAdmission.owners[state] = struct{}{}
 	managedConfigAdmission.Unlock()
 	reserved = false
