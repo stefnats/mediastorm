@@ -59,6 +59,18 @@ type vodBoundary struct {
 	mu            sync.Mutex
 	workers       map[string]*vodOwnerContext
 	active        map[string]*vodOwnerContext
+	// Optional server-only original PG owner. Dormant legacy ports remain
+	// unchanged; the uninstalled family factory requires this capture path.
+	original func(*http.Request, string) (vodOriginalOwner, error)
+}
+type vodOriginalOwner interface {
+	Check(context.Context) error
+	CheckRequest(*http.Request, string) error
+	Handoff(*http.Request) error
+	Context() context.Context
+	ExpiresAt() time.Time
+	Mode() profileunlock.FamilyMediaMode
+	Close()
 }
 type vodOwnerContext struct {
 	operation       vodOperation
@@ -77,6 +89,7 @@ type vodOwnerContext struct {
 	background      bool
 	superseded      *atomic.Bool
 	workerCurrent   func() bool
+	original        vodOriginalOwner
 }
 
 func (o vodOwnerContext) String() string               { return "private VOD owner context" }
@@ -135,6 +148,7 @@ func (b *vodBoundary) requestOwner(w http.ResponseWriter, r *http.Request, op vo
 	if r == nil || b.identity == nil {
 		return deny(kidsvod.CodeAccessDenied)
 	}
+	originalRequest := r
 	requestDeadline, hasRequestDeadline := r.Context().Deadline()
 	checkCtx, checkCancel := context.WithTimeout(r.Context(), 500*time.Millisecond)
 	defer checkCancel()
@@ -201,33 +215,53 @@ func (b *vodBoundary) requestOwner(w http.ResponseWriter, r *http.Request, op vo
 	if active && owner.IsKids && op != vodCleanup {
 		return deny(kidsvod.CodeClassificationUnknown)
 	}
+	var original vodOriginalOwner
+	if b.original != nil {
+		original, err = b.original(originalRequest, profile)
+		if err != nil || original == nil {
+			if original != nil {
+				original.Close()
+			}
+			return deny(kidsvod.CodeContextChanged)
+		}
+	}
+	keepOriginal := false
+	defer func() {
+		if original != nil && !keepOriginal {
+			original.Close()
+		}
+	}()
 	if active || op == vodCleanup {
-		if profile == "" || current.Scope != "" || b.pin == nil {
+		if profile == "" || current.Scope != "" || b.pin == nil && original == nil {
 			return deny(kidsvod.CodeAccessDenied)
 		}
-		if !b.pin(w, r, profile) {
+		if original == nil && !b.pin(w, r, profile) {
 			return nil, false
 		}
 	}
-	// Copy only the already authenticated actor and the PIN-unlock inputs. An
-	// account password, bearer header, request body and source claims are absent.
-	ctx := context.WithValue(context.Background(), auth.ContextKeySession, current)
-	ctx = context.WithValue(ctx, auth.ContextKeyAccountID, current.AccountID)
-	ctx = context.WithValue(ctx, auth.ContextKeyIsMaster, current.IsMaster)
-	copy := &http.Request{Method: http.MethodGet, URL: &url.URL{Path: "/internal-vod-owner"}, Header: make(http.Header)}
-	copy = copy.WithContext(ctx)
-	copy.Header.Set("X-Client-ID", r.Header.Get("X-Client-ID"))
-	tokens := profileunlock.RequestTokens(r)
-	if len(tokens) > 32 {
-		return deny(kidsvod.CodeAccessDenied)
-	}
-	total := 0
-	for _, token := range tokens {
-		total += len(token)
-		if len(token) > 512 || total > 8192 {
+	// Historic uninstalled ports retain their legacy PIN callback request.
+	// An original PG owner checks its immutable proof directly and creates no
+	// authenticated background request or copied credential/header container.
+	var copy *http.Request
+	if original == nil {
+		ctx := context.WithValue(context.Background(), auth.ContextKeySession, current)
+		ctx = context.WithValue(ctx, auth.ContextKeyAccountID, current.AccountID)
+		ctx = context.WithValue(ctx, auth.ContextKeyIsMaster, current.IsMaster)
+		copy = &http.Request{Method: http.MethodGet, URL: &url.URL{Path: "/internal-vod-owner"}, Header: make(http.Header)}
+		copy = copy.WithContext(ctx)
+		copy.Header.Set("X-Client-ID", r.Header.Get("X-Client-ID"))
+		tokens := profileunlock.RequestTokens(r)
+		if len(tokens) > 32 {
 			return deny(kidsvod.CodeAccessDenied)
 		}
-		copy.Header.Add(profileunlock.Header, token)
+		total := 0
+		for _, token := range tokens {
+			total += len(token)
+			if len(token) > 512 || total > 8192 {
+				return deny(kidsvod.CodeAccessDenied)
+			}
+			copy.Header.Add(profileunlock.Header, token)
+		}
 	}
 	client := normalizeClientID(r.Header.Get("X-Client-ID"))
 	if current.ClientID != "" {
@@ -251,8 +285,15 @@ func (b *vodBoundary) requestOwner(w http.ResponseWriter, r *http.Request, op vo
 	if current.ExpiresAt.Before(expires) {
 		expires = current.ExpiresAt
 	}
-	ownerCtx, cancel := context.WithDeadline(context.Background(), expires)
-	o := &vodOwnerContext{issuer: b, explicitProfile: explicit != "", operation: op, disposition: vodNotApplicable, state: state, ownerState: ownerState, session: current, profile: owner, client: client, request: copy, expires: expires, ctx: ownerCtx, cancel: cancel}
+	parent := context.Background()
+	if original != nil {
+		if original.ExpiresAt().Before(expires) {
+			expires = original.ExpiresAt()
+		}
+		parent = original.Context()
+	}
+	ownerCtx, cancel := context.WithDeadline(parent, expires)
+	o := &vodOwnerContext{issuer: b, explicitProfile: explicit != "", operation: op, disposition: vodNotApplicable, state: state, ownerState: ownerState, session: current, profile: owner, client: client, request: copy, expires: expires, ctx: ownerCtx, cancel: cancel, original: original}
 	if op == vodCleanup {
 		o.disposition = vodCleanupOnly
 	}
@@ -260,16 +301,28 @@ func (b *vodBoundary) requestOwner(w http.ResponseWriter, r *http.Request, op vo
 		cancel()
 		return deny(kidsvod.CodeContextChanged)
 	}
+	keepOriginal = true
 	return o, true
 }
 func (o *vodOwnerContext) recheck(ctx context.Context, op vodOperation) error {
 	if o == nil || o.issuer == nil || o.superseded != nil && o.superseded.Load() || o.workerCurrent != nil && !o.workerCurrent() || o.disposition == vodUnknown || o.operation != op || o.ctx == nil || o.ctx.Err() != nil || ctx == nil || ctx.Err() != nil || !o.expires.After(o.issuer.now()) {
 		return errVODOwner
 	}
+	if o.issuer.original != nil && o.original == nil {
+		return errVODOwner
+	}
+	if o.original != nil && o.original.Check(ctx) != nil {
+		return errVODOwner
+	}
 	bounded, cancel := context.WithTimeout(ctx, 500*time.Millisecond)
 	defer cancel()
-	stop := context.AfterFunc(o.ctx, cancel)
-	defer stop()
+	if o.original != nil {
+		stop := familyMediaAfterFunc(o.ctx, cancel)
+		defer stop()
+	} else {
+		stop := context.AfterFunc(o.ctx, cancel)
+		defer stop()
+	}
 	ctx = bounded
 	b := o.issuer
 	state, err := b.state(ctx, o.session.AccountID)
@@ -308,15 +361,17 @@ func (o *vodOwnerContext) recheck(ctx context.Context, op vodOperation) error {
 		}
 	}
 	if state.mode == vodAccountActive || o.ownerState.mode == vodAccountActive || op == vodCleanup {
-		if current.Scope != "" || o.profile.ID == "" || b.pin == nil || (state.mode == vodAccountActive || o.ownerState.mode == vodAccountActive) && o.profile.IsKids && op != vodCleanup {
+		if current.Scope != "" || o.profile.ID == "" || b.pin == nil && o.original == nil || (state.mode == vodAccountActive || o.ownerState.mode == vodAccountActive) && o.profile.IsKids && op != vodCleanup {
 			return errVODOwner
 		}
-		pinCtx := context.WithValue(ctx, auth.ContextKeySession, current)
-		pinCtx = context.WithValue(pinCtx, auth.ContextKeyAccountID, current.AccountID)
-		pinCtx = context.WithValue(pinCtx, auth.ContextKeyIsMaster, current.IsMaster)
-		r := o.request.Clone(pinCtx)
-		if !b.pin(&vodDiscardWriter{header: make(http.Header)}, r, o.profile.ID) {
-			return errVODOwner
+		if o.original == nil {
+			pinCtx := context.WithValue(ctx, auth.ContextKeySession, current)
+			pinCtx = context.WithValue(pinCtx, auth.ContextKeyAccountID, current.AccountID)
+			pinCtx = context.WithValue(pinCtx, auth.ContextKeyIsMaster, current.IsMaster)
+			r := o.request.Clone(pinCtx)
+			if !b.pin(&vodDiscardWriter{header: make(http.Header)}, r, o.profile.ID) {
+				return errVODOwner
+			}
 		}
 		profile, err := b.identity.CurrentProfile(ctx, o.profile.ID)
 		if err != nil || profile != o.profile {
@@ -348,6 +403,9 @@ func (o *vodOwnerContext) recheck(ctx context.Context, op vodOperation) error {
 			return errVODOwner
 		}
 	}
+	if o.original != nil && o.original.Check(ctx) != nil {
+		return errVODOwner
+	}
 	return nil
 }
 func (b *vodBoundary) recheckHTTP(w http.ResponseWriter, r *http.Request, o *vodOwnerContext, op vodOperation) bool {
@@ -370,6 +428,9 @@ func (*vodDiscardWriter) Write(p []byte) (int, error) { return len(p), nil }
 func (o *vodOwnerContext) release() {
 	if o != nil && o.cancel != nil {
 		o.cancel()
+	}
+	if o != nil && o.original != nil {
+		o.original.Close()
 	}
 }
 func (b *vodBoundary) resultSelectors(w http.ResponseWriter, o *vodOwnerContext, attributes map[string]string) bool {
