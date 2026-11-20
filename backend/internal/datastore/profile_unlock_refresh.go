@@ -306,7 +306,13 @@ func (ds *DataStore) LogoutProfilePinSession(r *http.Request) error {
 	var raw []byte
 	var version string
 	err = tx.QueryRow(ctx, `SELECT to_jsonb(a),concat(a.tableoid::oid,':',a.xmin::text,':',a.ctid::text) FROM accounts a WHERE id=$1 FOR UPDATE`, original.AccountID).Scan(&raw, &version)
-	if err != nil || !sameParentMutationRow(frame.actorRow, parentMutationRow{raw: raw, version: version}) {
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return pinContextError(ctx, ErrPGPinChanged)
+		}
+		return pinContextError(ctx, ErrPGPinUnavailable)
+	}
+	if !sameParentMutationRow(frame.actorRow, parentMutationRow{raw: raw, version: version}) {
 		return pinContextError(ctx, ErrPGPinChanged)
 	}
 	var hashes []string

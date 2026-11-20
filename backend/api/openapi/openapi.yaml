@@ -1806,9 +1806,13 @@ paths:
       operationId: logout
       summary: Revoke the current session
       description: |
-        Deletes the session token from the `Authorization` header and every
-        profile unlock issued to it. Already-revoked tokens are treated as
-        success.
+        Revokes the current session and its profile unlocks. Configured PG
+        logout retains the authenticated original full-session refresh lineage;
+        genuine missing, expired or changed original authority returns 401.
+        Store unavailability, cancellation or an unknown COMMIT returns 503
+        without a success claim. An unknown or lost response does not prove
+        rollback and is not automatically replayed. Legacy JSON logout retains
+        its existing already-revoked-token success behavior.
       parameters:
         - $ref: '#/components/parameters/ClientID'
       responses:
@@ -1821,6 +1825,8 @@ paths:
         '400':
           $ref: '#/components/responses/Error'
         '401':
+          $ref: '#/components/responses/Error'
+        '503':
           $ref: '#/components/responses/Error'
 
   /api/version:

@@ -1,6 +1,7 @@
 package handlers
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"log"
@@ -10,6 +11,7 @@ import (
 
 	"novastream/internal/apierror"
 	"novastream/internal/auth"
+	"novastream/internal/datastore"
 	"novastream/internal/requestsecurity"
 	"novastream/models"
 	"novastream/services/accounts"
@@ -169,14 +171,25 @@ func (h *AuthHandler) Login(w http.ResponseWriter, r *http.Request) {
 // Logout invalidates the current session.
 func (h *AuthHandler) Logout(w http.ResponseWriter, r *http.Request) {
 	if h.pgPins != nil {
-		if err := h.sessions.LogoutProfilePinSession(r); err != nil {
-			apierror.Write(w, http.StatusUnauthorized, apierror.CodeSessionExpired, "invalid or expired session")
+		if h.sessions == nil {
+			writePGLogoutFailure(w, r, datastore.ErrPGPinUnavailable)
 			return
 		}
-		if r.Context().Err() != nil {
+		if err := h.sessions.LogoutProfilePinSession(r); err != nil {
+			writePGLogoutFailure(w, r, err)
+			return
+		}
+		if err := r.Context().Err(); err != nil {
+			writePGLogoutFailure(w, r, err)
 			return
 		}
 		w.Header().Set("Content-Type", "application/json")
+		// Header access may wait on an actual transport publication boundary.
+		// A known logout ACK must not become success after original cancellation.
+		if err := r.Context().Err(); err != nil {
+			writePGLogoutFailure(w, r, err)
+			return
+		}
 		json.NewEncoder(w).Encode(map[string]string{"status": "logged out"})
 		return
 	}
@@ -199,6 +212,20 @@ func (h *AuthHandler) Logout(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]string{"status": "logged out"})
+}
+
+// Invalid original authority differs from an unavailable or unknown operation.
+// This only classifies the existing original-lineage PG logout result; it never
+// reauthenticates, retries, issues authority or replaces the private frame.
+func writePGLogoutFailure(w http.ResponseWriter, r *http.Request, err error) {
+	canceled := errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) || r.Context().Err() != nil
+	if !canceled && (errors.Is(err, datastore.ErrPGPinChanged) || errors.Is(err, datastore.ErrPGPinUsed) || errors.Is(err, datastore.ErrProfilePinAccessChanged) || errors.Is(err, datastore.ErrProfilePinAccessUsed) || errors.Is(err, sessions.ErrInvalidToken) || errors.Is(err, sessions.ErrSessionNotFound) || errors.Is(err, sessions.ErrSessionExpired)) {
+		apierror.Write(w, http.StatusUnauthorized, apierror.CodeSessionExpired, "invalid or expired session")
+		return
+	}
+	// SQL failures, an unknown COMMIT and canceled delivery never prove rollback.
+	// The generic response contains no token, count, retry or success claim.
+	apierror.Write(w, http.StatusServiceUnavailable, apierror.CodeServiceUnavailable, "logout could not be confirmed")
 }
 
 // Me returns the current authenticated account info.
