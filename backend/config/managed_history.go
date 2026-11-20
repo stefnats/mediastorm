@@ -80,7 +80,7 @@ type managedJellyfinCredentials struct {
 // ManagedJellyfinLease retains one original credential snapshot. It is only a
 // managed-write lifetime, never account/PIN/ACL or upstream membership authority.
 // Manual/external writes are unsupported: stat equality is not history proof.
-// No credential getter or authenticated transport is provided by this type.
+// Credentials are available only to the fixed private scoped HTTP boundary.
 type ManagedJellyfinLease struct{ state *managedJellyfinState }
 
 type managedJellyfinState struct {
@@ -94,6 +94,10 @@ type managedJellyfinState struct {
 	file        managedSnapshotFile
 	credentials managedJellyfinCredentials
 	closed      bool
+	bound       bool
+	transport   *ManagedJellyfinTransport
+	closeDone   chan struct{}
+	closeErr    error
 }
 
 func (ManagedJellyfinLease) Format(w fmt.State, _ rune) {
@@ -139,25 +143,37 @@ func (lease *ManagedJellyfinLease) Check(ctx context.Context) error {
 	return nil
 }
 
-// Close owns only this snapshot's descriptors. A future media owner must join
-// its actual IO before calling Close. Cancellation alone never refunds a slot.
+// Close joins the owned scoped transport before releasing snapshot descriptors.
+// Cancellation alone never refunds a slot.
 func (lease *ManagedJellyfinLease) Close() error {
 	state := lease.original()
 	if state == nil {
 		return ErrManagedConfigurationUnavailable
 	}
 	state.mu.Lock()
-	defer state.mu.Unlock()
 	if state.closed {
-		return nil
+		done := state.closeDone
+		state.mu.Unlock()
+		<-done
+		return state.closeErr
 	}
 	state.closed = true
 	state.cancel()
+	transport, file := state.transport, state.file
+	state.transport, state.file = nil, nil
+	state.mu.Unlock()
+	// No HTTP completion may wait under the lease/history/admission locks.
+	// Transport and body cleanup never call back into this parent Close.
 	var err error
-	if state.file != nil {
-		err = state.file.close()
-		state.file = nil
+	if transport != nil {
+		err = transport.Close()
 	}
+	if file != nil {
+		if fileErr := file.close(); fileErr != nil {
+			err = fileErr
+		}
+	}
+	state.mu.Lock()
 	state.credentials = managedJellyfinCredentials{}
 	managedConfigAdmission.Lock()
 	delete(managedConfigAdmission.owners, state)
@@ -168,9 +184,11 @@ func (lease *ManagedJellyfinLease) Close() error {
 	}
 	managedConfigAdmission.Unlock()
 	if err != nil {
-		return ErrManagedConfigurationUnavailable
+		state.closeErr = ErrManagedConfigurationUnavailable
 	}
-	return nil
+	close(state.closeDone)
+	state.mu.Unlock()
+	return state.closeErr
 }
 
 func captureManagedJellyfin(ctx context.Context, manager *Manager, integrationID string, read func(context.Context, string, string) (managedSnapshotFile, managedJellyfinCredentials, error)) (*ManagedJellyfinLease, error) {
@@ -245,7 +263,7 @@ func captureManagedJellyfin(ctx context.Context, manager *Manager, integrationID
 		return nil, ErrManagedConfigurationUnavailable
 	}
 	lease := &ManagedJellyfinLease{}
-	state := &managedJellyfinState{self: lease, ctx: lifetime, cancel: cancel, deadline: deadline, epoch: managedConfigHistory.epoch, path: path, file: file, credentials: credentials}
+	state := &managedJellyfinState{self: lease, ctx: lifetime, cancel: cancel, deadline: deadline, epoch: managedConfigHistory.epoch, path: path, file: file, credentials: credentials, closeDone: make(chan struct{})}
 	lease.state = state
 	managedConfigAdmission.Lock()
 	managedConfigAdmission.owners[state] = struct{}{}
