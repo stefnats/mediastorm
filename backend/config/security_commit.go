@@ -222,6 +222,14 @@ func beginManagedWrite(manager *Manager, owned *Settings) (*ManagedWriteReservat
 	if err := manager.EnsureDir(); err != nil {
 		return nil, err
 	}
+	// Preserve the actual legacy kernel error for an oversized raw write path.
+	// Guard metadata is bounded separately; it must not turn ENAMETOOLONG into
+	// a metadata error after EnsureDir has handled the original parent.
+	if len(manager.path) > 4096 {
+		if _, err := os.Lstat(manager.path + ".tmp"); err != nil && !os.IsNotExist(err) {
+			return nil, err
+		}
+	}
 	objects, err := settingscommit.OpenLockObjects(context.Background(), manager.path)
 	if err != nil {
 		return nil, err

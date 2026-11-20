@@ -257,7 +257,7 @@ func captureManagedJellyfin(ctx context.Context, manager *Manager, integrationID
 		}
 		return nil, ErrManagedConfigurationUnavailable
 	}
-	if ctx.Err() != nil || !deadline.After(time.Now()) || !settingsAttemptCurrent(attempt) || file.check(ctx) != nil {
+	if ctx.Err() != nil || !deadline.After(time.Now()) || file.check(ctx) != nil {
 		_ = file.close()
 		return nil, ErrManagedConfigurationUnavailable
 	}
@@ -272,10 +272,10 @@ func captureManagedJellyfin(ctx context.Context, manager *Manager, integrationID
 	lease.state = state
 	managedConfigAdmission.Lock()
 	if !settingsAttemptCurrent(attempt) {
-		managedConfigAdmission.Unlock()
+		// The existing read fence pinned these exact original bytes before the
+		// writer. Preserve that opaque capture contract, but return it retired:
+		// never adopt the new attempt or allow Check, Bind or transport IO.
 		cancel()
-		_ = file.close()
-		return nil, ErrManagedConfigurationUnavailable
 	}
 	managedConfigAdmission.owners[state] = struct{}{}
 	managedConfigAdmission.Unlock()

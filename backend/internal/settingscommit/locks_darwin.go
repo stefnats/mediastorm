@@ -50,3 +50,5 @@ func nativeReadRegular(path string, noFollow bool) (*os.File, error) {
 	}
 	return os.NewFile(uintptr(fd), path), nil
 }
+
+func nativePublishDirectory(from, to string) error { return unix.RenamexNp(from, to, unix.RENAME_EXCL) }

@@ -12,3 +12,5 @@ func nativeUnlock(*os.File) error               { return ErrUnsupported }
 func nativeConflict(error) bool                 { return false }
 
 func nativeReadRegular(string, bool) (*os.File, error) { return nil, ErrUnsupported }
+
+func nativePublishDirectory(string, string) error { return ErrUnsupported }

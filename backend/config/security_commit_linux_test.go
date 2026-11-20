@@ -157,6 +157,75 @@ func TestSecurityCurrentPolicyFenceKeepsOriginalFlagAcrossBusyAttempt(t *testing
 	if _, err = copyFence.EnforceProfilePins(); err == nil {
 		t.Fatal("copied policy proof gained authority")
 	}
+	t.Run("pending-capture-retired", func(t *testing.T) {
+		fixture := newManagedHTTPFixture(t, false)
+		ready, release := make(chan struct{}), make(chan struct{})
+		var once sync.Once
+		unblock := func() { once.Do(func() { close(release) }) }
+		type captureResult struct {
+			lease *ManagedJellyfinLease
+			err   error
+		}
+		result := make(chan captureResult, 1)
+		received := false
+		var captured captureResult
+		t.Cleanup(func() {
+			unblock()
+			if !received {
+				select {
+				case captured = <-result:
+					received = true
+				case <-time.After(5 * time.Second):
+					t.Error("actual original capture did not join")
+					return
+				}
+			}
+			if captured.lease != nil {
+				_ = captured.lease.Close()
+			}
+		})
+		originalAttempt := settingsAttemptNow()
+		ctx := managedHTTPBoundedTestContext(t)
+		go func() {
+			lease, err := captureManagedJellyfin(ctx, fixture.manager, "integration", func(ctx context.Context, path, id string) (managedSnapshotFile, managedJellyfinCredentials, error) {
+				file, credentials, err := readManagedJellyfinFile(ctx, path, id)
+				close(ready)
+				<-release
+				return file, credentials, err
+			})
+			result <- captureResult{lease, err}
+		}()
+		select {
+		case <-ready:
+		case <-time.After(5 * time.Second):
+			t.Fatal("original regular-file read did not enter")
+		}
+		if err := fixture.manager.Save(fixture.settings); !errors.Is(err, settingscommit.ErrBusy) {
+			t.Fatal("actual original file hold did not refuse managed write", err)
+		}
+		unblock()
+		select {
+		case captured = <-result:
+			received = true
+		case <-time.After(5 * time.Second):
+			t.Fatal("original captured data did not return")
+		}
+		if captured.err != nil || captured.lease == nil {
+			t.Fatal("correct old capture was discarded instead of retired")
+		}
+		if captured.lease.state.attempt != originalAttempt || captured.lease.state.credentials.token != managedHTTPTestToken {
+			t.Fatal("retired original capture adopted another attempt or mixed bytes")
+		}
+		if captured.lease.Context().Err() == nil || captured.lease.Check(context.Background()) == nil {
+			t.Fatal("retired original capture regained permission")
+		}
+		if transport, err := captured.lease.BindJellyfinScope(managedHTTPScope()); err == nil {
+			if transport != nil {
+				transport.Close()
+			}
+			t.Fatal("retired original with valid scope gained a transport")
+		}
+	})
 	hold.Close()
 	if err = f.manager.Save(changed); err != nil {
 		t.Fatal("actual ended progress did not restore ordinary Save", err)
@@ -196,6 +265,7 @@ func TestSecurityCredentialReadDoesNotMakeSaveJoinMediaCleanup(t *testing.T) {
 	fixture := newManagedHTTPFixture(t, false)
 	entered := make(chan struct{})
 	fixture.setResponse(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/octet-stream")
 		w.Header().Set("Content-Length", "100")
 		w.WriteHeader(200)
 		w.(http.Flusher).Flush()

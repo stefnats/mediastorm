@@ -875,3 +875,74 @@ func TestSettingsCoordinatorDefaultTLSPlainFallbackAndNoOriginalReplay(t *testin
 		t.Fatal("post-auth backend loss opened another SQL handshake")
 	}
 }
+
+func TestSettingsNativeAtomicInitializationAcrossConcurrentFirstUsers(t *testing.T) {
+	for round := 0; round < 32; round++ {
+		directory := t.TempDir()
+		path := filepath.Join(directory, "settings.json")
+		start := make(chan struct{})
+		type initialized struct {
+			objects *LockObjects
+			err     error
+		}
+		result := make(chan initialized, 2)
+		for worker := 0; worker < 2; worker++ {
+			go func() {
+				<-start
+				objects, err := OpenLockObjects(t.Context(), path)
+				if err == nil {
+					var guard *UnarmedWriteGuard
+					guard, err = TryUnarmedWrite(t.Context(), objects)
+					if guard != nil {
+						if currentErr := guard.Current(); err == nil {
+							err = currentErr
+						}
+						if closeErr := guard.Close(); err == nil {
+							err = closeErr
+						}
+					}
+				}
+				result <- initialized{objects, err}
+			}()
+		}
+		close(start)
+		values := make([]initialized, 0, 2)
+		// Join both real first users before inspecting outcomes or failing, so a
+		// regression cannot strand another charged native caller during cleanup.
+		for worker := 0; worker < 2; worker++ {
+			values = append(values, <-result)
+		}
+		var first os.FileInfo
+		var failed bool
+		for _, value := range values {
+			if value.err != nil {
+				failed = true
+			}
+			if value.objects == nil {
+				failed = true
+				continue
+			}
+			info, err := os.Lstat(value.objects.directory)
+			if err != nil || value.objects.check() != nil {
+				failed = true
+			} else if first == nil {
+				first = info
+			} else if !os.SameFile(first, info) {
+				failed = true
+			}
+			if record, err := value.objects.readRecord(); err != nil || record.Mode != "unarmed" {
+				failed = true
+			}
+			if err = value.objects.Close(); err != nil {
+				failed = true
+			}
+		}
+		if failed {
+			t.Fatal("concurrent first users observed an incomplete or replaced guard root")
+		}
+		entries, err := os.ReadDir(directory)
+		if err != nil || len(entries) != 1 || entries[0].Name() != directoryName {
+			t.Fatal("completed initializers leaked private staging or changed final root")
+		}
+	}
+}

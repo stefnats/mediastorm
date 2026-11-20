@@ -304,22 +304,35 @@ func TestSecurityBackupOriginalSessionSurvivesPool1ImportAndHeldFileWrite(t *tes
 		t.Fatal("actual held restore did not exclude progress transaction")
 	}
 	tx.Rollback(t.Context())
-	// Interrupt the actual held FIFO writer. Database-first partial restore
-	// remains explicit; no regular artifact or complete restore is claimed.
-	unix.Close(reader)
-	reader = -1
-	select {
-	case err := <-done:
-		launched = false
-		if err == nil {
-			t.Fatal("interrupted owned extraction unexpectedly succeeded")
+	// os.Create holds an O_RDWR FIFO, so closing our reader cannot generate
+	// EPIPE. Unlink only this owned staging NAME while both real FDs stay open;
+	// drain the finite extracted bytes. The final genuine Rename then fails
+	// with ENOENT instead of installing a FIFO as the cache settings artifact.
+	if err = os.Remove(fifo); err != nil {
+		t.Fatal("unlink own held staging pathname", err)
+	}
+	buffer := make([]byte, 65536)
+	deadline = time.Now().Add(10 * time.Second)
+	for time.Now().Before(deadline) {
+		select {
+		case err := <-done:
+			launched = false
+			if err == nil || !errors.Is(err, os.ErrNotExist) {
+				t.Fatal("missing owned staging did not cause actual final Rename failure", err)
+			}
+			after, _ := os.ReadFile(f.manager.ConfigPath())
+			if !bytes.Equal(originalManager, after) {
+				t.Fatal("restore changed separate original manager target")
+			}
+			cacheAfter, readErr := os.ReadFile(cachePath)
+			if readErr != nil || !bytes.Equal(cacheSettings, cacheAfter) {
+				t.Fatal("failed final Rename changed original cache settings")
+			}
+			return
+		default:
 		}
-		after, _ := os.ReadFile(f.manager.ConfigPath())
-		if !bytes.Equal(originalManager, after) {
-			t.Fatal("restore changed separate original manager target")
-		}
-		return
-	case <-time.After(10 * time.Second):
+		_, _ = unix.Read(reader, buffer)
+		time.Sleep(time.Millisecond)
 	}
 
 	t.Fatal("held actual file restore did not finish after release")

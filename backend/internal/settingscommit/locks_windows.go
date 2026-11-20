@@ -71,3 +71,16 @@ func nativeReadRegular(path string, noFollow bool) (*os.File, error) {
 	}
 	return os.NewFile(uintptr(handle), path), nil
 }
+
+func nativePublishDirectory(from, to string) error {
+	source, err := windows.UTF16PtrFromString(from)
+	if err != nil {
+		return err
+	}
+	destination, err := windows.UTF16PtrFromString(to)
+	if err != nil {
+		return err
+	}
+	// No REPLACE_EXISTING or cross-volume copy fallback is permitted.
+	return windows.MoveFileEx(source, destination, windows.MOVEFILE_WRITE_THROUGH)
+}

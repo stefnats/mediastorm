@@ -87,10 +87,11 @@ func OpenLockObjects(ctx context.Context, configPath string) (*LockObjects, erro
 		return nil, ErrMetadata
 	}
 	path := filepath.Join(absolute, directoryName)
-	created := false
-	if err = os.Mkdir(path, 0700); err == nil {
-		created = true
-	} else if !os.IsExist(err) {
+	if _, statErr := os.Lstat(path); os.IsNotExist(statErr) {
+		if err = initializeLockDirectory(ctx, absolute, path); err != nil {
+			return nil, err
+		}
+	} else if statErr != nil {
 		return nil, ErrMetadata
 	}
 	info, err := os.Lstat(path)
@@ -108,28 +109,13 @@ func OpenLockObjects(ctx context.Context, configPath string) (*LockObjects, erro
 		}
 		return nil, e
 	}
-	out.turn, err = nativeOpen(filepath.Join(path, "mutation-turn.lock"), created)
+	out.turn, err = nativeOpen(filepath.Join(path, "mutation-turn.lock"), false)
 	if err != nil {
 		return fail(ErrUnknown)
 	}
-	out.barrier, err = nativeOpen(filepath.Join(path, "commit-barrier.lock"), created)
+	out.barrier, err = nativeOpen(filepath.Join(path, "commit-barrier.lock"), false)
 	if err != nil {
 		return fail(ErrUnknown)
-	}
-	if created {
-		if err = nativeLock(out.turn, false, false); err != nil {
-			return fail(err)
-		}
-		if err = nativeLock(out.barrier, false, true); err != nil {
-			_ = nativeUnlock(out.turn)
-			return fail(err)
-		}
-		err = out.writeRecord(record{Version: 1, Family: nativeFamily, Mode: "unarmed"})
-		_ = nativeUnlock(out.barrier)
-		_ = nativeUnlock(out.turn)
-		if err != nil {
-			return fail(err)
-		}
 	}
 	if _, err = out.readRecord(); err != nil {
 		return fail(err)
@@ -137,6 +123,96 @@ func OpenLockObjects(ctx context.Context, configPath string) (*LockObjects, erro
 	published = true
 	return out, nil
 }
+
+// initializeLockDirectory exposes only a completely initialized positive
+// root. Concurrent first callers can never observe our private partial files.
+// Existing incomplete/foreign roots are not repaired or replaced.
+func initializeLockDirectory(ctx context.Context, parent, destination string) error {
+	stage, err := os.MkdirTemp(parent, directoryName+".initial-")
+	if err != nil {
+		return ErrMetadata
+	}
+	info, err := os.Lstat(stage)
+	if err != nil || !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
+		return ErrUnknown
+	}
+	owned := true
+	defer func() {
+		if owned {
+			named, statErr := os.Lstat(stage)
+			if statErr == nil && os.SameFile(info, named) {
+				_ = os.RemoveAll(stage)
+			}
+		}
+	}()
+	objects := &LockObjects{lockObjectsState: &lockObjectsState{directory: stage, info: info}}
+	objects.self = objects
+	closeFiles := func() error {
+		var result error
+		if objects.turn != nil {
+			result = objects.turn.Close()
+			objects.turn = nil
+		}
+		if objects.barrier != nil {
+			if err := objects.barrier.Close(); result == nil {
+				result = err
+			}
+			objects.barrier = nil
+		}
+		return result
+	}
+	defer closeFiles()
+	objects.turn, err = nativeOpen(filepath.Join(stage, "mutation-turn.lock"), true)
+	if err != nil {
+		return ErrMetadata
+	}
+	objects.barrier, err = nativeOpen(filepath.Join(stage, "commit-barrier.lock"), true)
+	if err != nil {
+		return ErrMetadata
+	}
+	if err = objects.writeRecord(record{Version: 1, Family: nativeFamily, Mode: "unarmed"}); err != nil {
+		return err
+	}
+	if err = objects.turn.Sync(); err != nil {
+		return ErrMetadata
+	}
+	if err = objects.barrier.Sync(); err != nil {
+		return ErrMetadata
+	}
+	if ctx.Err() != nil {
+		return ctx.Err()
+	}
+	// Windows deliberately denies deletion/rename with these construction
+	// handles open. Close every real handle before publishing the directory.
+	if err = closeFiles(); err != nil {
+		return ErrMetadata
+	}
+	named, err := os.Lstat(stage)
+	if err != nil || !os.SameFile(info, named) {
+		return ErrUnknown
+	}
+	if err = nativePublishDirectory(stage, destination); err != nil {
+		winner, statErr := os.Lstat(destination)
+		if statErr != nil || !winner.IsDir() || winner.Mode()&os.ModeSymlink != 0 {
+			return ErrMetadata
+		}
+		// The caller opens and fully validates this winner. No partial marker,
+		// unknown directory, or losing initializer is promoted into readiness.
+		return nil
+	}
+	owned = false
+	// Keep the historic best-effort directory flush contract. In particular,
+	// Windows may reject directory Sync while its write-through move and all
+	// individually synced/closed construction files remain valid basic writes.
+	directory, err := os.Open(parent)
+	if err == nil {
+		_ = directory.Sync()
+		_ = directory.Close()
+	}
+
+	return nil
+}
+
 func (o *LockObjects) valid() bool {
 	return o != nil && o.lockObjectsState != nil && o.self == o && o.turn != nil && o.barrier != nil
 }
