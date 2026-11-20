@@ -260,6 +260,13 @@ func TestFamilyJellyfinRawActualGETPublishesFinalChunkAndOriginalDeadline(t *tes
 			f := newFamilyJellyfinRawPG(t, data, 1)
 			r, release := f.rawRequest(t, "GET", 0)
 			defer release()
+			// Compare the original persisted PG expiry, not the pre-INSERT
+			// nanosecond value returned by the fixture session constructor.
+			storedSession, err := f.store.Sessions().Get(t.Context(), f.session.Token)
+			if err != nil || storedSession == nil {
+				t.Fatal("read original persisted synthetic session")
+			}
+			originalExpiry := storedSession.ExpiresAt
 			w := newFamilyLocalRawRecorder()
 			if familyJellyfinRawServe(f.handler, w, r) || w.Code != 200 || sha256.Sum256(w.Body.Bytes()) != sha256.Sum256(data) || f.wire.bad.Load() || f.wire.downloads.Load() != 1 {
 				t.Fatal("actual authorized finite attachment or final chunk failed")
@@ -272,13 +279,16 @@ func TestFamilyJellyfinRawActualGETPublishesFinalChunkAndOriginalDeadline(t *tes
 			w.mu.Unlock()
 			found := false
 			for _, deadline := range deadlines {
-				found = found || deadline.Equal(f.session.ExpiresAt)
-				if deadline.After(f.session.ExpiresAt) {
+				found = found || deadline.Equal(originalExpiry)
+				if deadline.After(originalExpiry) {
 					t.Fatal("writer deadline exceeded original full-session expiry")
 				}
 			}
-			if !found || f.pgClosed.Load() != 1 {
-				t.Fatal("original expiry or actual PG cleanup did not complete")
+			if !found {
+				t.Fatalf("original persisted expiry %s absent from actual writer deadlines %v", originalExpiry, deadlines)
+			}
+			if f.pgClosed.Load() != 1 {
+				t.Fatal("actual original PG cleanup did not complete")
 			}
 		})
 	}
