@@ -143,31 +143,58 @@ func newService(original context.Context, prepared bool, config ServiceConfig, m
 // Every source operation registers before opening a file, query, or child.
 // The returned finish joins its cancellation callback before refunding the
 // original service's operation count. It conveys lifetime, never permission.
-func (s *Service) beginSourceWork(caller context.Context, heavy bool) (context.Context, func(), error) {
-	if s == nil {
-		return nil, nil, ErrServiceUnavailable
+// sourceOriginalLocked selects only this service's existing original lifetime.
+// Historical valid legacy cache calls retain their documented lazy setup;
+// prepared managed instances can never infer a missing original context.
+func (s *Service) sourceOriginalLocked() (context.Context, error) {
+	if s.closed || s.stopping {
+		return nil, ErrServiceUnavailable
 	}
-	s.mu.Lock()
-	// Isolated historical callers can construct a cache-only legacy service.
-	// Prepared managed services never infer a missing original lifetime.
-	if !s.prepared && !s.closed {
+	if !s.prepared {
 		if s.ctx == nil {
 			s.ctx, s.cancel = context.WithCancel(context.Background())
 		} else if s.cancel == nil {
 			s.ctx, s.cancel = context.WithCancel(s.ctx)
 		}
 	}
-	if s.closed || s.stopping || s.ctx == nil || s.ctx.Err() != nil || s.prepared && (s.self != s || !s.active) || heavy && s.prepared && s.jobs >= 16 {
-		s.mu.Unlock()
+	if s.ctx == nil || s.ctx.Err() != nil || s.prepared && (s.self != s || !s.active) {
+		return nil, ErrServiceUnavailable
+	}
+	return s.ctx, nil
+}
+
+// Runtime adoption is private and explicit at the five intentional no-caller
+// entry points. A public missing caller can never reach this path through DATA.
+func (s *Service) beginRuntimeWork(heavy bool) (context.Context, func(), error) {
+	if s == nil {
 		return nil, nil, ErrServiceUnavailable
 	}
-	original := s.ctx
-	if caller == nil {
-		caller = original
+	s.mu.Lock()
+	original, err := s.sourceOriginalLocked()
+	s.mu.Unlock()
+	if err != nil {
+		return nil, nil, err
 	}
-	if caller.Err() != nil {
+	// The source gate rechecks original/caller cancellation and Close after the
+	// lock handoff, before any actual jobs/WG registration or source operation.
+	return s.beginSourceWork(original, heavy)
+}
+func (s *Service) beginSourceWork(caller context.Context, heavy bool) (context.Context, func(), error) {
+	if s == nil || caller == nil {
+		return nil, nil, ErrServiceUnavailable
+	}
+	if err := caller.Err(); err != nil {
+		return nil, nil, err
+	}
+	s.mu.Lock()
+	if err := caller.Err(); err != nil {
 		s.mu.Unlock()
-		return nil, nil, caller.Err()
+		return nil, nil, err
+	}
+	original, err := s.sourceOriginalLocked()
+	if err != nil || heavy && s.prepared && s.jobs >= 16 {
+		s.mu.Unlock()
+		return nil, nil, ErrServiceUnavailable
 	}
 	ctx, cancel := context.WithCancel(caller)
 	if deadline, ok := original.Deadline(); ok {
@@ -380,7 +407,7 @@ func (s *Service) GetQueueStats(ctx context.Context) (*database.QueueStats, erro
 
 // StartManualScan starts a manual scan of the specified directory
 func (s *Service) StartManualScan(scanPath string) error {
-	original, finish, err := s.beginSourceWork(nil, false)
+	original, finish, err := s.beginRuntimeWork(false)
 	if err != nil {
 		return err
 	}
@@ -555,7 +582,12 @@ func (s *Service) isFileAlreadyInQueue(ctx context.Context, filePath string) boo
 
 // AddToQueue adds a new NZB file to the import queue with optional category and priority
 func (s *Service) AddToQueue(filePath string, relativePath *string, category *string, priority *database.QueuePriority) (*database.ImportQueueItem, error) {
-	return s.addToQueue(nil, filePath, relativePath, category, priority)
+	ctx, finish, err := s.beginRuntimeWork(true)
+	if err != nil {
+		return nil, err
+	}
+	defer finish()
+	return s.addToQueueWork(ctx, filePath, relativePath, category, priority)
 }
 func (s *Service) addToQueue(caller context.Context, filePath string, relativePath *string, category *string, priority *database.QueuePriority) (*database.ImportQueueItem, error) {
 	ctx, finish, err := s.beginSourceWork(caller, true)
@@ -563,9 +595,12 @@ func (s *Service) addToQueue(caller context.Context, filePath string, relativePa
 		return nil, err
 	}
 	defer finish()
+	return s.addToQueueWork(ctx, filePath, relativePath, category, priority)
+}
+func (s *Service) addToQueueWork(ctx context.Context, filePath string, relativePath *string, category *string, priority *database.QueuePriority) (*database.ImportQueueItem, error) {
 	// Calculate file size before adding to queue
 	var fileSize *int64
-	if size, err := s.calculateFileSizeContext(ctx, filePath); err != nil {
+	if size, err := s.calculateFileSizeWork(ctx, filePath); err != nil {
 		s.log.Warn("Failed to calculate file size", "file", filePath, "error", err)
 		// Continue with NULL file size - don't fail the queue addition
 		fileSize = nil
@@ -866,7 +901,7 @@ func (s *Service) ProcessItemInBackground(ctx context.Context, itemID int64) {
 	if ctx == nil || ctx.Err() != nil {
 		return
 	}
-	work, finish, err := s.beginSourceWork(nil, true)
+	work, finish, err := s.beginRuntimeWork(true)
 	if err != nil {
 		return
 	}
@@ -996,7 +1031,12 @@ func (s *Service) ProcessItemInBackground(ctx context.Context, itemID int64) {
 // CalculateFileSizeOnly calculates the total file size from NZB/STRM segments
 // This is a lightweight parser that only extracts size information without full processing
 func (s *Service) CalculateFileSizeOnly(filePath string) (int64, error) {
-	return s.calculateFileSizeContext(nil, filePath)
+	ctx, finish, err := s.beginRuntimeWork(false)
+	if err != nil {
+		return 0, err
+	}
+	defer finish()
+	return s.calculateFileSizeWork(ctx, filePath)
 }
 func (s *Service) calculateFileSizeContext(caller context.Context, filePath string) (int64, error) {
 	ctx, finish, err := s.beginSourceWork(caller, false)
@@ -1004,6 +1044,9 @@ func (s *Service) calculateFileSizeContext(caller context.Context, filePath stri
 		return 0, err
 	}
 	defer finish()
+	return s.calculateFileSizeWork(ctx, filePath)
+}
+func (s *Service) calculateFileSizeWork(ctx context.Context, filePath string) (int64, error) {
 	file, err := os.Open(filePath)
 	if err != nil {
 		return 0, NewNonRetryableError("failed to open file for size calculation", err)
