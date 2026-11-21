@@ -14,7 +14,7 @@ import (
 	"net/url"
 	"novastream/config"
 	"novastream/internal/datastore"
-	"novastream/internal/settingscommit"
+	"novastream/internal/settingsbootstrap"
 	"os"
 	"path/filepath"
 	"strings"
@@ -140,15 +140,20 @@ func (p *shareRedemptionProxy) Close() {
 		_ = os.RemoveAll(p.dir)
 	})
 }
+
 func shareRedemptionThroughProxy(t *testing.T, f *sharePlaybackHTTPFixture) *shareRedemptionProxy {
 	t.Helper()
 	u, e := url.Parse(f.store.Pool().Config().ConnString())
 	if e != nil {
 		t.Fatal(e)
 	}
+	// Read DATA while the original native owner is still live; its armed root
+	// remains unchanged and can never be reset into an unarmed proxy domain.
+	settings, e := f.manager.Load()
+	if e != nil {
+		t.Fatal(e)
+	}
 	p := newShareRedemptionProxy(t, u)
-	// Recompose real security/coordinator after retiring the old managed owner;
-	// the same original synthetic schema/data is reachable through actual proxy.
 	f.runtime.Close()
 	f.base.h.Close()
 	if e = f.security.Close(); e != nil {
@@ -161,43 +166,29 @@ func shareRedemptionThroughProxy(t *testing.T, f *sharePlaybackHTTPFixture) *sha
 	query.Set("host", p.dir)
 	query.Set("sslmode", "disable")
 	u.RawQuery = query.Encode()
-	settings, e := f.manager.Load()
-	if e != nil {
-		t.Fatal(e)
-	}
 	settings.Database.URL = u.String()
-	if e = f.manager.Save(settings); e != nil {
+	settings.Database.MaxOpenConns = 2
+	manager := config.NewManager(filepath.Join(t.TempDir(), "settings.json"))
+	if e = manager.Save(settings); e != nil {
 		t.Fatal(e)
 	}
-	store, e := datastore.New(t.Context(), u.String(), datastore.WithMaxConns(2), datastore.WithMinConns(1))
+	startup, e := settingsbootstrap.Begin(t.Context(), manager, "")
 	if e != nil {
 		t.Fatal(e)
 	}
-	t.Cleanup(store.Close)
-	objects, e := settingscommit.OpenLockObjects(t.Context(), f.manager.ConfigPath())
+	t.Cleanup(func() {
+		if e := startup.Close(); e != nil {
+			t.Error(e)
+		}
+	})
+	store, e := startup.Migrate(t.Context())
 	if e != nil {
 		t.Fatal(e)
 	}
-	t.Cleanup(func() { _ = objects.Close() })
-	coordinator, e := settingscommit.NewForPool(t.Context(), store.Pool(), objects)
-	if e != nil {
+	if e = startup.Finish(); e != nil {
 		t.Fatal(e)
 	}
-	t.Cleanup(func() { _ = coordinator.Close() })
-	guard, e := coordinator.TryWrite(t.Context())
-	if e != nil {
-		t.Fatal(e)
-	}
-	if e = coordinator.Arm(guard); e != nil {
-		t.Fatal(e)
-	}
-	security, e := config.InstallManagedSecurity(f.manager, coordinator, "")
-	_ = guard.Close()
-	if e != nil {
-		t.Fatal(e)
-	}
-	t.Cleanup(func() { _ = security.Close() })
-	runtime, e := datastore.NewShareLinkRedeemer(t.Context(), store, f.manager, security, coordinator)
+	runtime, e := startup.NewShareLinkRedeemer(store)
 	if e != nil {
 		t.Fatal(e)
 	}
@@ -205,6 +196,7 @@ func shareRedemptionThroughProxy(t *testing.T, f *sharePlaybackHTTPFixture) *sha
 	f.share.SetManagedShareRedemption(runtime)
 	return p
 }
+
 func TestSharePlaybackPublicOpen(t *testing.T) {
 	for _, kind := range []string{"known-ack-redirect", "null-legacy-recreate", "ids-only-recreate", "wrong-token", "unknown-ack-no-output", "pre-header-cancel-503", "held-write-runtime-cancel", "held-write-source-expiry", "owned-display-params-no-authority"} {
 		t.Run(kind, func(t *testing.T) {

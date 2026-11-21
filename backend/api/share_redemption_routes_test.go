@@ -42,7 +42,7 @@ func shareActualRegistered(t *testing.T, f *recordingProgressRouteFixture, video
 	router := mux.NewRouter()
 	Register(router, nil, meta, nil, nil, nil, nil, nil, nil, video, handlers.NewUsersHandler(f.users, accountService), nil, nil, list, &handlers.HistoryHandler{},
 		nil, nil, nil, recordingHandler, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil,
-		nil, accountService, f.sessions, f.users, share, nil, nil, "", nil,
+		nil, nil, nil, accountService, f.sessions, f.users, share, nil, nil, "", nil,
 		WithPGProfilePins(f.pins), WithProfileUnlocks(profileunlock.NewService(f.ds.ProfileUnlocks()), func() config.SecuritySettings { return config.SecuritySettings{EnforceProfilePins: f.enforce.Load()} }), WithRecordingProgress(f.progress))
 	return router
 }
