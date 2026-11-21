@@ -166,7 +166,7 @@ func TestPreparedNzbSystemLifecycle(t *testing.T) {
 			t.Fatal(e)
 		}
 		_ = db.Close()
-		ns, e := integration.PrepareNzbSystem(t.Context(), cfg, nil, nil)
+		ns, e := integration.PrepareNzbSystem(t.Context(), cfg, nil, func() *config.AltMountConfig { return &config.AltMountConfig{} })
 		if e != nil {
 			t.Fatal(e)
 		}
@@ -248,7 +248,7 @@ func TestPreparedNzbSystemLifecycle(t *testing.T) {
 	t.Run("partial-constructor-closes-database", func(t *testing.T) {
 		cfg := preparedNzbConfig(t)
 		cfg.MaxProcessorWorkers = 33
-		ns, e := integration.PrepareNzbSystem(t.Context(), cfg, nil, nil)
+		ns, e := integration.PrepareNzbSystem(t.Context(), cfg, nil, func() *config.AltMountConfig { return &config.AltMountConfig{} })
 		if e == nil || ns != nil {
 			if ns != nil {
 				_ = ns.Close()
