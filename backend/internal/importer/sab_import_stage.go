@@ -133,6 +133,13 @@ func (s *Service) StageSABImport(ctx context.Context, id int64, source SABImport
 // The private repository parameter permits precise post-real-COMMIT error
 // injection in tests; production always uses the existing actual SQLite DB.
 func (s *Service) stageSABImportWithRepository(ctx context.Context, id int64, source SABImportPreviewSettings, target SABImportStageSettings, authorize func(context.Context) error, repo sabStageRepository) (SABImportStageStatus, error) {
+	work, finishSource, sourceError := s.beginSourceWork(ctx, true)
+	if sourceError != nil {
+		return SABImportStageStatus{}, ErrSABImportStageUnavailable
+	}
+	defer finishSource()
+	ctx = work
+
 	fail := func() (SABImportStageStatus, error) { return SABImportStageStatus{}, ErrSABImportStageUnavailable }
 	if ctx == nil || ctx.Err() != nil || authorize == nil || repo == nil {
 		return fail()

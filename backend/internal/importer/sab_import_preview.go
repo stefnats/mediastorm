@@ -115,6 +115,13 @@ type sabHeldInventory struct {
 // The consumer executes synchronously while all original descriptors and the
 // shared operation slot remain owned. It never receives a public path grant.
 func (s *Service) withSABImportInventory(ctx context.Context, id int64, settings SABImportPreviewSettings, authorize func(context.Context) error, budget time.Duration, consume func(context.Context, *sabHeldInventory) (SABImportPreview, error)) (SABImportPreview, error) {
+	work, finishSource, sourceError := s.beginSourceWork(ctx, false)
+	if sourceError != nil {
+		return SABImportPreview{}, ErrSABImportPreviewUnavailable
+	}
+	defer finishSource()
+	ctx = work
+
 	fail := func() (SABImportPreview, error) { return SABImportPreview{}, ErrSABImportPreviewUnavailable }
 	if ctx == nil || ctx.Err() != nil || authorize == nil || budget <= 0 || budget > 5*time.Minute {
 		return fail()

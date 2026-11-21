@@ -1,6 +1,8 @@
 package pool
 
 import (
+	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"sync"
@@ -33,6 +35,289 @@ type Manager interface {
 	// this to size their own parallelism fairly so several concurrent requests
 	// can each take a fraction of the remaining pool without one saturating it.
 	AvailableConnections() int
+}
+
+var ErrPreparedManagerUnavailable = errors.New("prepared NNTP manager unavailable")
+
+// PreparedManager owns only configuration and physical pool lifetime. It does
+// not authenticate a request or grant article/source access.
+type PreparedManager struct {
+	self         *PreparedManager
+	mu           sync.Mutex
+	ctx          context.Context
+	cancel       context.CancelFunc
+	active       bool
+	closed       bool
+	providers    []nntppool.UsenetProviderConfig
+	pool         nntppool.UsenetConnectionPool
+	retiring     nntppool.UsenetConnectionPool
+	poolCancel   context.CancelFunc
+	retireCancel context.CancelFunc
+	buildCancel  context.CancelFunc
+	generation   uint64
+	build        bool
+	building     bool
+	lastErr      error
+	wake         chan struct{}
+	changed      chan struct{}
+	workers      sync.WaitGroup
+	closeOnce    sync.Once
+}
+
+func NewPreparedManager(original context.Context) (*PreparedManager, error) {
+	if original == nil || original.Err() != nil {
+		return nil, ErrPreparedManagerUnavailable
+	}
+	ctx, cancel := context.WithCancel(original)
+	m := &PreparedManager{ctx: ctx, cancel: cancel, wake: make(chan struct{}, 1), changed: make(chan struct{})}
+	m.self = m
+	return m, nil
+}
+
+func (m *PreparedManager) notifyLocked() {
+	close(m.changed)
+	m.changed = make(chan struct{})
+	select {
+	case m.wake <- struct{}{}:
+	default:
+	}
+}
+
+func (m *PreparedManager) Activate() error {
+	if m == nil || m.self != m {
+		return ErrPreparedManagerUnavailable
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.closed || m.ctx.Err() != nil || m.active {
+		return ErrPreparedManagerUnavailable
+	}
+	m.active = true
+	m.build = len(m.providers) != 0
+	m.workers.Add(1)
+	go m.run()
+	m.notifyLocked()
+	return nil
+}
+
+func (m *PreparedManager) SetProviders(providers []nntppool.UsenetProviderConfig) error {
+	if m == nil || m.self != m {
+		return ErrPreparedManagerUnavailable
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.closed || m.ctx.Err() != nil {
+		return ErrPreparedManagerUnavailable
+	}
+	m.generation++
+	if m.buildCancel != nil {
+		m.buildCancel()
+	}
+	m.providers = append([]nntppool.UsenetProviderConfig(nil), providers...)
+	for i := range m.providers {
+		m.providers[i].VerifyCapabilities = append([]string(nil), providers[i].VerifyCapabilities...)
+	}
+	if m.pool != nil {
+		m.retiring, m.pool = m.pool, nil
+		m.retireCancel, m.poolCancel = m.poolCancel, nil
+		if m.retireCancel != nil {
+			m.retireCancel()
+		}
+	}
+	m.build = m.active && len(providers) != 0
+	m.lastErr = nil
+	m.notifyLocked()
+	return nil
+}
+
+func (m *PreparedManager) GetPool() (nntppool.UsenetConnectionPool, error) {
+	if m == nil || m.self != m {
+		return nil, ErrPreparedManagerUnavailable
+	}
+	for {
+		m.mu.Lock()
+		if m.closed || !m.active || m.ctx.Err() != nil || len(m.providers) == 0 {
+			m.mu.Unlock()
+			return nil, ErrPreparedManagerUnavailable
+		}
+		if m.pool != nil {
+			current := m.pool
+			m.mu.Unlock()
+			return current, nil
+		}
+		if m.lastErr != nil {
+			err := m.lastErr
+			m.mu.Unlock()
+			return nil, err
+		}
+		if !m.build && !m.building {
+			m.build = true
+			m.notifyLocked()
+		}
+		changed := m.changed
+		m.mu.Unlock()
+		select {
+		case <-m.ctx.Done():
+			return nil, ErrPreparedManagerUnavailable
+		case <-changed:
+		}
+	}
+}
+
+func (m *PreparedManager) ClearPool() error {
+	if m == nil || m.self != m {
+		return ErrPreparedManagerUnavailable
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.closed || m.ctx.Err() != nil {
+		return ErrPreparedManagerUnavailable
+	}
+	m.generation++
+	if m.buildCancel != nil {
+		m.buildCancel()
+	}
+	if m.pool != nil {
+		m.retiring, m.pool = m.pool, nil
+		m.retireCancel, m.poolCancel = m.poolCancel, nil
+		if m.retireCancel != nil {
+			m.retireCancel()
+		}
+	}
+	m.build, m.lastErr = false, nil
+	m.notifyLocked()
+	return nil
+}
+
+func (m *PreparedManager) HasPool() bool {
+	if m == nil || m.self != m {
+		return false
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.active && !m.closed && m.ctx.Err() == nil && m.pool != nil
+}
+
+func (m *PreparedManager) AvailableConnections() int {
+	if m == nil || m.self != m {
+		return 0
+	}
+	m.mu.Lock()
+	current := m.pool
+	usable := m.active && !m.closed && m.ctx.Err() == nil
+	m.mu.Unlock()
+	if !usable || current == nil {
+		return 0
+	}
+	free := 0
+	for _, provider := range current.GetMetricsSnapshot().ProviderMetrics {
+		if available := int(provider.MaxConnections - provider.ActiveConnections); available > 0 {
+			free += available
+		}
+	}
+	return free
+}
+
+func (m *PreparedManager) run() {
+	defer m.workers.Done()
+	defer func() {
+		m.mu.Lock()
+		current, retiring := m.pool, m.retiring
+		cancelCurrent, cancelRetiring := m.poolCancel, m.retireCancel
+		m.pool, m.retiring = nil, nil
+		m.poolCancel, m.retireCancel = nil, nil
+		m.notifyLocked()
+		m.mu.Unlock()
+		if cancelCurrent != nil {
+			cancelCurrent()
+		}
+		if cancelRetiring != nil {
+			cancelRetiring()
+		}
+		if current != nil {
+			_ = nntppool.JoinConnectionPoolCleanup(current)
+		}
+		if retiring != nil {
+			_ = nntppool.JoinConnectionPoolCleanup(retiring)
+		}
+	}()
+	for {
+		select {
+		case <-m.ctx.Done():
+			return
+		case <-m.wake:
+		}
+		for {
+			m.mu.Lock()
+			retiring := m.retiring
+			cancelRetiring := m.retireCancel
+			m.retiring = nil
+			m.retireCancel = nil
+			build := m.build
+			m.build = false
+			m.building = build && len(m.providers) != 0
+			generation := m.generation
+			providers := append([]nntppool.UsenetProviderConfig(nil), m.providers...)
+			m.mu.Unlock()
+			if cancelRetiring != nil {
+				cancelRetiring()
+			}
+			if retiring != nil {
+				_ = nntppool.JoinConnectionPoolCleanup(retiring)
+			}
+			if m.ctx.Err() != nil {
+				return
+			}
+			if !build || len(providers) == 0 {
+				break
+			}
+			buildContext, cancelBuild := context.WithCancel(m.ctx)
+			m.mu.Lock()
+			m.buildCancel = cancelBuild
+			if m.generation != generation || m.closed {
+				cancelBuild()
+			}
+			m.mu.Unlock()
+			current, err := nntppool.NewConnectionPoolWithContext(buildContext, nntppool.Config{Providers: providers, Logger: slog.Default(), DelayType: nntppool.DelayTypeFixed, RetryDelay: 10 * time.Millisecond, MinConnections: 2})
+			m.mu.Lock()
+			m.building = false
+			m.buildCancel = nil
+			publish := !m.closed && m.ctx.Err() == nil && buildContext.Err() == nil && generation == m.generation && err == nil
+			if publish {
+				m.pool = current
+				m.poolCancel = cancelBuild
+			} else if generation == m.generation {
+				m.lastErr = err
+			}
+			m.notifyLocked()
+			pending := m.build || m.retiring != nil
+			m.mu.Unlock()
+			if !publish {
+				cancelBuild()
+			}
+			if !publish && current != nil {
+				_ = nntppool.JoinConnectionPoolCleanup(current)
+			}
+			if !pending {
+				break
+			}
+		}
+	}
+}
+
+func (m *PreparedManager) Close() error {
+	if m == nil || m.self != m {
+		return ErrPreparedManagerUnavailable
+	}
+	m.closeOnce.Do(func() {
+		m.mu.Lock()
+		m.closed = true
+		m.cancel()
+		m.notifyLocked()
+		m.mu.Unlock()
+		m.workers.Wait()
+	})
+	return nil
 }
 
 // manager implements the Manager interface

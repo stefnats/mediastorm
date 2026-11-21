@@ -55,6 +55,13 @@ type scanFileCandidate struct {
 }
 
 type Service struct {
+	self                                 *Service
+	life                                 context.Context
+	cancel                               context.CancelFunc
+	prepared, active, activating, closed bool
+	operations                           sync.WaitGroup
+	closeOnce                            sync.Once
+
 	store       *datastore.DataStore
 	repo        datastore.LocalMediaRepository
 	metadata    metadataMatcher
@@ -73,24 +80,133 @@ type scanMetadataCache struct {
 const parseBatchSize = 200
 
 func NewService(store *datastore.DataStore, metadata metadataMatcher, ffprobePath string) (*Service, error) {
-	if store == nil {
-		return nil, errors.New("local media datastore is required")
+	service, err := prepareService(context.Background(), false, store, metadata, ffprobePath)
+	if err != nil {
+		return nil, err
+	}
+	if err = service.reconcileScanState(service.life); err != nil {
+		log.Printf("[localmedia] failed to reconcile scan state on startup: %v", err)
+	}
+	return service, nil
+}
+
+// PrepareService allocates the original local catalogue without reconciling
+// stale scan rows or performing metadata/filesystem/probe work.
+func PrepareService(original context.Context, store *datastore.DataStore, metadata metadataMatcher, ffprobePath string) (*Service, error) {
+	return prepareService(original, true, store, metadata, ffprobePath)
+}
+
+var ErrServiceUnavailable = errors.New("original local media lifetime unavailable")
+
+func prepareService(original context.Context, prepared bool, store *datastore.DataStore, metadata metadataMatcher, ffprobePath string) (*Service, error) {
+	if original == nil || original.Err() != nil || store == nil {
+		return nil, ErrServiceUnavailable
 	}
 	path := strings.TrimSpace(ffprobePath)
 	if path == "" {
 		path = "ffprobe"
 	}
-	service := &Service{
-		store:       store,
-		repo:        store.LocalMedia(),
-		metadata:    metadata,
-		ffprobePath: path,
-		scans:       make(map[string]scanState),
-	}
-	if err := service.reconcileScanState(context.Background()); err != nil {
-		log.Printf("[localmedia] failed to reconcile scan state on startup: %v", err)
-	}
+	life, cancel := context.WithCancel(original)
+	service := &Service{store: store, repo: store.LocalMedia(), metadata: metadata, ffprobePath: path, scans: make(map[string]scanState), life: life, cancel: cancel, prepared: prepared, active: !prepared}
+	service.self = service
 	return service, nil
+}
+func localLifetimeSignal(ctx context.Context, cancel context.CancelFunc) func() {
+	done := make(chan struct{})
+	stop := context.AfterFunc(ctx, func() { cancel(); close(done) })
+	var once sync.Once
+	return func() {
+		once.Do(func() {
+			if !stop() {
+				<-done
+			}
+		})
+	}
+}
+func (s *Service) beginLocalWork(caller context.Context) (context.Context, func(), error) {
+	if s == nil {
+		return nil, nil, ErrServiceUnavailable
+	}
+	s.mu.Lock()
+	// Historical isolated catalogue fixtures have no prepared runtime. They keep
+	// their legacy lifetime; managed preparation never infers a missing owner.
+	if !s.prepared && !s.closed && s.life == nil {
+		s.life, s.cancel = context.WithCancel(context.Background())
+	}
+	if s.closed || s.life == nil || s.life.Err() != nil || s.prepared && (s.self != s || !s.active) {
+		s.mu.Unlock()
+		return nil, nil, ErrServiceUnavailable
+	}
+	original := s.life
+	if caller == nil {
+		caller = original
+	}
+	if caller.Err() != nil {
+		s.mu.Unlock()
+		return nil, nil, caller.Err()
+	}
+	ctx, cancel := context.WithCancel(caller)
+	if at, ok := original.Deadline(); ok {
+		cancel()
+		ctx, cancel = context.WithDeadline(caller, at)
+	}
+	s.operations.Add(1)
+	s.mu.Unlock()
+	stop := localLifetimeSignal(original, cancel)
+	var once sync.Once
+	finish := func() { once.Do(func() { cancel(); stop(); s.operations.Done() }) }
+	if ctx.Err() != nil || original.Err() != nil {
+		finish()
+		return nil, nil, ErrServiceUnavailable
+	}
+	return ctx, finish, nil
+}
+func (s *Service) Activate(caller context.Context) error {
+	if s == nil || caller == nil || caller.Err() != nil {
+		return ErrServiceUnavailable
+	}
+	s.mu.Lock()
+	if s.closed || !s.prepared || s.self != s || s.active || s.activating || s.life.Err() != nil {
+		s.mu.Unlock()
+		return ErrServiceUnavailable
+	}
+	s.activating = true
+	s.operations.Add(1)
+	s.mu.Unlock()
+	defer s.operations.Done()
+	defer func() { s.mu.Lock(); s.activating = false; s.mu.Unlock() }()
+	work, cancel := context.WithCancel(caller)
+	stop := localLifetimeSignal(s.life, cancel)
+	defer func() { stop(); cancel() }()
+	if work.Err() != nil {
+		return ErrServiceUnavailable
+	}
+	if err := s.reconcileScanState(work); err != nil {
+		return err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.closed || s.life.Err() != nil || work.Err() != nil {
+		return ErrServiceUnavailable
+	}
+	s.active = true
+	return nil
+}
+func (s *Service) Close() error {
+	if s == nil || s.prepared && s.self != s {
+		return ErrServiceUnavailable
+	}
+	s.closeOnce.Do(func() {
+		s.mu.Lock()
+		s.closed = true
+		s.active = false
+		if s.cancel != nil {
+			s.cancel()
+		}
+		s.mu.Unlock()
+		s.operations.Wait()
+	})
+	return nil
 }
 
 func (s *Service) reconcileScanState(ctx context.Context) error {
@@ -109,6 +225,9 @@ func (s *Service) reconcileScanState(ctx context.Context) error {
 		library.LastScanFinishedAt = &now
 		library.UpdatedAt = now
 		if err := s.repo.UpdateLibrary(ctx, &library); err != nil {
+			if s.prepared {
+				return err
+			}
 			log.Printf("[localmedia] failed to reconcile stale scanning library=%q id=%s: %v", library.Name, library.ID, err)
 			continue
 		}
@@ -118,14 +237,35 @@ func (s *Service) reconcileScanState(ctx context.Context) error {
 }
 
 func (s *Service) ListLibraries(ctx context.Context) ([]models.LocalMediaLibrary, error) {
+	work, finishWork, workErr := s.beginLocalWork(ctx)
+	if workErr != nil {
+		return nil, workErr
+	}
+	defer finishWork()
+	ctx = work
+
 	return s.repo.ListLibraries(ctx)
 }
 
 func (s *Service) GetLibrary(ctx context.Context, libraryID string) (*models.LocalMediaLibrary, error) {
+	work, finishWork, workErr := s.beginLocalWork(ctx)
+	if workErr != nil {
+		return nil, workErr
+	}
+	defer finishWork()
+	ctx = work
+
 	return s.repo.GetLibrary(ctx, strings.TrimSpace(libraryID))
 }
 
 func (s *Service) FindMatches(ctx context.Context, query models.LocalMediaMatchQuery) ([]models.LocalMediaMatchedGroup, error) {
+	work, finishWork, workErr := s.beginLocalWork(ctx)
+	if workErr != nil {
+		return nil, workErr
+	}
+	defer finishWork()
+	ctx = work
+
 	libraries, err := s.repo.ListLibraries(ctx)
 	if err != nil {
 		return nil, err
@@ -206,6 +346,13 @@ func (s *Service) FindMatches(ctx context.Context, query models.LocalMediaMatchQ
 }
 
 func (s *Service) CreateLibrary(ctx context.Context, input models.LocalMediaLibraryCreateInput) (*models.LocalMediaLibrary, error) {
+	work, finishWork, workErr := s.beginLocalWork(ctx)
+	if workErr != nil {
+		return nil, workErr
+	}
+	defer finishWork()
+	ctx = work
+
 	name, rootPaths, filterOutTerms, minFileSizeBytes, err := validateLocalMediaLibraryInput(input)
 	if err != nil {
 		return nil, err
@@ -231,6 +378,13 @@ func (s *Service) CreateLibrary(ctx context.Context, input models.LocalMediaLibr
 }
 
 func (s *Service) UpdateLibrary(ctx context.Context, libraryID string, input models.LocalMediaLibraryCreateInput) (*models.LocalMediaLibrary, error) {
+	work, finishWork, workErr := s.beginLocalWork(ctx)
+	if workErr != nil {
+		return nil, workErr
+	}
+	defer finishWork()
+	ctx = work
+
 	if strings.TrimSpace(libraryID) == "" {
 		return nil, ErrLibraryNotFound
 	}
@@ -274,6 +428,13 @@ func (s *Service) UpdateLibrary(ctx context.Context, libraryID string, input mod
 }
 
 func (s *Service) SearchMetadata(ctx context.Context, query, mediaType string) ([]models.SearchResult, error) {
+	work, finishWork, workErr := s.beginLocalWork(ctx)
+	if workErr != nil {
+		return nil, workErr
+	}
+	defer finishWork()
+	ctx = work
+
 	if s.metadata == nil {
 		return nil, errors.New("metadata service unavailable")
 	}
@@ -281,6 +442,15 @@ func (s *Service) SearchMetadata(ctx context.Context, query, mediaType string) (
 }
 
 func (s *Service) BrowseDirectories(path string) (*models.LocalMediaDirectoryListing, error) {
+	work, finishWork, workErr := s.beginLocalWork(nil)
+	if workErr != nil {
+		return nil, workErr
+	}
+	defer finishWork()
+	if work.Err() != nil {
+		return nil, ErrServiceUnavailable
+	}
+
 	currentPath := strings.TrimSpace(path)
 	if currentPath == "" {
 		if home, err := os.UserHomeDir(); err == nil && strings.TrimSpace(home) != "" {
@@ -336,6 +506,13 @@ func (s *Service) BrowseDirectories(path string) (*models.LocalMediaDirectoryLis
 }
 
 func (s *Service) DeleteLibrary(ctx context.Context, id string) error {
+	work, finishWork, workErr := s.beginLocalWork(ctx)
+	if workErr != nil {
+		return workErr
+	}
+	defer finishWork()
+	ctx = work
+
 	if strings.TrimSpace(id) == "" {
 		return ErrLibraryNotFound
 	}
@@ -343,6 +520,13 @@ func (s *Service) DeleteLibrary(ctx context.Context, id string) error {
 }
 
 func (s *Service) ListItems(ctx context.Context, libraryID string, query models.LocalMediaItemListQuery) (*models.LocalMediaItemListResult, error) {
+	work, finishWork, workErr := s.beginLocalWork(ctx)
+	if workErr != nil {
+		return nil, workErr
+	}
+	defer finishWork()
+	ctx = work
+
 	query.Filter = strings.TrimSpace(query.Filter)
 	switch query.Filter {
 	case "", "all", string(models.LocalMediaMatchStatusMatched), string(models.LocalMediaMatchStatusLowConfidence), string(models.LocalMediaMatchStatusUnmatched), string(models.LocalMediaMatchStatusManual):
@@ -391,6 +575,13 @@ func (s *Service) ListItems(ctx context.Context, libraryID string, query models.
 }
 
 func (s *Service) ListGroups(ctx context.Context, libraryID string, query models.LocalMediaItemListQuery) (*models.LocalMediaGroupListResult, error) {
+	work, finishWork, workErr := s.beginLocalWork(ctx)
+	if workErr != nil {
+		return nil, workErr
+	}
+	defer finishWork()
+	ctx = work
+
 	if query.OriginalLanguageMatches != nil && !query.IncludeCards {
 		return nil, errors.New("original-language filtering requires local library cards")
 	}
@@ -1229,6 +1420,13 @@ func (s *Service) enrichEpisodeMetadata(ctx context.Context, items []models.Loca
 }
 
 func (s *Service) GetItem(ctx context.Context, itemID string) (*models.LocalMediaItem, error) {
+	work, finishWork, workErr := s.beginLocalWork(ctx)
+	if workErr != nil {
+		return nil, workErr
+	}
+	defer finishWork()
+	ctx = work
+
 	itemID = strings.TrimSpace(itemID)
 	if itemID == "" {
 		return nil, ErrItemNotFound
@@ -1274,6 +1472,13 @@ func (s *Service) GetItem(ctx context.Context, itemID string) (*models.LocalMedi
 }
 
 func (s *Service) ProbeItemForPlayback(ctx context.Context, item *models.LocalMediaItem) (*models.LocalMediaProbe, error) {
+	work, finishWork, workErr := s.beginLocalWork(ctx)
+	if workErr != nil {
+		return nil, workErr
+	}
+	defer finishWork()
+	ctx = work
+
 	if item == nil {
 		return nil, ErrItemNotFound
 	}
@@ -1304,6 +1509,13 @@ func (s *Service) ProbeItemForPlayback(ctx context.Context, item *models.LocalMe
 }
 
 func (s *Service) DeleteItem(ctx context.Context, itemID string) error {
+	work, finishWork, workErr := s.beginLocalWork(ctx)
+	if workErr != nil {
+		return workErr
+	}
+	defer finishWork()
+	ctx = work
+
 	itemID = strings.TrimSpace(itemID)
 	if itemID == "" {
 		return ErrItemNotFound
@@ -1326,6 +1538,13 @@ func (s *Service) DeleteItem(ctx context.Context, itemID string) error {
 }
 
 func (s *Service) UpdateItemMatch(ctx context.Context, itemID string, input models.LocalMediaMatchInput) (*models.LocalMediaItem, error) {
+	work, finishWork, workErr := s.beginLocalWork(ctx)
+	if workErr != nil {
+		return nil, workErr
+	}
+	defer finishWork()
+	ctx = work
+
 	item, err := s.repo.GetItem(ctx, itemID)
 	if err != nil {
 		return nil, err
@@ -1404,38 +1623,56 @@ func (s *Service) refreshLibrarySummary(ctx context.Context, libraryID string) e
 // HTTP clients (admin UI) are not tied to scan duration. Progress and completion
 // are exposed via library lastScan* fields.
 func (s *Service) StartScan(ctx context.Context, libraryID string) (models.LocalMediaScanSummary, error) {
-	library, err := s.beginScan(ctx, libraryID)
+	if ctx == nil || ctx.Err() != nil {
+		return models.LocalMediaScanSummary{}, ErrServiceUnavailable
+	}
+	original, finishWork, err := s.beginLocalWork(nil)
 	if err != nil {
 		return models.LocalMediaScanSummary{}, err
 	}
-
-	// Persist scanning status before returning so polls see the job immediately.
-	if err := s.markLibraryScanning(ctx, library); err != nil {
+	launched := false
+	defer func() {
+		if !launched {
+			finishWork()
+		}
+	}()
+	setup, cancel := context.WithCancel(ctx)
+	stop := localLifetimeSignal(original, cancel)
+	defer func() { stop(); cancel() }()
+	library, err := s.beginScan(setup, libraryID)
+	if err != nil {
+		return models.LocalMediaScanSummary{}, err
+	}
+	if err = s.markLibraryScanning(setup, library); err != nil {
 		s.finishScan(library.ID)
 		return models.LocalMediaScanSummary{}, err
 	}
-
+	if setup.Err() != nil || original.Err() != nil {
+		s.finishScan(library.ID)
+		return models.LocalMediaScanSummary{}, ErrServiceUnavailable
+	}
 	libCopy := *library
+	launched = true
 	go func() {
-		if _, err := s.scanLibrary(context.Background(), libCopy); err != nil {
+		defer finishWork()
+		if _, err := s.scanLibrary(original, libCopy); err != nil {
 			log.Printf("[localmedia] background scan failed library=%q id=%s: %v", libCopy.Name, libCopy.ID, err)
 		}
 	}()
-
-	return models.LocalMediaScanSummary{
-		Status: string(models.LocalMediaScanStatusScanning),
-		Async:  true,
-	}, nil
+	return models.LocalMediaScanSummary{Status: string(models.LocalMediaScanStatusScanning), Async: true}, nil
 }
 
-// RunScan runs a library scan synchronously and returns the final summary.
-// Used by the scheduler and tests that need completion results.
 func (s *Service) RunScan(ctx context.Context, libraryID string) (models.LocalMediaScanSummary, error) {
-	library, err := s.beginScan(ctx, libraryID)
+	work, finish, err := s.beginLocalWork(ctx)
 	if err != nil {
 		return models.LocalMediaScanSummary{}, err
 	}
-	return s.scanLibrary(context.WithoutCancel(ctx), *library)
+	defer finish()
+	library, err := s.beginScan(work, libraryID)
+	if err != nil {
+		return models.LocalMediaScanSummary{}, err
+	}
+	return s.scanLibrary(work, *library)
 }
 
 func (s *Service) beginScan(ctx context.Context, libraryID string) (*models.LocalMediaLibrary, error) {
@@ -1448,6 +1685,13 @@ func (s *Service) beginScan(ctx context.Context, libraryID string) (*models.Loca
 	}
 
 	s.mu.Lock()
+	if s.closed || ctx.Err() != nil || s.prepared && len(s.scans) >= 4 {
+		s.mu.Unlock()
+		return nil, ErrServiceUnavailable
+	}
+	if s.scans == nil {
+		s.scans = make(map[string]scanState)
+	}
 	if state, ok := s.scans[libraryID]; ok && state.inProgress {
 		s.mu.Unlock()
 		return nil, ErrLibraryScanning
@@ -1536,10 +1780,13 @@ func (s *Service) scanLibrary(ctx context.Context, library models.LocalMediaLibr
 func (s *Service) discoverAndMatch(ctx context.Context, library models.LocalMediaLibrary, scanID string) (models.LocalMediaScanSummary, error) {
 	var candidates []scanFileCandidate
 	for index, root := range libraryRoots(library) {
+		if ctx.Err() != nil {
+			return models.LocalMediaScanSummary{}, ctx.Err()
+		}
 		if info, err := os.Stat(root); err != nil || !info.IsDir() {
 			return models.LocalMediaScanSummary{}, fmt.Errorf("library root unavailable: %s", root)
 		}
-		found, err := collectVideoFiles(root)
+		found, err := collectVideoFilesContext(ctx, root)
 		if err != nil {
 			return models.LocalMediaScanSummary{}, err
 		}
@@ -1612,6 +1859,9 @@ func (s *Service) discoverAndMatch(ctx context.Context, library models.LocalMedi
 	}
 
 	for index, candidate := range videoFiles {
+		if ctx.Err() != nil {
+			return summary, ctx.Err()
+		}
 		existing, hasExisting := existingByRelativePath[candidate.relativePath]
 		item, reused, err := s.buildItem(ctx, library, candidate.path, candidate.relativePath, detectedByPath[candidate.path], metadataCache, scanID, existing, hasExisting)
 		if err != nil {
@@ -2393,8 +2643,14 @@ func applyFolderExternalIDs(detected *detectedTitle, filePath string) {
 }
 
 func collectVideoFiles(root string) ([]scanFileCandidate, error) {
+	return collectVideoFilesContext(context.Background(), root)
+}
+func collectVideoFilesContext(ctx context.Context, root string) ([]scanFileCandidate, error) {
 	var files []scanFileCandidate
 	err := filepath.WalkDir(root, func(path string, d os.DirEntry, err error) error {
+		if ctx == nil || ctx.Err() != nil {
+			return ErrServiceUnavailable
+		}
 		if err != nil {
 			return nil
 		}

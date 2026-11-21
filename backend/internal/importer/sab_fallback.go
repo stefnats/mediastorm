@@ -73,6 +73,13 @@ func sabFallbackPageBounds(cursor string, limit int) (int64, int64, error) {
 
 // ListSABFallbackStatuses never resolves configuration, opens NZBs, or calls SAB.
 func (s *Service) ListSABFallbackStatuses(ctx context.Context, cursor string, limit int) (SABFallbackPage, error) {
+	work, finishSource, sourceError := s.beginSourceWork(ctx, false)
+	if sourceError != nil {
+		return SABFallbackPage{}, ErrSABFallbackUnavailable
+	}
+	defer finishSource()
+	ctx = work
+
 	ceiling, before, err := sabFallbackPageBounds(cursor, limit)
 	if err != nil {
 		return SABFallbackPage{}, err
@@ -248,6 +255,13 @@ func (s *Service) fallbackSlot() func() {
 	}
 }
 func (s *Service) submitSABFallback(passed *database.ImportQueueItem) error {
+	work, finishSource, sourceError := s.beginSourceWork(nil, false)
+	if sourceError != nil {
+		return ErrSABFallbackUnavailable
+	}
+	defer finishSource()
+	_ = work
+
 	engine, source, enabled := s.fallbackEngine()
 	if !enabled {
 		return nil
@@ -357,6 +371,13 @@ func (s *Service) updateFallback(ctx context.Context, id int64, attempt string, 
 
 // GetSABFallbackStatus reads persisted safe fields only. It never contacts SAB.
 func (s *Service) GetSABFallbackStatus(ctx context.Context, id int64) (SABFallbackStatus, error) {
+	work, finishSource, sourceError := s.beginSourceWork(ctx, false)
+	if sourceError != nil {
+		return SABFallbackStatus{}, ErrSABFallbackUnavailable
+	}
+	defer finishSource()
+	ctx = work
+
 	_, _, r, err := s.fallbackItem(ctx, id)
 	if err != nil {
 		return SABFallbackStatus{}, err
@@ -379,6 +400,13 @@ func (s *Service) RefreshSABFallbackStatus(ctx context.Context, id int64) (SABFa
 }
 
 func (s *Service) observeSABFallback(ctx context.Context, id int64, force bool, check func(context.Context) error) (sabFallbackObservation, error) {
+	work, finishSource, sourceError := s.beginSourceWork(ctx, false)
+	if sourceError != nil {
+		return sabFallbackObservation{}, ErrSABFallbackUnavailable
+	}
+	defer finishSource()
+	ctx = work
+
 	ctx, stop := context.WithTimeout(ctx, 5*time.Second)
 	defer stop()
 	release := s.fallbackSlot()

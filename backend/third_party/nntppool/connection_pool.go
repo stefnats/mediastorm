@@ -83,6 +83,7 @@ type UsenetConnectionPool interface {
 }
 
 type connectionPool struct {
+	managed                 *managedPoolLifetime
 	closeChan               chan struct{}
 	connPoolsMu             sync.RWMutex // Protects connPools access
 	connPools               []*providerPool
@@ -97,21 +98,52 @@ type connectionPool struct {
 	providerHealthCheckMu   sync.Mutex   // Protects provider health check state
 }
 
+type managedPoolLifetime struct {
+	self   *connectionPool
+	ctx    context.Context
+	cancel context.CancelFunc
+	done   chan struct{}
+}
+
+var ErrPoolCleanupUnsupported = errors.New("original connection pool cleanup unavailable")
+
 func NewConnectionPool(c ...Config) (UsenetConnectionPool, error) {
+	return newConnectionPool(context.Background(), false, c...)
+}
+
+// NewConnectionPoolWithContext retains the original construction and worker
+// lifetime. It does not authorize any article or media request.
+func NewConnectionPoolWithContext(original context.Context, c ...Config) (UsenetConnectionPool, error) {
+	if original == nil || original.Err() != nil {
+		return nil, ErrPoolCleanupUnsupported
+	}
+	return newConnectionPool(original, true, c...)
+}
+
+func newConnectionPool(original context.Context, managed bool, c ...Config) (UsenetConnectionPool, error) {
 	config := mergeWithDefault(c...)
 	log := config.Logger
 
 	// Create metrics early so we can pass it to pool creation
 	metrics := NewPoolMetrics()
 
-	pools, err := getPools(config.Providers, config.NntpCli, config.Logger, metrics)
+	pools, err := getPools(config.Providers, config.NntpCli, config.Logger, metrics, managed)
 	if err != nil {
 		return nil, err
 	}
+	keep := false
+	defer func() {
+		if !keep {
+			for _, provider := range pools {
+				provider.connectionPool.Close()
+			}
+			metrics.Cleanup()
+		}
+	}()
 
 	log.Info("verifying providers...")
 
-	if err := verifyProviders(pools, log); err != nil {
+	if err := verifyProvidersContext(original, pools, log); err != nil {
 		log.Error(fmt.Sprintf("failed to verify providers: %v", err))
 
 		return nil, err
@@ -127,18 +159,28 @@ func NewConnectionPool(c ...Config) (UsenetConnectionPool, error) {
 		wg:        sync.WaitGroup{},
 		metrics:   metrics,
 	}
+	if managed {
+		ctx, cancel := context.WithCancel(original)
+		pool.managed = &managedPoolLifetime{self: pool, ctx: ctx, cancel: cancel, done: make(chan struct{})}
+	}
 
 	// Pre-warm pool with MinConnections to reduce latency for first requests
 	if config.MinConnections > 0 {
 		log.Info(fmt.Sprintf("Pre-warming pool with %d connections", config.MinConnections))
 
-		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		ctx, cancel := context.WithTimeout(original, 30*time.Second)
 		defer cancel()
 
 		if err := pool.createIdleResources(ctx, config.MinConnections); err != nil {
 			log.Warn("Failed to pre-warm all connections, will continue with partial warmup", "error", err)
 			// Don't fail pool creation, health checks will create more connections later
 		}
+	}
+	if original.Err() != nil {
+		if pool.managed != nil {
+			pool.managed.cancel()
+		}
+		return nil, original.Err()
 	}
 
 	healthCheckInterval := defaultHealthCheckInterval
@@ -153,10 +195,73 @@ func NewConnectionPool(c ...Config) (UsenetConnectionPool, error) {
 	pool.wg.Add(1)
 	go pool.providerReconnectionSystem()
 
+	keep = true
+	if original.Err() != nil {
+		pool.Quit()
+		return nil, original.Err()
+	}
 	return pool, nil
 }
 
+// JoinConnectionPoolCleanup accepts only the initialized original managed
+// concrete pool. A timeout, interface method, copied pool, or cancellation
+// signal cannot attest physical provider/background completion.
+func JoinConnectionPoolCleanup(value UsenetConnectionPool) error {
+	actual, ok := value.(*connectionPool)
+	if !ok || actual == nil || actual.managed == nil || actual.managed.self != actual {
+		return ErrPoolCleanupUnsupported
+	}
+	actual.Quit()
+	<-actual.managed.done
+	return nil
+}
+
+func (p *connectionPool) workerContext() (context.Context, context.CancelFunc) {
+	if p.managed != nil {
+		return context.WithCancel(p.managed.ctx)
+	}
+	return context.WithCancel(context.Background())
+}
+
+func (p *connectionPool) quitManaged() {
+	p.shutdownOnce.Do(func() {
+		atomic.StoreInt32(&p.isShutdown, 1)
+		p.managed.cancel()
+		close(p.closeChan)
+		p.connPoolsMu.RLock()
+		providers := append([]*providerPool(nil), p.connPools...)
+		p.connPoolsMu.RUnlock()
+		var closing sync.WaitGroup
+		for _, provider := range providers {
+			if provider == nil || provider.connectionPool == nil {
+				continue
+			}
+			closing.Add(1)
+			go func(provider *providerPool) {
+				defer closing.Done()
+				provider.connectionPool.Close()
+			}(provider)
+		}
+		// Closing provider pools interrupts their own constructors/destructors.
+		// Retain the real state until acquired resources and both worker loops end.
+		p.wg.Wait()
+		closing.Wait()
+		p.metrics.Cleanup()
+		p.connPoolsMu.Lock()
+		p.connPools = nil
+		p.connPoolsMu.Unlock()
+		close(p.managed.done)
+	})
+}
+
 func (p *connectionPool) Quit() {
+	if p.managed != nil {
+		if p.managed.self != p {
+			return
+		}
+		p.quitManaged()
+		return
+	}
 	p.shutdownOnce.Do(func() {
 		startTime := time.Now()
 		p.log.Info("Starting connection pool shutdown", "phase", "1-signal")
@@ -301,6 +406,29 @@ func (p *connectionPool) GetConnection(
 	skipProviders []string,
 	useBackupProviders bool,
 ) (PooledConnection, error) {
+	if p.managed != nil {
+		if p.managed.self != p || p.managed.ctx.Err() != nil || ctx == nil {
+			return nil, ErrConnectionPoolShutdown
+		}
+		original := p.managed.ctx
+		linked, cancel := context.WithCancel(ctx)
+		if deadline, ok := original.Deadline(); ok {
+			bounded, stop := context.WithDeadline(linked, deadline)
+			previous := cancel
+			linked = bounded
+			cancel = func() { stop(); previous() }
+		}
+		callbackDone := make(chan struct{})
+		stop := context.AfterFunc(original, func() { defer close(callbackDone); cancel() })
+		defer func() {
+			cancel()
+			if !stop() {
+				<-callbackDone
+			}
+		}()
+		ctx = linked
+	}
+
 	if atomic.LoadInt32(&p.isShutdown) == 1 {
 		return nil, ErrConnectionPoolShutdown
 	}
@@ -333,8 +461,22 @@ func (p *connectionPool) GetConnection(
 
 	conn, err := p.getConnection(ctx, cp, 0)
 	if err != nil {
+		// The original external pool owner retains constructor/destructor work.
+		// Do not join the whole pool here: this caller can hold another borrower.
 		p.metrics.RecordError("")
 		return nil, err
+	}
+
+	if p.managed != nil && (p.managed.ctx.Err() != nil || ctx.Err() != nil) {
+		if p.managed.ctx.Err() != nil {
+			// Destroy is asynchronous and remains owned by this original pool's
+			// destructor group. Only external Manager.Close/Join attests its end;
+			// this canceled operation must not wait for an unrelated caller borrower.
+			conn.Destroy()
+			return nil, ErrConnectionPoolShutdown
+		}
+		conn.Release()
+		return nil, ctx.Err()
 	}
 
 	// Record successful acquire timing
@@ -1346,11 +1488,13 @@ func (p *connectionPool) connectionHealCheck(healthCheckInterval time.Duration) 
 	defer p.wg.Done()
 
 	// Create a context that can be cancelled for graceful shutdown
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := p.workerContext()
 	defer cancel()
 
 	for {
 		select {
+		case <-ctx.Done():
+			return
 		case <-p.closeChan:
 			cancel() // Cancel any ongoing operations
 			return
@@ -1425,18 +1569,70 @@ func (p *connectionPool) checkConnsHealth() bool {
 }
 
 func (p *connectionPool) createIdleResources(ctx context.Context, toCreate int) error {
-	for i := 0; i < toCreate; i++ {
-		conn, err := p.GetConnection(ctx, []string{}, false)
-		if err != nil {
-			return err
+	if ctx == nil || ctx.Err() != nil {
+		return context.Canceled
+	}
+	p.connPoolsMu.RLock()
+	providers := append([]*providerPool(nil), p.connPools...)
+	p.connPoolsMu.RUnlock()
+	totalBefore, capacity := 0, 0
+	for _, provider := range providers {
+		if provider.provider.IsBackupProvider || !provider.IsAcceptingConnections() {
+			continue
 		}
-		// Immediately free the connection back to the pool to keep it idle
-		if freeErr := conn.Free(); freeErr != nil {
-			p.log.Debug("Failed to free connection during warmup", "error", freeErr)
+		totalBefore += int(provider.connectionPool.Stat().TotalResources())
+		capacity += provider.provider.MaxConnections
+	}
+	target := totalBefore + toCreate
+	if target > p.config.MinConnections {
+		target = p.config.MinConnections
+	}
+	if target > capacity {
+		target = capacity
+	}
+	if toCreate <= 0 || totalBefore >= target {
+		return nil
+	}
+	// Retain actual existing idle resources while creating the missing ones. Free
+	// immediately would repeatedly borrow the same connection without warming.
+	held := make([]*puddle.Resource[*internalConnection], 0, target)
+	defer func() {
+		for _, resource := range held {
+			resource.Release()
+		}
+	}()
+	heldByProvider := make(map[*providerPool]int)
+	totalNow := func() int {
+		n := 0
+		for _, provider := range providers {
+			if !provider.provider.IsBackupProvider && provider.IsAcceptingConnections() {
+				n += int(provider.connectionPool.Stat().TotalResources())
+			}
+		}
+		return n
+	}
+	for totalNow() < target {
+		progressed := false
+		for _, provider := range providers {
+			if provider.provider.IsBackupProvider || !provider.IsAcceptingConnections() || heldByProvider[provider] >= provider.provider.MaxConnections {
+				continue
+			}
+			resource, err := provider.connectionPool.Acquire(ctx)
+			if err != nil {
+				return err
+			}
+			held = append(held, resource)
+			heldByProvider[provider]++
+			progressed = true
+			if totalNow() >= target {
+				break
+			}
+		}
+		if !progressed {
+			return errors.New("configured warmup capacity unavailable")
 		}
 	}
-
-	return nil
+	return ctx.Err()
 }
 
 func (p *connectionPool) checkMinConns(ctx context.Context) error {
@@ -1478,11 +1674,13 @@ func (p *connectionPool) providerReconnectionSystem() {
 	defer p.wg.Done()
 
 	// Create a context that can be cancelled for graceful shutdown
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := p.workerContext()
 	defer cancel()
 
 	for {
 		select {
+		case <-ctx.Done():
+			return
 		case <-p.closeChan:
 			cancel()
 			return
@@ -1563,6 +1761,9 @@ func (p *connectionPool) attemptProviderReconnection(ctx context.Context, pool *
 
 	// Test the connection by getting capabilities
 	conn := c.Value()
+	if stop, err := nntpcli.BindConnectionCancellation(reconCtx, conn.nntp); err == nil {
+		defer stop()
+	}
 
 	// Verify capabilities if needed
 	if len(pool.provider.VerifyCapabilities) > 0 {
@@ -1738,7 +1939,11 @@ func (p *connectionPool) performLightweightProviderCheck(ctx context.Context, po
 		}
 
 		// Test basic NNTP command to ensure the server is responsive
+		stopPing, bindErr := nntpcli.BindConnectionCancellation(checkCtx, conn.nntp)
 		err = conn.nntp.Ping()
+		if bindErr == nil {
+			stopPing()
+		}
 		if err != nil {
 			// If is not a textproto.Error, it could be a connection issue
 			var nntpErr *textproto.Error

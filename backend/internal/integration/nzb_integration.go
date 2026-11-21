@@ -35,6 +35,18 @@ type NzbConfig struct {
 
 // NzbSystem represents the complete NZB-backed filesystem
 type NzbSystem struct {
+	self                       *NzbSystem
+	life                       context.Context
+	cancel                     context.CancelFunc
+	prepared                   bool
+	runtimeMu                  sync.Mutex
+	active, activating, closed bool
+	sources                    map[*nzbStreamWork]struct{}
+	sourceWork                 sync.WaitGroup
+	closeOnce                  sync.Once
+	closeErr                   error
+	health                     *database.HealthRepository
+
 	database       *database.DB             // Database for processing queue
 	metadataReader *metadata.MetadataReader // Metadata reader for serving files
 	service        *importer.Service
@@ -50,6 +62,37 @@ type NzbSystem struct {
 
 // NewNzbSystem creates a new NZB-backed virtual filesystem with metadata + queue architecture
 func NewNzbSystem(config NzbConfig, poolManager pool.Manager, configGetter config.ConfigGetter) (*NzbSystem, error) {
+	ns, err := prepareNzbSystem(context.Background(), false, config, poolManager, configGetter)
+	if err != nil {
+		return nil, err
+	}
+	if err = ns.Activate(ns.life); err != nil {
+		_ = ns.Close()
+		return nil, err
+	}
+	return ns, nil
+}
+
+// PrepareNzbSystem opens only its own storage/schema. Operational queue/health
+// mutation, source reads and import workers remain unavailable until activation.
+func PrepareNzbSystem(original context.Context, config NzbConfig, poolManager pool.Manager, configGetter config.ConfigGetter) (*NzbSystem, error) {
+	return prepareNzbSystem(original, true, config, poolManager, configGetter)
+}
+
+var ErrNzbSystemUnavailable = errors.New("original NZB system unavailable")
+
+func prepareNzbSystem(original context.Context, prepared bool, config NzbConfig, poolManager pool.Manager, configGetter config.ConfigGetter) (*NzbSystem, error) {
+	if original == nil || original.Err() != nil {
+		return nil, ErrNzbSystemUnavailable
+	}
+	life, cancel := context.WithCancel(original)
+	keep := false
+	defer func() {
+		if !keep {
+			cancel()
+		}
+	}()
+
 	// Initialize metadata service for serving files
 	metadataService := metadata.NewMetadataService(config.MetadataRootPath)
 	metadataReader := metadata.NewMetadataReader(metadataService)
@@ -81,7 +124,12 @@ func NewNzbSystem(config NzbConfig, poolManager pool.Manager, configGetter confi
 	}
 
 	// Create service with poolManager for dynamic pool access
-	service, err := importer.NewService(serviceConfig, metadataService, db, poolManager, configGetter)
+	var service *importer.Service
+	if prepared {
+		service, err = importer.PrepareService(life, serviceConfig, metadataService, db, poolManager, configGetter)
+	} else {
+		service, err = importer.NewService(serviceConfig, metadataService, db, poolManager, configGetter)
+	}
 	if err != nil {
 		db.Close()
 		return nil, fmt.Errorf("failed to create NZB service: %w", err)
@@ -91,11 +139,6 @@ func NewNzbSystem(config NzbConfig, poolManager pool.Manager, configGetter confi
 	// Note: MediaRepository is not available in this integration context,
 	// but basic health checking functionality will still work
 	healthRepo := database.NewHealthRepository(db.Connection())
-
-	// Reset all in-progress file health checks on start up
-	if err := healthRepo.ResetFileAllChecking(); err != nil {
-		slog.Error("failed to reset in progress file health", "err", err)
-	}
 
 	// Create metadata-based remote file handler
 	metadataRemoteFile := nzbfilesystem.NewMetadataRemoteFile(
@@ -110,17 +153,14 @@ func NewNzbSystem(config NzbConfig, poolManager pool.Manager, configGetter confi
 
 	// Store concrete type for context-aware operations
 	nzbFs, ok := fs.(*nzbfilesystem.NzbFilesystem)
-	if !ok {
-		return nil, fmt.Errorf("failed to convert filesystem to NzbFilesystem type")
+	if !ok || life.Err() != nil {
+		_ = service.Close()
+		_ = db.Close()
+		return nil, ErrNzbSystemUnavailable
 	}
 
-	ctx := context.Background()
-
-	if err := service.Start(ctx); err != nil {
-		return nil, fmt.Errorf("failed to start NZB service: %w", err)
-	}
-
-	return &NzbSystem{
+	ns := &NzbSystem{
+		life: life, cancel: cancel, prepared: prepared, health: healthRepo, sources: make(map[*nzbStreamWork]struct{}),
 		database:            db,
 		metadataReader:      metadataReader,
 		service:             service,
@@ -129,7 +169,10 @@ func NewNzbSystem(config NzbConfig, poolManager pool.Manager, configGetter confi
 		poolManager:         poolManager,
 		maxDownloadWorkers:  maxDownloadWorkers,
 		maxProcessorWorkers: maxProcessorWorkers,
-	}, nil
+	}
+	ns.self = ns
+	keep = true
+	return ns, nil
 }
 
 // GetQueueStats returns current queue statistics
@@ -164,26 +207,100 @@ func (ns *NzbSystem) ImporterService() *importer.Service {
 
 // StartService starts the NZB service (including background scanning and processing)
 func (ns *NzbSystem) StartService(ctx context.Context) error {
+	if ns != nil && ns.prepared {
+		return ns.Activate(ctx)
+	}
 	return ns.service.Start(ctx)
 }
 
-// StopService stops the NZB service
 func (ns *NzbSystem) StopService(ctx context.Context) error {
+	if ns != nil && ns.prepared {
+		return ns.Close()
+	}
 	return ns.service.Stop(ctx)
 }
 
-// Close closes the NZB system and releases resources
-func (ns *NzbSystem) Close() error {
-	if err := ns.service.Close(); err != nil {
+func nzbRuntimeSignal(ctx context.Context, cancel context.CancelFunc) func() {
+	done := make(chan struct{})
+	stop := context.AfterFunc(ctx, func() { cancel(); close(done) })
+	var once sync.Once
+	return func() {
+		once.Do(func() {
+			if !stop() {
+				<-done
+			}
+		})
+	}
+}
+
+func (ns *NzbSystem) Activate(caller context.Context) error {
+	if ns == nil || ns.self != ns || caller == nil || caller.Err() != nil {
+		return ErrNzbSystemUnavailable
+	}
+	ns.runtimeMu.Lock()
+	if ns.closed || ns.active || ns.activating || ns.life.Err() != nil {
+		ns.runtimeMu.Unlock()
+		return ErrNzbSystemUnavailable
+	}
+	ns.activating = true
+	ns.sourceWork.Add(1)
+	ns.runtimeMu.Unlock()
+	defer ns.sourceWork.Done()
+	defer func() { ns.runtimeMu.Lock(); ns.activating = false; ns.runtimeMu.Unlock() }()
+	// Retire the original runtime on a failed/cancelled activation. Successful
+	// setup only disarms this temporary link; it never replaces that runtime.
+	stopCaller := nzbRuntimeSignal(caller, ns.cancel)
+	defer stopCaller()
+	work, cancel := context.WithCancel(caller)
+	stopRuntime := nzbRuntimeSignal(ns.life, cancel)
+	defer func() { stopRuntime(); cancel() }()
+	if work.Err() != nil || ns.life.Err() != nil {
+		return ErrNzbSystemUnavailable
+	}
+	if err := ns.health.ResetFileAllCheckingContext(work); err != nil {
+		if ns.prepared {
+			return err
+		}
+		slog.Error("failed to reset in progress file health", "err", err)
+	}
+	if work.Err() != nil || ns.life.Err() != nil {
+		return ErrNzbSystemUnavailable
+	}
+	if err := ns.service.Start(ns.life); err != nil {
 		return err
 	}
-
-	// Close database (metadata doesn't need closing)
-	if err := ns.database.Close(); err != nil {
-		return err
+	ns.runtimeMu.Lock()
+	defer ns.runtimeMu.Unlock()
+	if ns.closed || work.Err() != nil || ns.life.Err() != nil {
+		return ErrNzbSystemUnavailable
 	}
-
+	ns.active = true
 	return nil
+}
+
+// Close gates admission, signals original source contexts, and waits for raw
+// F2 bodies and queue work before closing their actual SQLite dependency.
+func (ns *NzbSystem) Close() error {
+	if ns == nil || ns.life != nil && ns.self != ns {
+		return ErrNzbSystemUnavailable
+	}
+	ns.closeOnce.Do(func() {
+		ns.runtimeMu.Lock()
+		ns.closed = true
+		ns.active = false
+		if ns.cancel != nil {
+			ns.cancel()
+		}
+		ns.runtimeMu.Unlock()
+		ns.sourceWork.Wait()
+		if ns.service != nil {
+			ns.closeErr = errors.Join(ns.closeErr, ns.service.Close())
+		}
+		if ns.database != nil {
+			ns.closeErr = errors.Join(ns.closeErr, ns.database.Close())
+		}
+	})
+	return ns.closeErr
 }
 
 // GetStats returns statistics about the NZB system using metadata
@@ -225,6 +342,19 @@ var queuePathRegex = regexp.MustCompile(`^queue/(\d+)/`)
 
 // Stream implements streaming.Provider for both queue paths and storage paths
 func (ns *NzbSystem) Stream(ctx context.Context, req streaming.Request) (*streaming.Response, error) {
+	if ns != nil && ns.life != nil {
+		work, err := ns.beginStreamWork(ctx)
+		if err != nil {
+			return nil, err
+		}
+		response, streamErr := ns.streamOriginal(work.ctx, req)
+		return work.publish(req, response, streamErr)
+	}
+	return ns.streamOriginal(ctx, req)
+}
+
+func (ns *NzbSystem) streamOriginal(ctx context.Context, req streaming.Request) (*streaming.Response, error) {
+
 	// The concrete request source must exist before metadata/queue IO begins.
 	if ctx == nil {
 		return nil, nzbfilesystem.ErrRequestSourceRetired
@@ -398,5 +528,88 @@ func (ns *NzbSystem) streamContextFile(ctx context.Context, req streaming.Reques
 	}
 	response = &streaming.Response{Status: status, ContentLength: length, Headers: headers, Body: file}
 	published = true
+	return response, nil
+}
+
+// nzbStreamWork is a source lifetime reservation, not a media authorization.
+// Only actual concrete F2 completion can release a published raw body.
+type nzbStreamWork struct {
+	owner       *NzbSystem
+	ctx         context.Context
+	cancel      context.CancelFunc
+	stopRuntime func()
+	once        sync.Once
+}
+
+func (ns *NzbSystem) beginStreamWork(caller context.Context) (*nzbStreamWork, error) {
+	if caller == nil || caller.Err() != nil || ns.self != ns {
+		return nil, ErrNzbSystemUnavailable
+	}
+	ns.runtimeMu.Lock()
+	defer ns.runtimeMu.Unlock()
+	if ns.closed || !ns.active || ns.life.Err() != nil || len(ns.sources) >= 32 {
+		return nil, ErrNzbSystemUnavailable
+	}
+	ctx, cancel := context.WithCancel(caller)
+	work := &nzbStreamWork{owner: ns, ctx: ctx, cancel: cancel}
+	work.stopRuntime = nzbRuntimeSignal(ns.life, cancel)
+	ns.sources[work] = struct{}{}
+	ns.sourceWork.Add(1)
+	return work, nil
+}
+func (work *nzbStreamWork) finish() {
+	work.once.Do(func() {
+		work.cancel()
+		work.stopRuntime()
+		work.owner.runtimeMu.Lock()
+		delete(work.owner.sources, work)
+		work.owner.runtimeMu.Unlock()
+		work.owner.sourceWork.Done()
+	})
+}
+func (work *nzbStreamWork) publish(req streaming.Request, response *streaming.Response, streamErr error) (*streaming.Response, error) {
+	if response == nil || response.Body == nil {
+		work.finish()
+		return response, streamErr
+	}
+	// These exact producer branches already joined their metadata/queue work and
+	// return only a known empty in-memory body, with no source actor to retain.
+	if req.Method == http.MethodHead || response.Status == http.StatusServiceUnavailable {
+		if streamErr != nil || work.ctx.Err() != nil {
+			_ = response.Close()
+			work.finish()
+			return nil, ErrNzbSystemUnavailable
+		}
+		work.finish()
+		return response, nil
+	}
+	raw := response.Body
+	actualDone, err := nzbfilesystem.SourceCleanupDone(raw)
+	if err != nil {
+		// A changed/unsupported producer cannot manufacture completion from Close.
+		// Its bounded reservation remains charged: no body is published or false
+		// physical cleanup success returned. Genuine NzbFilesystem GET uses its
+		// initialized ownsSource requestFile and cannot enter this fallback.
+		_ = nzbfilesystem.SignalSourceClose(raw)
+		_ = raw.Close()
+		return nil, nzbfilesystem.ErrSourceCleanupUnsupported
+	}
+	if streamErr != nil || work.ctx.Err() != nil {
+		_ = nzbfilesystem.SignalSourceClose(raw)
+		closeErr := nzbfilesystem.JoinSourceCleanup(raw)
+		<-actualDone
+		work.finish()
+		return nil, errors.Join(streamErr, closeErr, ErrNzbSystemUnavailable)
+	}
+	go func() {
+		select {
+		case <-actualDone:
+		case <-work.ctx.Done():
+			_ = nzbfilesystem.SignalSourceClose(raw)
+			_ = nzbfilesystem.JoinSourceCleanup(raw)
+			<-actualDone
+		}
+		work.finish()
+	}()
 	return response, nil
 }

@@ -1524,6 +1524,11 @@ func waitForSubtitleFile(vttPath string, requireCue bool, maxWait time.Duration)
 
 // HLSManager manages HLS transcoding sessions
 type HLSManager struct {
+	prepared           bool
+	activated          bool // Protected by the existing ordinary control mutex.
+	activating         bool
+	retired            bool
+	cleanupExitOnce    sync.Once
 	ordinary           *ordinaryHLSManager
 	cleanupExited      chan struct{}
 	shutdownOnce       sync.Once
@@ -1710,38 +1715,89 @@ func inputLooksLikeHLS(rawURL string) bool {
 }
 
 // NewHLSManager creates a new HLS session manager
-func NewHLSManager(baseDir, ffmpegPath, ffprobePath string, streamer streaming.Provider) *HLSManager {
+// prepareHLSManager reuses the actual ordinary control and original session map.
+// No directory cleanup, source setup, or janitor starts during preparation.
+func prepareHLSManager(original context.Context, baseDir, ffmpegPath, ffprobePath string, streamer streaming.Provider) *HLSManager {
+	if original == nil {
+		return nil
+	}
 	if baseDir == "" {
-		// Use /tmp for HLS segment storage with proper cleanup
-		baseDir = filepath.Join("/tmp", "novastream-hls")
+		baseDir = filepath.Join(os.TempDir(), "novastream-hls")
 	}
-
-	// Ensure base directory exists
-	if err := os.MkdirAll(baseDir, 0755); err != nil {
-		log.Printf("[hls] failed to create base directory %q: %v", baseDir, err)
-	}
-
-	manager := &HLSManager{
-		sessions:         make(map[string]*HLSSession),
-		baseDir:          baseDir,
-		ffmpegPath:       ffmpegPath,
-		ffprobePath:      ffprobePath,
-		streamer:         streamer,
-		cleanupDone:      make(chan struct{}),
-		cleanupExited:    make(chan struct{}),
-		shutdownFinished: make(chan struct{}),
-		probeCache:       make(map[string]*cachedProbeEntry),
-	}
-
+	manager := &HLSManager{prepared: true, sessions: make(map[string]*HLSSession), baseDir: baseDir, ffmpegPath: ffmpegPath, ffprobePath: ffprobePath, streamer: streamer, cleanupDone: make(chan struct{}), cleanupExited: make(chan struct{}), shutdownFinished: make(chan struct{}), probeCache: make(map[string]*cachedProbeEntry)}
 	manager.ordinary = newOrdinaryHLSManager(manager)
-
-	// Clean up any orphaned directories from previous runs
-	manager.cleanupOrphanedDirectories()
-
-	// Start cleanup goroutine
-	go manager.cleanupLoop()
-
+	// The original constructor's temporary context has no work or publication.
+	manager.ordinary.cancel()
+	manager.ordinary.ctx, manager.ordinary.cancel = context.WithCancel(original)
+	manager.ordinary.closed = true
 	return manager
+}
+
+func NewHLSManager(baseDir, ffmpegPath, ffprobePath string, streamer streaming.Provider) *HLSManager {
+	manager := prepareHLSManager(context.Background(), baseDir, ffmpegPath, ffprobePath, streamer)
+	if err := manager.activatePreparedMedia(); err != nil {
+		log.Printf("[hls] failed to activate original manager: %v", err)
+	}
+	manager.prepared = false
+	return manager
+}
+
+func (m *HLSManager) activatePreparedMedia() error {
+	if m == nil {
+		return errOrdinaryHLSClosed
+	}
+	control := m.ordinaryControl()
+	control.mu.Lock()
+	if m.retired || control.ctx.Err() != nil {
+		control.mu.Unlock()
+		return errOrdinaryHLSClosed
+	}
+	if m.activated {
+		control.mu.Unlock()
+		return nil
+	}
+	if m.activating {
+		control.mu.Unlock()
+		return errOrdinaryHLSClosed
+	}
+	m.activating = true
+	// Count actual directory/setup I/O before releasing the same closed gate.
+	control.operations.Add(1)
+	control.mu.Unlock()
+	defer control.operations.Done()
+	defer func() { control.mu.Lock(); m.activating = false; control.mu.Unlock() }()
+	if err := os.MkdirAll(m.baseDir, 0755); err != nil {
+		return err
+	}
+	m.cleanupOrphanedDirectories()
+	control.mu.Lock()
+	defer control.mu.Unlock()
+	if m.retired || control.ctx.Err() != nil {
+		return errOrdinaryHLSClosed
+	}
+	if m.activated {
+		return nil
+	}
+	m.activated = true
+	control.closed = false
+	go m.cleanupLoop()
+	return nil
+}
+
+func (m *HLSManager) preparedRuntimeCheck() error {
+	if m == nil {
+		return errOrdinaryHLSClosed
+	}
+	if !m.prepared {
+		return nil
+	}
+	control := m.ordinaryControl()
+	control.mu.Lock()
+	defer control.mu.Unlock()
+	if m.retired || !m.activated || control.closed || control.ctx.Err() != nil {
+		return errOrdinaryHLSClosed
+	}
+	return nil
 }
 
 // SetConfigManager allows HLS proxy fetches to authenticate against external Usenet WebDAV engines.
@@ -2062,6 +2118,9 @@ func (m *HLSManager) buildLocalWebDAVURLFromPath(path string) (string, bool) {
 
 // CreateSession starts a new HLS transcoding session
 func (m *HLSManager) CreateSession(ctx context.Context, path string, originalPath string, hasDV bool, dvProfile string, hasHDR bool, forceAAC bool, startOffset float64, transcodingOffset float64, audioTrackIndex int, subtitleTrackIndex int, profileID string, profileName string, clientIP string, castMode bool, prequeueType string, playbackTarget string, durationHint float64, castReceiverHost string) (*HLSSession, error) {
+	if err := m.preparedRuntimeCheck(); err != nil {
+		return nil, err
+	}
 	if m.hlsInputConfigured() && shareMediaFrom(ctx) == nil {
 		return nil, errVODOwner
 	}
@@ -2487,6 +2546,9 @@ func resolvedSessionDuration(probedDuration, durationHint float64) float64 {
 
 // CreateYouTubeSession starts an HLS session from separate YouTube video/audio URLs.
 func (m *HLSManager) CreateYouTubeSession(ctx context.Context, videoURL, audioURL, originalURL, proxyURL, profileID, profileName, clientIP string) (*HLSSession, error) {
+	if err := m.preparedRuntimeCheck(); err != nil {
+		return nil, err
+	}
 	if shareMediaFrom(ctx) != nil {
 		return nil, errors.New("shared HLS requires a confined raw media source")
 	}
@@ -2837,6 +2899,9 @@ func youtubeTranscodingArgs(videoURL, audioURL, proxyURL, playlistPath, segmentP
 // CreateLiveSession creates an HLS session for live TV streams
 // Unlike VOD sessions, live sessions don't have a known duration and don't support seeking
 func (m *HLSManager) CreateLiveSession(ctx context.Context, liveURL, provider, bucketKey, profileID, profileName, clientIP, playbackTarget string, tuning LiveTuningSettings, liveCCExtractionEnabled bool) (*HLSSession, error) {
+	if err := m.preparedRuntimeCheck(); err != nil {
+		return nil, err
+	}
 	if shareMediaFrom(ctx) != nil {
 		return nil, errors.New("shared HLS requires a confined raw media source")
 	}
@@ -8284,7 +8349,7 @@ func (m *HLSManager) SampleThroughput() {
 
 func (m *HLSManager) cleanupLoop() {
 	if m.cleanupExited != nil {
-		defer close(m.cleanupExited)
+		defer m.cleanupExitOnce.Do(func() { close(m.cleanupExited) })
 	}
 	// Run cleanup every 30 seconds for more aggressive cleanup
 	ticker := time.NewTicker(30 * time.Second)
@@ -8295,6 +8360,8 @@ func (m *HLSManager) cleanupLoop() {
 		case <-ticker.C:
 			m.cleanupOldSessions()
 			m.cleanupProbeCache() // Clean expired probe cache entries
+		case <-m.ordinaryControl().ctx.Done():
+			return
 		case <-m.cleanupDone:
 			log.Printf("[hls] cleanup loop shutting down")
 			return
@@ -8346,6 +8413,12 @@ func (m *HLSManager) Shutdown() {
 	finished := m.shutdownFinished
 	m.sessionLifecycleMu.Unlock()
 	m.shutdownOnce.Do(func() {
+		control.mu.Lock()
+		m.retired = true
+		if !m.activated && m.cleanupExited != nil {
+			m.cleanupExitOnce.Do(func() { close(m.cleanupExited) })
+		}
+		control.mu.Unlock()
 		control.closeAdmission()
 		defer close(finished)
 		m.shutdownHLSInputs()

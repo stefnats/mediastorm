@@ -53,6 +53,7 @@ type ScanInfo struct {
 
 // Service provides NZB import functionality with manual directory scanning and queue-based processing
 type Service struct {
+	self            *Service
 	config          ServiceConfig
 	database        *database.DB              // Database for processing queue
 	metadataService *metadata.MetadataService // Metadata service for file processing
@@ -63,11 +64,21 @@ type Service struct {
 	log             *slog.Logger
 
 	// Runtime state
-	mu      sync.RWMutex
-	running bool
-	ctx     context.Context
-	cancel  context.CancelFunc
-	wg      sync.WaitGroup
+	mu           sync.RWMutex
+	running      bool
+	ctx          context.Context
+	cancel       context.CancelFunc
+	wg           sync.WaitGroup
+	prepared     bool
+	active       bool
+	closed       bool
+	starting     bool
+	stopping     bool
+	jobs         int
+	closeOnce    sync.Once
+	stopDone     chan struct{}
+	startSignal  func()
+	publications map[*SABStagedPublication]struct{}
 
 	// Worker notification
 	workNotify chan struct{} // Notifies workers when new items are added to queue
@@ -80,15 +91,33 @@ type Service struct {
 
 // NewService creates a new NZB import service with manual scanning and queue processing capabilities
 func NewService(config ServiceConfig, metadataService *metadata.MetadataService, database *database.DB, poolManager pool.Manager, configGetter config.ConfigGetter) (*Service, error) {
+	return newService(context.Background(), false, config, metadataService, database, poolManager, configGetter)
+}
+
+// PrepareService allocates the original importer without resetting rows,
+// opening sources, starting scans, or launching queue workers.
+func PrepareService(original context.Context, config ServiceConfig, metadataService *metadata.MetadataService, database *database.DB, poolManager pool.Manager, configGetter config.ConfigGetter) (*Service, error) {
+	if original == nil || original.Err() != nil || database == nil {
+		return nil, ErrServiceUnavailable
+	}
+	return newService(original, true, config, metadataService, database, poolManager, configGetter)
+}
+
+var ErrServiceUnavailable = errors.New("original importer lifetime unavailable")
+
+func newService(original context.Context, prepared bool, config ServiceConfig, metadataService *metadata.MetadataService, database *database.DB, poolManager pool.Manager, configGetter config.ConfigGetter) (*Service, error) {
 	// Set defaults
 	if config.Workers == 0 {
 		config.Workers = 4
+	}
+	if prepared && (config.Workers < 1 || config.Workers > 32) {
+		return nil, ErrServiceUnavailable
 	}
 
 	// Create processor with poolManager for dynamic pool access
 	processor := NewProcessor(metadataService, poolManager, configGetter)
 
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := context.WithCancel(original)
 
 	service := &Service{
 		config:          config,
@@ -101,84 +130,229 @@ func NewService(config ServiceConfig, metadataService *metadata.MetadataService,
 		log:             slog.Default().With("component", "importer-service"),
 		ctx:             ctx,
 		cancel:          cancel,
+		prepared:        prepared,
+		active:          !prepared,
 		workNotify:      make(chan struct{}, 10), // Larger buffer for multiple notifications
 		scanInfo:        ScanInfo{Status: ScanStatusIdle},
 	}
+	service.self = service
 
 	return service, nil
 }
 
-// Start starts the NZB import service (queue workers only, manual scanning available via API)
-func (s *Service) Start(ctx context.Context) error {
+// Every source operation registers before opening a file, query, or child.
+// The returned finish joins its cancellation callback before refunding the
+// original service's operation count. It conveys lifetime, never permission.
+func (s *Service) beginSourceWork(caller context.Context, heavy bool) (context.Context, func(), error) {
+	if s == nil {
+		return nil, nil, ErrServiceUnavailable
+	}
 	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	if s.running {
-		return fmt.Errorf("service is already started")
+	// Isolated historical callers can construct a cache-only legacy service.
+	// Prepared managed services never infer a missing original lifetime.
+	if !s.prepared && !s.closed {
+		if s.ctx == nil {
+			s.ctx, s.cancel = context.WithCancel(context.Background())
+		} else if s.cancel == nil {
+			s.ctx, s.cancel = context.WithCancel(s.ctx)
+		}
 	}
-
-	s.log.InfoContext(ctx, "Starting NZB import service",
-		"workers", s.config.Workers)
-
-	// Reset any stale queue items from processing/retrying back to pending
-	if err := s.database.Repository.ResetStaleItems(); err != nil {
-		s.log.ErrorContext(ctx, "Failed to reset stale queue items", "error", err)
-		return fmt.Errorf("failed to reset stale queue items: %w", err)
+	if s.closed || s.stopping || s.ctx == nil || s.ctx.Err() != nil || s.prepared && (s.self != s || !s.active) || heavy && s.prepared && s.jobs >= 16 {
+		s.mu.Unlock()
+		return nil, nil, ErrServiceUnavailable
 	}
+	original := s.ctx
+	if caller == nil {
+		caller = original
+	}
+	if caller.Err() != nil {
+		s.mu.Unlock()
+		return nil, nil, caller.Err()
+	}
+	ctx, cancel := context.WithCancel(caller)
+	if deadline, ok := original.Deadline(); ok {
+		cancel()
+		ctx, cancel = context.WithDeadline(caller, deadline)
+	}
+	if heavy {
+		s.jobs++
+	}
+	s.wg.Add(1)
+	s.mu.Unlock()
+	done := make(chan struct{})
+	stop := context.AfterFunc(original, func() { cancel(); close(done) })
+	var once sync.Once
+	finish := func() {
+		once.Do(func() {
+			cancel()
+			if !stop() {
+				<-done
+			}
+			s.mu.Lock()
+			if heavy {
+				s.jobs--
+			}
+			s.mu.Unlock()
+			s.wg.Done()
+		})
+	}
+	if original.Err() != nil || ctx.Err() != nil {
+		finish()
+		return nil, nil, ErrServiceUnavailable
+	}
+	return ctx, finish, nil
+}
 
-	// Start worker pool for processing queue items
+// Start starts the NZB import service (queue workers only, manual scanning available via API)
+func importerLifetimeSignal(ctx context.Context, cancel context.CancelFunc) func() {
+	done := make(chan struct{})
+	stop := context.AfterFunc(ctx, func() { cancel(); close(done) })
+	var once sync.Once
+	return func() {
+		once.Do(func() {
+			if !stop() {
+				<-done
+			}
+		})
+	}
+}
+
+func (s *Service) Start(ctx context.Context) error {
+	if s == nil || ctx == nil || ctx.Err() != nil {
+		return ErrServiceUnavailable
+	}
+	s.mu.Lock()
+	if s.closed || s.stopping || s.starting || s.running || s.ctx == nil || s.cancel == nil || s.ctx.Err() != nil || s.database == nil || s.prepared && s.self != s {
+		s.mu.Unlock()
+		return ErrServiceUnavailable
+	}
+	s.starting = true
+	s.wg.Add(1)
+	original, cancelOriginal := s.ctx, s.cancel
+	s.mu.Unlock()
+	defer s.wg.Done()
+	linked := importerLifetimeSignal(ctx, cancelOriginal)
+	installed := false
+	defer func() {
+		if !installed {
+			linked()
+		}
+		s.mu.Lock()
+		s.starting = false
+		s.mu.Unlock()
+	}()
+	work, cancel := context.WithCancel(ctx)
+	stop := importerLifetimeSignal(original, cancel)
+	defer func() { stop(); cancel() }()
+	if work.Err() != nil || original.Err() != nil {
+		return ErrServiceUnavailable
+	}
+	if err := s.database.Repository.ResetStaleItemsContext(work); err != nil {
+		return fmt.Errorf("reset original stale queue items: %w", err)
+	}
+	s.mu.Lock()
+	if s.closed || s.stopping || work.Err() != nil || original.Err() != nil || s.ctx != original {
+		s.mu.Unlock()
+		return ErrServiceUnavailable
+	}
+	s.active = true
+	s.running = true
+	s.startSignal = linked
+	installed = true
 	for i := 0; i < s.config.Workers; i++ {
 		s.wg.Add(1)
 		go s.workerLoop(i)
 	}
-
-	s.running = true
-	s.log.InfoContext(ctx, "NZB import service started successfully")
-
+	s.mu.Unlock()
 	return nil
 }
 
-// Stop stops the NZB import service and all queue workers
+// Stop closes work admission before cancellation and joins the actual workers,
+// scans and synchronous source operations without holding their state mutex.
 func (s *Service) Stop(ctx context.Context) error {
+	if s == nil {
+		return ErrServiceUnavailable
+	}
+	if s.prepared {
+		return s.Close()
+	}
 	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	if !s.running {
+	if s.closed {
+		s.mu.Unlock()
+		return s.Close()
+	}
+	if s.stopping {
+		done := s.stopDone
+		s.mu.Unlock()
+		<-done
 		return nil
 	}
-
-	s.log.InfoContext(ctx, "Stopping NZB import service")
-
-	// Cancel all goroutines
+	s.stopping = true
+	s.stopDone = make(chan struct{})
+	done := s.stopDone
 	s.cancel()
-
-	// Wait for all goroutines to finish
+	publications := make([]*SABStagedPublication, 0, len(s.publications))
+	for publication := range s.publications {
+		publications = append(publications, publication)
+	}
+	s.mu.Unlock()
+	for _, publication := range publications {
+		publication.Close()
+	}
 	s.wg.Wait()
-
-	// Close and recreate notification channel for potential restart
-	close(s.workNotify)
-	s.workNotify = make(chan struct{}, 10)
-
-	// Recreate context for potential restart
-	s.ctx, s.cancel = context.WithCancel(context.Background())
-
+	s.mu.Lock()
+	signal := s.startSignal
+	s.startSignal = nil
 	s.running = false
-	s.log.InfoContext(ctx, "NZB import service stopped")
-
+	s.mu.Unlock()
+	if signal != nil {
+		signal()
+	}
+	s.mu.Lock()
+	if !s.closed {
+		s.ctx, s.cancel = context.WithCancel(context.Background())
+	}
+	s.stopping = false
+	close(done)
+	s.mu.Unlock()
 	return nil
 }
 
-// Close closes the NZB import service and releases all resources
+// Close always retires the original lifetime, including an unstarted service.
+// Notifications remain a stable private channel, so concurrent senders can
+// never race a closed or replaced channel.
 func (s *Service) Close() error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	if s.running {
-		s.cancel()
-		s.wg.Wait()
-		close(s.workNotify)
+	if s == nil || s.prepared && s.self != s {
+		return ErrServiceUnavailable
 	}
-
+	s.closeOnce.Do(func() {
+		s.mu.Lock()
+		s.closed, s.active = true, false
+		if s.cancel != nil {
+			s.cancel()
+		}
+		stopping, stopped := s.stopping, s.stopDone
+		publications := make([]*SABStagedPublication, 0, len(s.publications))
+		for publication := range s.publications {
+			publications = append(publications, publication)
+		}
+		s.mu.Unlock()
+		for _, publication := range publications {
+			publication.Close()
+		}
+		s.wg.Wait()
+		if stopping {
+			<-stopped
+		}
+		s.mu.Lock()
+		signal := s.startSignal
+		s.startSignal = nil
+		s.running = false
+		s.mu.Unlock()
+		if signal != nil {
+			signal()
+		}
+	})
 	return nil
 }
 
@@ -196,11 +370,26 @@ func (s *Service) Database() *database.DB {
 
 // GetQueueStats returns current queue statistics from database
 func (s *Service) GetQueueStats(ctx context.Context) (*database.QueueStats, error) {
-	return s.database.Repository.GetQueueStats()
+	work, finish, err := s.beginSourceWork(ctx, false)
+	if err != nil {
+		return nil, err
+	}
+	defer finish()
+	return s.database.Repository.GetQueueStatsContext(work)
 }
 
 // StartManualScan starts a manual scan of the specified directory
 func (s *Service) StartManualScan(scanPath string) error {
+	original, finish, err := s.beginSourceWork(nil, false)
+	if err != nil {
+		return err
+	}
+	launched := false
+	defer func() {
+		if !launched {
+			finish()
+		}
+	}()
 	s.scanMu.Lock()
 	defer s.scanMu.Unlock()
 
@@ -220,7 +409,7 @@ func (s *Service) StartManualScan(scanPath string) error {
 	}
 
 	// Create scan context
-	scanCtx, scanCancel := context.WithCancel(context.Background())
+	scanCtx, scanCancel := context.WithCancel(original)
 	s.scanCancel = scanCancel
 
 	// Initialize scan info
@@ -236,7 +425,8 @@ func (s *Service) StartManualScan(scanPath string) error {
 	}
 
 	// Start scanning in goroutine
-	go s.performManualScan(scanCtx, scanPath)
+	launched = true
+	go func() { defer finish(); s.performManualScan(scanCtx, scanPath) }()
 
 	s.log.Info("Manual scan started", "path", scanPath)
 	return nil
@@ -323,12 +513,12 @@ func (s *Service) performManualScan(ctx context.Context, scanPath string) {
 		}
 
 		// Check if already in queue (simplified check during scanning)
-		if s.isFileAlreadyInQueue(path) {
+		if s.isFileAlreadyInQueue(ctx, path) {
 			return nil
 		}
 
 		// Add to queue
-		if _, err := s.AddToQueue(path, &scanPath, nil, nil); err != nil {
+		if _, err := s.addToQueue(ctx, path, &scanPath, nil, nil); err != nil {
 			s.log.Error("Failed to add file to queue during scan", "file", path, "error", err)
 		}
 
@@ -352,10 +542,10 @@ func (s *Service) performManualScan(ctx context.Context, scanPath string) {
 }
 
 // isFileAlreadyInQueue checks if file is already in queue (simplified scanning)
-func (s *Service) isFileAlreadyInQueue(filePath string) bool {
+func (s *Service) isFileAlreadyInQueue(ctx context.Context, filePath string) bool {
 	// Only check queue database during scanning for performance
 	// The processor will check main database for duplicates when processing
-	inQueue, err := s.database.Repository.IsFileInQueue(filePath)
+	inQueue, err := s.database.Repository.IsFileInQueueContext(ctx, filePath)
 	if err != nil {
 		s.log.Warn("Failed to check if file in queue", "file", filePath, "error", err)
 		return false // Assume not in queue on error
@@ -365,9 +555,17 @@ func (s *Service) isFileAlreadyInQueue(filePath string) bool {
 
 // AddToQueue adds a new NZB file to the import queue with optional category and priority
 func (s *Service) AddToQueue(filePath string, relativePath *string, category *string, priority *database.QueuePriority) (*database.ImportQueueItem, error) {
+	return s.addToQueue(nil, filePath, relativePath, category, priority)
+}
+func (s *Service) addToQueue(caller context.Context, filePath string, relativePath *string, category *string, priority *database.QueuePriority) (*database.ImportQueueItem, error) {
+	ctx, finish, err := s.beginSourceWork(caller, true)
+	if err != nil {
+		return nil, err
+	}
+	defer finish()
 	// Calculate file size before adding to queue
 	var fileSize *int64
-	if size, err := s.CalculateFileSizeOnly(filePath); err != nil {
+	if size, err := s.calculateFileSizeContext(ctx, filePath); err != nil {
 		s.log.Warn("Failed to calculate file size", "file", filePath, "error", err)
 		// Continue with NULL file size - don't fail the queue addition
 		fileSize = nil
@@ -393,7 +591,7 @@ func (s *Service) AddToQueue(filePath string, relativePath *string, category *st
 		CreatedAt:    time.Now(),
 	}
 
-	if err := s.database.Repository.AddToQueue(item); err != nil {
+	if err := s.database.Repository.AddToQueueContext(ctx, item); err != nil {
 		s.log.Error("Failed to add file to queue", "file", filePath, "error", err)
 		return nil, err
 	}
@@ -426,7 +624,12 @@ func (s *Service) workerLoop(workerID int) {
 	log := s.log.With("worker_id", workerID)
 
 	// Get processing interval from configuration
-	processingIntervalSeconds := s.configGetter().Import.QueueProcessingIntervalSeconds
+	processingIntervalSeconds := 5
+	if s.configGetter != nil {
+		if current := s.configGetter(); current != nil && current.Import.QueueProcessingIntervalSeconds > 0 {
+			processingIntervalSeconds = current.Import.QueueProcessingIntervalSeconds
+		}
+	}
 	processingInterval := time.Duration(processingIntervalSeconds) * time.Second
 	log.Info("Queue worker started", "processing_interval", processingInterval)
 
@@ -454,7 +657,7 @@ func (s *Service) claimItemWithRetry(workerID int, log *slog.Logger) (*database.
 	const maxDelay = 200 * time.Millisecond
 
 	for attempt := 0; attempt < maxRetries; attempt++ {
-		item, err := s.database.Repository.ClaimNextQueueItem()
+		item, err := s.database.Repository.ClaimNextQueueItemContext(s.ctx)
 		if err == nil {
 			if item == nil {
 				return nil, nil
@@ -489,7 +692,11 @@ func (s *Service) claimItemWithRetry(workerID int, log *slog.Logger) (*database.
 				"delay", delay,
 				"worker_id", workerID)
 
-			time.Sleep(delay)
+			select {
+			case <-s.ctx.Done():
+				return nil, s.ctx.Err()
+			case <-time.After(delay):
+			}
 			continue
 		}
 
@@ -536,12 +743,12 @@ func (s *Service) processQueueItems(workerID int) {
 		// Handle failure in queue database
 		s.handleProcessingFailure(item, processingErr, log)
 	} else {
-		if err := s.database.Repository.AddStoragePath(item.ID, resultingPath); err != nil {
+		if err := s.database.Repository.AddStoragePathContext(s.ctx, item.ID, resultingPath); err != nil {
 			log.Error("Failed to mark item as completed", "queue_id", item.ID, "error", err)
 		}
 
 		// Mark as completed in queue database
-		if err := s.database.Repository.UpdateQueueItemStatus(item.ID, database.QueueStatusCompleted, nil); err != nil {
+		if err := s.database.Repository.UpdateQueueItemStatusContext(s.ctx, item.ID, database.QueueStatusCompleted, nil); err != nil {
 			log.Error("Failed to mark item as completed", "queue_id", item.ID, "error", err)
 		} else {
 			log.Info("Successfully processed queue item", "queue_id", item.ID, "file", item.NzbPath)
@@ -566,14 +773,14 @@ func (s *Service) handleProcessingFailure(item *database.ImportQueueItem, proces
 	// Check if we should retry
 	if !IsNonRetryable(processingErr) && item.RetryCount < item.MaxRetries {
 		// Mark for retry in queue database
-		if err := s.database.Repository.UpdateQueueItemStatus(item.ID, database.QueueStatusRetrying, &errorMessage); err != nil {
+		if err := s.database.Repository.UpdateQueueItemStatusContext(s.ctx, item.ID, database.QueueStatusRetrying, &errorMessage); err != nil {
 			log.Error("Failed to mark item for retry", "queue_id", item.ID, "error", err)
 		} else {
 			log.Info("Item marked for retry", "queue_id", item.ID, "retry_count", item.RetryCount+1)
 		}
 	} else {
 		// Max retries exceeded, mark as failed in queue database
-		if err := s.database.Repository.UpdateQueueItemStatus(item.ID, database.QueueStatusFailed, &errorMessage); err != nil {
+		if err := s.database.Repository.UpdateQueueItemStatusContext(s.ctx, item.ID, database.QueueStatusFailed, &errorMessage); err != nil {
 			log.Error("Failed to mark item as failed", "queue_id", item.ID, "error", err)
 		} else {
 			log.Error("Item failed permanently after max retries",
@@ -656,7 +863,15 @@ func (s *Service) notifyRcloneVFS(item *database.ImportQueueItem, log *slog.Logg
 
 // ProcessItemInBackground processes a specific queue item in the background
 func (s *Service) ProcessItemInBackground(ctx context.Context, itemID int64) {
+	if ctx == nil || ctx.Err() != nil {
+		return
+	}
+	work, finish, err := s.beginSourceWork(nil, true)
+	if err != nil {
+		return
+	}
 	go func() {
+		defer finish()
 		log := s.log.With("item_id", itemID, "background", true)
 		log.Debug("Starting background processing of queue item")
 
@@ -671,10 +886,10 @@ func (s *Service) ProcessItemInBackground(ctx context.Context, itemID int64) {
 		// Use the service context for background work, not the HTTP request context
 		// The request context will be cancelled when the HTTP response is sent,
 		// but we need to continue processing in the background
-		bgCtx := s.ctx
+		bgCtx := work
 
 		// Get the queue item
-		item, err := s.database.Repository.GetQueueItem(itemID)
+		item, err := s.database.Repository.GetQueueItemContext(bgCtx, itemID)
 		if err != nil {
 			log.Error("Failed to get queue item for background processing", "error", err)
 			return
@@ -699,13 +914,17 @@ func (s *Service) ProcessItemInBackground(ctx context.Context, itemID int64) {
 			default:
 			}
 
-			claimed, err = s.database.Repository.TryClaimQueueItem(itemID)
+			claimed, err = s.database.Repository.TryClaimQueueItemContext(bgCtx, itemID)
 			if err != nil {
 				log.Error("Failed to claim queue item for background processing", "error", err, "attempt", attempt+1)
 				if attempt == maxRetries-1 {
 					return
 				}
-				time.Sleep(retryDelay)
+				select {
+				case <-bgCtx.Done():
+					return
+				case <-time.After(retryDelay):
+				}
 				continue
 			}
 			if claimed {
@@ -715,7 +934,11 @@ func (s *Service) ProcessItemInBackground(ctx context.Context, itemID int64) {
 			// If not claimed, wait a bit and try again
 			if attempt < maxRetries-1 {
 				log.Debug("Queue item not available for claiming, retrying", "queue_id", itemID, "attempt", attempt+1)
-				time.Sleep(retryDelay)
+				select {
+				case <-bgCtx.Done():
+					return
+				case <-time.After(retryDelay):
+				}
 			}
 		}
 
@@ -729,7 +952,7 @@ func (s *Service) ProcessItemInBackground(ctx context.Context, itemID int64) {
 		case <-bgCtx.Done():
 			log.Info("Context cancelled before processing NZB", "error", bgCtx.Err())
 			// Release the claim since we're not processing
-			_ = s.database.Repository.UpdateQueueItemStatus(itemID, database.QueueStatusPending, nil)
+			_ = s.database.Repository.UpdateQueueItemStatusContext(bgCtx, itemID, database.QueueStatusPending, nil)
 			return
 		default:
 		}
@@ -753,12 +976,12 @@ func (s *Service) ProcessItemInBackground(ctx context.Context, itemID int64) {
 			s.handleProcessingFailure(item, processingErr, log)
 		} else {
 			// Handle success
-			if err := s.database.Repository.AddStoragePath(item.ID, resultingPath); err != nil {
+			if err := s.database.Repository.AddStoragePathContext(bgCtx, item.ID, resultingPath); err != nil {
 				log.Error("Failed to add storage path", "error", err)
 			}
 
 			// Mark as completed
-			if err := s.database.Repository.UpdateQueueItemStatus(item.ID, database.QueueStatusCompleted, nil); err != nil {
+			if err := s.database.Repository.UpdateQueueItemStatusContext(bgCtx, item.ID, database.QueueStatusCompleted, nil); err != nil {
 				log.Error("Failed to mark item as completed", "error", err)
 			} else {
 				log.Info("Successfully processed queue item in background", "resulting_path", resultingPath)
@@ -773,10 +996,20 @@ func (s *Service) ProcessItemInBackground(ctx context.Context, itemID int64) {
 // CalculateFileSizeOnly calculates the total file size from NZB/STRM segments
 // This is a lightweight parser that only extracts size information without full processing
 func (s *Service) CalculateFileSizeOnly(filePath string) (int64, error) {
+	return s.calculateFileSizeContext(nil, filePath)
+}
+func (s *Service) calculateFileSizeContext(caller context.Context, filePath string) (int64, error) {
+	ctx, finish, err := s.beginSourceWork(caller, false)
+	if err != nil {
+		return 0, err
+	}
+	defer finish()
 	file, err := os.Open(filePath)
 	if err != nil {
 		return 0, NewNonRetryableError("failed to open file for size calculation", err)
 	}
+	stopRead := importerLifetimeSignal(ctx, func() { _ = file.Close() })
+	defer stopRead()
 	defer file.Close()
 
 	if strings.HasSuffix(strings.ToLower(filePath), ".strm") {
@@ -861,6 +1094,11 @@ func (s *Service) convertPriorityToSABnzbd(priority database.QueuePriority) stri
 
 // AddNZBToQueue adds an NZB file to the queue for processing
 func (s *Service) AddNZBToQueue(ctx context.Context, fileName string, nzbBytes []byte) (*database.ImportQueueItem, error) {
+	ctx, finish, err := s.beginSourceWork(ctx, true)
+	if err != nil {
+		return nil, err
+	}
+	defer finish()
 	s.log.InfoContext(ctx, "Adding NZB to queue", "fileName", fileName, "size", len(nzbBytes))
 
 	// Create temp directory for NZBs if it doesn't exist
@@ -915,7 +1153,7 @@ func (s *Service) AddNZBToQueue(ctx context.Context, fileName string, nzbBytes [
 	}
 
 	// Add to queue
-	if err := s.database.Repository.AddToQueue(queueItem); err != nil {
+	if err := s.database.Repository.AddToQueueContext(ctx, queueItem); err != nil {
 		// Clean up temp file on error
 		os.Remove(nzbPath)
 		return nil, fmt.Errorf("add to queue: %w", err)
@@ -945,6 +1183,11 @@ func (s *Service) ProcessNZBImmediately(ctx context.Context, fileName string, nz
 // ProcessNZBImmediatelyWithSource processes an NZB file immediately and records
 // the resolved metadata path for future reuse.
 func (s *Service) ProcessNZBImmediatelyWithSource(ctx context.Context, fileName string, nzbBytes []byte, source ResolvedNZBSource) (string, error) {
+	ctx, finish, err := s.beginSourceWork(ctx, true)
+	if err != nil {
+		return "", err
+	}
+	defer finish()
 	s.log.InfoContext(ctx, "Processing NZB immediately", "fileName", fileName, "size", len(nzbBytes))
 	nzbHash := resolvedNZBHash(nzbBytes)
 	if entry, ok, err := s.resolvedCache.findByNZBHash(ctx, nzbHash); err != nil {
@@ -952,6 +1195,10 @@ func (s *Service) ProcessNZBImmediatelyWithSource(ctx context.Context, fileName 
 	} else if ok {
 		s.log.InfoContext(ctx, "Resolved NZB cache hit", "fileName", fileName, "storagePath", entry.StoragePath)
 		return entry.StoragePath, nil
+	}
+
+	if ctx.Err() != nil {
+		return "", ctx.Err()
 	}
 
 	// Create temp directory for NZBs if it doesn't exist
@@ -989,20 +1236,40 @@ func (s *Service) ProcessNZBImmediatelyWithSource(ctx context.Context, fileName 
 }
 
 func (s *Service) FindResolvedNZBByDownloadURL(ctx context.Context, downloadURL string) (*ResolvedNZBEntry, bool, error) {
+	ctx, finish, err := s.beginSourceWork(ctx, false)
+	if err != nil {
+		return nil, false, err
+	}
+	defer finish()
 	return s.resolvedCache.findByDownloadURL(ctx, downloadURL)
 }
 
 func (s *Service) ListResolvedNZBs(ctx context.Context, filter string, page, perPage int) (*ResolvedNZBListResult, error) {
+	ctx, finish, err := s.beginSourceWork(ctx, false)
+	if err != nil {
+		return nil, err
+	}
+	defer finish()
 	return s.resolvedCache.list(ctx, filter, page, perPage)
 }
 
 func (s *Service) DeleteResolvedNZB(ctx context.Context, key string) error {
+	ctx, finish, err := s.beginSourceWork(ctx, false)
+	if err != nil {
+		return err
+	}
+	defer finish()
 	return s.resolvedCache.delete(ctx, key)
 }
 
 // HasResolvedNZB reports whether these NZB bytes already have a cached import
 // that ProcessNZBImmediately would reuse instead of importing.
 func (s *Service) HasResolvedNZB(ctx context.Context, nzbBytes []byte) bool {
+	ctx, finish, err := s.beginSourceWork(ctx, false)
+	if err != nil {
+		return false
+	}
+	defer finish()
 	_, ok, err := s.resolvedCache.findByNZBHash(ctx, resolvedNZBHash(nzbBytes))
 	return err == nil && ok
 }
@@ -1013,7 +1280,12 @@ func (s *Service) HasResolvedNZB(ctx context.Context, nzbBytes []byte) bool {
 // broken import (for example from an importer bug since fixed) is reused on
 // every playback attempt. A missing entry is not an error.
 func (s *Service) ForgetResolvedNZB(ctx context.Context, nzbBytes []byte) error {
-	err := s.resolvedCache.delete(ctx, resolvedNZBHash(nzbBytes))
+	ctx, finish, err := s.beginSourceWork(ctx, false)
+	if err != nil {
+		return err
+	}
+	defer finish()
+	err = s.resolvedCache.delete(ctx, resolvedNZBHash(nzbBytes))
 	if errors.Is(err, os.ErrNotExist) {
 		return nil
 	}
