@@ -585,6 +585,8 @@ type writeGuardState struct {
 	closing                  bool
 	done                     chan struct{}
 	err                      error
+	cleanupContext           context.Context
+	cleanupClaimed           bool
 }
 
 func (WriteGuard) Format(f fmt.State, _ rune)   { _, _ = f.Write([]byte("SettingsWriteGuard(opaque)")) }
@@ -663,7 +665,16 @@ func (c *Coordinator) TryWrite(ctx context.Context) (*WriteGuard, error) {
 	configuration.PrepareConn = func(ctx context.Context, connection *pgx.Conn) (bool, error) {
 		guard.mu.Lock()
 		defer guard.mu.Unlock()
-		if guard.closing || guard.failed || guard.ctx.Err() != nil || ctx.Err() != nil || guard.original != connection || connection.IsClosed() {
+		if guard.closing {
+			// Terminal cleanup can claim only this actual original resource once.
+			// This context is private and never becomes the mutation context.
+			if guard.cleanupContext != nil && ctx == guard.cleanupContext && !guard.cleanupClaimed && !guard.failed && ctx.Err() == nil && guard.original == connection && !connection.IsClosed() {
+				guard.cleanupClaimed = true
+				return true, nil
+			}
+			return false, ErrCoordinatorRequired
+		}
+		if guard.failed || guard.ctx.Err() != nil || ctx.Err() != nil || guard.original != connection || connection.IsClosed() {
 			return false, ErrCoordinatorRequired
 		}
 		return true, nil
@@ -833,6 +844,63 @@ func (g *WriteGuard) Context() context.Context {
 	}
 	return g.ctx
 }
+
+// acknowledgeHealthyRelease owns the exact original pool resource before any
+// cleanup SQL. Failed/closed originals retain the existing fixed-key fencing
+// contract: their local Close is not a claim that the server transaction ended.
+func (g *WriteGuard) acknowledgeHealthyRelease() (*pgx.Conn, error) {
+	g.mu.Lock()
+	if !g.locked || g.failed || g.original == nil || g.pool == nil || g.original.IsClosed() {
+		g.mu.Unlock()
+		return nil, nil
+	}
+	original, pool := g.original, g.pool
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	g.cleanupContext = ctx
+	g.mu.Unlock()
+	defer func() {
+		g.mu.Lock()
+		g.cleanupContext = nil
+		g.mu.Unlock()
+		cancel()
+	}()
+
+	// AcquireAllIdle does not construct, wait or replace the caller context
+	// through an acquire tracer. The original pool has exactly one resource.
+	resources := pool.AcquireAllIdle(ctx)
+	if len(resources) != 1 {
+		for _, resource := range resources {
+			resource.Release()
+		}
+		return nil, ErrUnknown
+	}
+	resource := resources[0]
+	if resource.Conn() != original {
+		resource.Release()
+		return nil, ErrUnknown
+	}
+	actual := resource.Hijack()
+	// These protocol state reads occur only after actual resource ownership has
+	// transferred. Never recover or replay a busy/uncertain business transaction.
+	if actual.PgConn().IsBusy() || actual.PgConn().TxStatus() != 'I' {
+		return actual, nil
+	}
+	var pid uint32
+	var released bool
+	err := actual.QueryRow(ctx, `SELECT pg_backend_pid(), pg_advisory_unlock($1::integer,$2::integer)`, pgx.QueryExecModeSimpleProtocol, Namespace, Resource).Scan(&pid, &released)
+	if err != nil || !released || pid != actual.PgConn().PID() || ctx.Err() != nil {
+		return actual, ErrUnknown
+	}
+	// A true unlock decrements one acquisition. Confirm the exact two-key lock
+	// is absent as a separate, acknowledged statement, without a polling loop.
+	var absent bool
+	err = actual.QueryRow(ctx, `SELECT NOT EXISTS(SELECT 1 FROM pg_catalog.pg_locks WHERE locktype='advisory' AND pid=pg_backend_pid() AND classid=$1::oid AND objid=$2::oid AND objsubid=2 AND granted)`, pgx.QueryExecModeSimpleProtocol, Namespace, Resource).Scan(&absent)
+	if err != nil || !absent || ctx.Err() != nil || actual.PgConn().IsBusy() || actual.PgConn().TxStatus() != 'I' {
+		return actual, ErrUnknown
+	}
+	return actual, nil
+}
+
 func (g *WriteGuard) Close() error {
 	if g == nil || g.writeGuardState == nil || g.self != g {
 		return ErrCoordinatorRequired
@@ -848,6 +916,19 @@ func (g *WriteGuard) Close() error {
 	g.cancel()
 	g.mu.Unlock()
 	g.work.Wait()
+	// The sole cleanup SQL operation retains the existing bounded control port
+	// until its actual query/context callbacks end. No SQL reconnect is allowed.
+	hijacked, releaseErr := g.acknowledgeHealthyRelease()
+	if releaseErr != nil {
+		g.err = releaseErr
+	}
+	if hijacked != nil {
+		closeContext, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		if err := hijacked.Close(closeContext); err != nil && g.err == nil {
+			g.err = ErrUnknown
+		}
+		cancel()
+	}
 	g.mu.Lock()
 	g.dialsClosed = true
 	g.mu.Unlock()
