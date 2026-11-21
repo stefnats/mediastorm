@@ -228,6 +228,13 @@ with sync_playwright() as pw, ExitStack() as cleanup:
         no_publication(baseline)
         assert baseline["stageGets"] == baseline["previewPosts"] == baseline["statusGets"] == baseline["librariesGets"] == 0
         page.goto(base + "/app/admin/tools")
+        # Existing Tools initialization legitimately reads this same admin
+        # library route after its profile load. Wait for the actual response
+        # consumer's DOM result, not a timer or an assumed network baseline.
+        page.locator('#newTaskLocalMediaLibrary option[value="publication-library"]').wait_for(state="attached")
+        initialized = state(context, base)
+        assert initialized["librariesGets"] == 1
+        no_publication(initialized)
         return context, page
 
     results = {}
@@ -236,7 +243,8 @@ with sync_playwright() as pw, ExitStack() as cleanup:
         context, page = new_page(base)
         initial = state(context, base)
         no_publication(initial)
-        assert initial["stageGets"] == initial["previewPosts"] == initial["librariesGets"] == initial["statusGets"] == 0
+        assert initial["stageGets"] == initial["previewPosts"] == initial["statusGets"] == 0
+        assert initial["librariesGets"] == 1
         panel, card = view_saved(page)
         passive = state(context, base)
         no_publication(passive)
@@ -248,7 +256,7 @@ with sync_playwright() as pw, ExitStack() as cleanup:
         card.get_by_role("button", name="View saved copy", exact=True).click()
         card.get_by_text("A saved copy was recorded. This does not mean ready to play.", exact=False).wait_for()
         assert card.locator("[data-sab-library-publication]").count() == 0
-        assert state(context, base)["librariesGets"] == 0
+        assert state(context, base)["librariesGets"] == initial["librariesGets"]
         panel.evaluate("(node, value) => node.dataset.libraryEndpoint = value", original_library_endpoint)
         card.get_by_role("button", name="View saved copy", exact=True).click()
         card.locator("[data-sab-library-publication]").wait_for()
