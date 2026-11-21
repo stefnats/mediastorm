@@ -303,7 +303,21 @@ func TestSABLibraryPublicationProductionBrowser(t *testing.T) {
 			if err := os.MkdirAll(artifacts, 0700); err != nil {
 				t.Fatal(err)
 			}
-			scratch := t.TempDir()
+			// Chromium uses a Unix socket below TMPDIR. Keep its genuine private
+			// directory short enough for the platform socket path limit.
+			const scratchRoot = "/home/stefan/ops-runbook/tmp/mslp"
+			if err := os.MkdirAll(scratchRoot, 0700); err != nil {
+				t.Fatal(err)
+			}
+			scratch, err := os.MkdirTemp(scratchRoot, kind+"-")
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() {
+				if err := os.RemoveAll(scratch); err != nil {
+					t.Error(err)
+				}
+			})
 			ctx, cancel := context.WithTimeout(t.Context(), 2*time.Minute)
 			defer cancel()
 			cmd := exec.CommandContext(ctx, python, "testdata/sab_library_publication_web_browser.py", "--case", kind, "--base-url", server.URL, "--unknown-url", server.URL, "--reconcile-url", server.URL, "--chromium", chromium, "--artifacts", artifacts)
