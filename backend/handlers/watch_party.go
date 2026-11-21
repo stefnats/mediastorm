@@ -15,6 +15,7 @@ import (
 	"github.com/gorilla/mux"
 	"novastream/config"
 	"novastream/internal/auth"
+	"novastream/internal/datastore"
 	"novastream/models"
 	"novastream/services/libraryaccess"
 	"novastream/services/sessions"
@@ -29,6 +30,7 @@ type WatchPartyHandler struct {
 	serverBasePath string
 	libraryAccess  *libraryaccess.Service
 	settings       watchPartySettingsProvider
+	managedRoom    *managedWatchRoomEntry
 }
 
 type watchPartySettingsProvider interface {
@@ -59,6 +61,10 @@ type watchPartyInviteView struct {
 }
 
 func (h *WatchPartyHandler) CreateInvitation(w http.ResponseWriter, r *http.Request) {
+	if h.managedRoom != nil {
+		h.managedRoom.serve(w, r, http.HandlerFunc(h.createManagedInvitation))
+		return
+	}
 	externalBaseURL, err := h.externalBaseURL()
 	if err != nil {
 		writeJSONError(w, err.Error(), http.StatusPreconditionRequired)
@@ -94,6 +100,10 @@ func (h *WatchPartyHandler) externalBaseURL() (string, error) {
 }
 
 func (h *WatchPartyHandler) RevokeInvitation(w http.ResponseWriter, r *http.Request) {
+	if h.managedRoom != nil {
+		h.managedRoom.serve(w, r, http.HandlerFunc(h.revokeManagedInvitation))
+		return
+	}
 	err := h.service.RevokeExternalInvitation(r.Context(), auth.GetAccountID(r), mux.Vars(r)["userID"], mux.Vars(r)["roomID"])
 	if err != nil {
 		h.writeError(w, err)
@@ -112,6 +122,10 @@ var watchPartySourceAllowedParams = map[string]bool{
 }
 
 func (h *WatchPartyHandler) BindSource(w http.ResponseWriter, r *http.Request) {
+	if h.managedRoom != nil {
+		h.managedRoom.serve(w, r, http.HandlerFunc(h.bindManagedSource))
+		return
+	}
 	var body struct {
 		Source string            `json:"source"`
 		Params map[string]string `json:"params"`
@@ -543,4 +557,57 @@ func (h *WatchPartyHandler) renderPage(w http.ResponseWriter, title, content str
 	w.Header().Set("Cache-Control", "no-store")
 	w.Header().Set("Referrer-Policy", "no-referrer")
 	_, _ = w.Write([]byte(`<!doctype html><html><head><meta name="viewport" content="width=device-width,initial-scale=1"><title>` + html.EscapeString(title) + `</title><style>body{margin:0;min-height:100vh;display:grid;place-items:center;background:#070b14;color:#e2e8f0;font:16px system-ui;padding:24px;box-sizing:border-box}.card{width:min(480px,100%);background:#0f172a;border:1px solid #334155;border-radius:20px;padding:28px;box-sizing:border-box}h1{color:#fff;margin-top:0}h2{font-size:16px;margin-top:24px}p,#status{line-height:1.5;color:#cbd5e1}label{display:block;margin:18px 0 8px}input{width:100%;box-sizing:border-box;padding:14px;border-radius:10px;border:1px solid #475569;background:#020617;color:#fff;font-size:18px;text-transform:none}button{width:100%;margin-top:16px;padding:14px;border:0;border-radius:10px;background:#2563eb;color:#fff;font-size:17px;font-weight:700;cursor:pointer}button:disabled{opacity:.5;cursor:not-allowed}.ready-button.is-ready{background:#334155}.member{display:flex;justify-content:space-between;gap:16px;padding:10px 0;border-bottom:1px solid #1e293b}.member-state{color:#94a3b8;font-size:14px;white-space:nowrap}.inline-error{min-height:20px;margin-top:8px;color:#fca5a5;font-size:14px}a{color:#93c5fd}</style></head><body><main class="card"><h1>` + html.EscapeString(title) + `</h1>` + content + `</main></body></html>`))
+}
+
+func (h *WatchPartyHandler) createManagedInvitation(w http.ResponseWriter, r *http.Request) {
+	external, e := h.externalBaseURL()
+	if e != nil {
+		writeJSONError(w, "external backend URL is required", http.StatusPreconditionRequired)
+		return
+	}
+	invite, e := h.managedRoom.authority.ReplaceExternalInvite(r, mux.Vars(r)["userID"], mux.Vars(r)["roomID"])
+	if e != nil {
+		writeManagedRoomError(w, e)
+		return
+	}
+	view := watchPartyInviteView{URL: external + "/watch-party/" + invite.Token, LandingURL: external + "/watch-party", ShortCode: invite.ShortCode, ExpiresAt: invite.ExpiresAt}
+	writeManagedRoomResult(w, r, h.managedRoom, http.StatusCreated, view, invite.ExpiresAt)
+}
+func (h *WatchPartyHandler) revokeManagedInvitation(w http.ResponseWriter, r *http.Request) {
+	if e := h.managedRoom.authority.RevokeExternalInvite(r, mux.Vars(r)["userID"], mux.Vars(r)["roomID"]); e != nil {
+		writeManagedRoomError(w, e)
+		return
+	}
+	writeManagedRoomResult(w, r, h.managedRoom, http.StatusNoContent, nil, time.Time{})
+}
+func (h *WatchPartyHandler) bindManagedSource(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		Source string            `json:"source"`
+		Params map[string]string `json:"params"`
+	}
+	if e := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20)).Decode(&body); e != nil {
+		if r.Context().Err() != nil {
+			writeManagedRoomError(w, datastore.ErrWatchRoomUnavailable)
+		} else {
+			writeManagedRoomError(w, datastore.ErrWatchRoomInvalid)
+		}
+		return
+	}
+	profile := mux.Vars(r)["userID"]
+	params := make(map[string]string, len(body.Params)+1)
+	for key, value := range body.Params {
+		value = strings.TrimSpace(value)
+		if value != "" && watchPartySourceAllowedParams[key] {
+			params[key] = value
+		}
+	}
+	params["profileId"] = profile
+	result, e := h.managedRoom.authority.BindExternalSource(r, profile, mux.Vars(r)["roomID"], body.Source, params)
+	if e != nil {
+		writeManagedRoomError(w, e)
+		return
+	}
+	// Only the existing public ready view is delivered, never the internal
+	// publication deadline or trusted source/nonce provenance.
+	writeManagedRoomResult(w, r, h.managedRoom, http.StatusOK, map[string]bool{"ready": true}, result.PublicationUntil)
 }

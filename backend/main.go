@@ -1217,6 +1217,9 @@ func main() {
 		watchPartyHandler = handlers.NewWatchPartyHandler(watchRoomsService, sessionsService, settings.Server.BasePath)
 		watchPartyHandler.SetLibraryAccessService(libraryAccessService)
 		watchPartyHandler.SetSettingsProvider(cfgManager)
+		if err := api.ConfigureManagedWatchRoomAuthority(managedStartup, store, watchRoomsHandler, watchPartyHandler, settings.Server.BasePath); err != nil {
+			log.Printf("[watch-together] managed room creation unavailable: %v", err)
+		}
 		go func() {
 			runCleanup := func() {
 				ended, deleted, err := watchRoomsService.Cleanup(context.Background())

@@ -1,6 +1,7 @@
 package api
 
 import (
+	"errors"
 	"net/http"
 	"net/http/pprof"
 	"runtime"
@@ -9,8 +10,10 @@ import (
 
 	"novastream/config"
 	"novastream/handlers"
+	"novastream/internal/datastore"
 	"novastream/internal/profileaccess"
 	"novastream/internal/requestsecurity"
+	"novastream/internal/settingsbootstrap"
 	"novastream/services/accounts"
 	"novastream/services/profileunlock"
 	"novastream/services/sessions"
@@ -281,7 +284,20 @@ func Register(
 	if shareHandler != nil {
 		protected.Use(shareHandler.BoundedCreateEntry)
 	}
+	if watchRoomsHandler != nil {
+		protected.Use(watchRoomsHandler.BoundedManagedEntry)
+	}
+	if watchPartyHandler != nil {
+		protected.Use(watchPartyHandler.BoundedManagedEntry)
+	}
 	protected.Use(AccountAuthMiddleware(sessionsSvc, accountsSvc, options.pgPins))
+	if watchRoomsHandler != nil {
+		protected.Use(watchRoomsHandler.BoundedManagedEntry)
+	}
+	if watchPartyHandler != nil {
+		protected.Use(watchPartyHandler.BoundedManagedEntry)
+	}
+
 	if videoHandler != nil {
 		protected.Use(videoHandler.ManagedSharePlaybackEntry)
 	}
@@ -1166,4 +1182,29 @@ func RegisterTraktRoutes(r *mux.Router, traktHandler *handlers.TraktAccountsHand
 	api.HandleFunc("/accounts/{accountID}/scrobbling", handleOptions).Methods(http.MethodOptions)
 	api.HandleFunc("/accounts/{accountID}/history", traktHandler.GetHistory).Methods(http.MethodGet)
 	api.HandleFunc("/accounts/{accountID}/history", handleOptions).Methods(http.MethodOptions)
+}
+
+// ConfigureManagedWatchRoomAuthority is the same concrete composition used by
+// Main. A managed selection stays fail closed when its startup cannot supply the
+// single original owned authority; file-mode constructors retain legacy behavior.
+func ConfigureManagedWatchRoomAuthority(startup *settingsbootstrap.Startup, store *datastore.DataStore, rooms *handlers.WatchRoomsHandler, party *handlers.WatchPartyHandler, basePath string) error {
+	if store == nil {
+		return nil
+	}
+	if rooms != nil {
+		rooms.SetManagedWatchRoomAuthority(nil, basePath)
+	}
+	if party != nil {
+		party.SetManagedWatchRoomAuthority(nil, basePath)
+	}
+	if startup == nil || rooms == nil || party == nil {
+		return errors.New("managed watch room dependencies unavailable")
+	}
+	authority, err := startup.NewWatchRoomAuthority(store)
+	if err != nil {
+		return err
+	}
+	rooms.SetManagedWatchRoomAuthority(authority, basePath)
+	party.SetManagedWatchRoomAuthority(authority, basePath)
+	return nil
 }
