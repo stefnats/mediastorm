@@ -22,6 +22,10 @@ type Querier interface {
 // Services receive repository interfaces from here, never raw DB connections.
 type DataStore struct {
 	pool *pgxpool.Pool
+
+	// Protected by the existing familyMediaAdmission mutex.
+	familyMediaRetired    bool
+	familyMediaRetireDone chan struct{}
 }
 
 // New connects to PostgreSQL, runs migrations, and returns a ready DataStore.
@@ -65,7 +69,13 @@ func New(ctx context.Context, databaseURL string, opts ...Option) (*DataStore, e
 
 // Close shuts down the connection pool.
 func (ds *DataStore) Close() {
-	ds.pool.Close()
+	if ds == nil {
+		return
+	}
+	ds.retireFamilyMediaOwners()
+	if ds.pool != nil {
+		ds.pool.Close()
+	}
 }
 
 // Pool exposes the raw pool for backup/migration operations only.
