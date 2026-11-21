@@ -48,6 +48,52 @@ type sabPublicationBoundedWriter struct {
 	entry *sabPublicationHTTPEntry
 }
 
+// Completion is transport DATA only. The actual underlying EOF, including
+// malformed JSON that was completely read, is independent of authorization.
+type sabPublicationObservedBody struct {
+	io.ReadCloser
+	entry *sabPublicationHTTPEntry
+}
+
+func (b *sabPublicationObservedBody) Read(buffer []byte) (int, error) {
+	n, e := b.ReadCloser.Read(buffer)
+	if e == io.EOF {
+		b.entry.ioMu.Lock()
+		b.entry.bodyDone = true
+		var deadlineErr error
+		if b.entry.ctx.Err() == nil {
+			deadlineErr = b.entry.controller.SetReadDeadline(b.entry.expiry)
+		}
+		b.entry.ioMu.Unlock()
+		if deadlineErr != nil {
+			b.entry.cancel()
+		}
+	}
+	return n, e
+}
+func (e *sabPublicationHTTPEntry) beforeResponse(w http.ResponseWriter) {
+	e.ioMu.Lock()
+	completed := e.bodyDone && e.ctx.Err() == nil
+	e.ioMu.Unlock()
+	if !completed {
+		w.Header().Set("Connection", "close")
+	}
+}
+func (w *sabPublicationBoundedWriter) WriteHeader(status int) {
+	w.entry.beforeResponse(w.ResponseWriter)
+	w.ResponseWriter.WriteHeader(status)
+}
+func (w *sabPublicationBoundedWriter) Write(buffer []byte) (int, error) {
+	w.entry.beforeResponse(w.ResponseWriter)
+	return w.ResponseWriter.Write(buffer)
+}
+func publicationEntryError(w http.ResponseWriter, r *http.Request, message string, status int) {
+	if r.Body != nil && r.Body != http.NoBody {
+		w.Header().Set("Connection", "close")
+	}
+	http.Error(w, message, status)
+}
+
 func (w *sabPublicationBoundedWriter) Unwrap() http.ResponseWriter { return w.ResponseWriter }
 func (w *sabPublicationBoundedWriter) SetReadDeadline(deadline time.Time) error {
 	e := w.entry
@@ -77,7 +123,10 @@ func (w *sabPublicationBoundedWriter) SetWriteDeadline(deadline time.Time) error
 	}
 	return e.controller.SetWriteDeadline(deadline)
 }
-func (w *sabPublicationBoundedWriter) FlushError() error { return w.entry.controller.Flush() }
+func (w *sabPublicationBoundedWriter) FlushError() error {
+	w.entry.beforeResponse(w.ResponseWriter)
+	return w.entry.controller.Flush()
+}
 
 func NewSABLibraryPublicationHandler(publisher *localmedia.SABLibraryPublisher) (*SABLibraryPublicationHandler, error) {
 	if publisher == nil || publisher.Context().Err() != nil {
@@ -126,12 +175,12 @@ func (h *SABLibraryPublicationHandler) ready() bool {
 func (h *SABLibraryPublicationHandler) BoundedEntry(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if !h.ready() || next == nil {
-			http.Error(w, "503 Service Unavailable", 503)
+			publicationEntryError(w, r, "503 Service Unavailable", 503)
 			return
 		}
 		peer, e := publicationPeer(r.RemoteAddr)
 		if e != nil {
-			http.Error(w, "503 Service Unavailable", 503)
+			publicationEntryError(w, r, "503 Service Unavailable", 503)
 			return
 		}
 		expiry := time.Now().Add(5 * time.Minute)
@@ -139,16 +188,16 @@ func (h *SABLibraryPublicationHandler) BoundedEntry(next http.Handler) http.Hand
 			expiry = deadline
 		}
 		if !expiry.After(time.Now()) {
-			http.Error(w, "503 Service Unavailable", 503)
+			publicationEntryError(w, r, "503 Service Unavailable", 503)
 			return
 		}
 		ctx, cancel := context.WithDeadline(r.Context(), expiry)
-		entry := &sabPublicationHTTPEntry{owner: h, peer: peer, ctx: ctx, cancel: cancel, controller: http.NewResponseController(w), expiry: expiry, bodyExpiry: minTime(expiry, time.Now().Add(30*time.Second)), finished: make(chan struct{})}
+		entry := &sabPublicationHTTPEntry{owner: h, peer: peer, ctx: ctx, cancel: cancel, controller: http.NewResponseController(w), expiry: expiry, bodyExpiry: minTime(expiry, time.Now().Add(30*time.Second)), bodyDone: r.Body == nil || r.Body == http.NoBody, finished: make(chan struct{})}
 		h.mu.Lock()
 		if h.closed || len(h.entries) >= 64 || h.peers[peer] >= 8 {
 			h.mu.Unlock()
 			cancel()
-			http.Error(w, "503 Service Unavailable", 503)
+			publicationEntryError(w, r, "503 Service Unavailable", 503)
 			return
 		}
 		h.entries[entry] = struct{}{}
@@ -164,6 +213,7 @@ func (h *SABLibraryPublicationHandler) BoundedEntry(next http.Handler) http.Hand
 		})
 		defer func() {
 			// Flush actual buffered output while all original IO links remain armed.
+			entry.beforeResponse(w)
 			_ = entry.controller.Flush()
 			// A raw intentional read timeout can cancel net/http's original
 			// background reader. Disarm/join both original interruption links
@@ -172,7 +222,11 @@ func (h *SABLibraryPublicationHandler) BoundedEntry(next http.Handler) http.Hand
 			entry.stop()
 			stopOwner()
 			entry.ioMu.Lock()
-			_ = entry.controller.SetReadDeadline(time.Now().Add(-time.Second))
+			// Do not poison net/http's connection context after real EOF.
+			// Early unread bodies already advertised Connection: close.
+			if !entry.bodyDone {
+				_ = entry.controller.SetReadDeadline(time.Now().Add(-time.Second))
+			}
 			entry.ioMu.Unlock()
 			if r.Body != nil {
 				_ = r.Body.Close()
@@ -191,7 +245,11 @@ func (h *SABLibraryPublicationHandler) BoundedEntry(next http.Handler) http.Hand
 		entry.ioMu.Lock()
 		var readErr, writeErr error
 		if ctx.Err() == nil {
-			readErr = entry.controller.SetReadDeadline(entry.bodyExpiry)
+			readLimit := entry.bodyExpiry
+			if entry.bodyDone {
+				readLimit = entry.expiry
+			}
+			readErr = entry.controller.SetReadDeadline(readLimit)
 			writeErr = entry.controller.SetWriteDeadline(expiry)
 		} else {
 			readErr = ctx.Err()
@@ -199,16 +257,16 @@ func (h *SABLibraryPublicationHandler) BoundedEntry(next http.Handler) http.Hand
 		}
 		entry.ioMu.Unlock()
 		if readErr != nil || writeErr != nil || ctx.Err() != nil {
-			http.Error(w, "503 Service Unavailable", 503)
+			publicationEntryError(w, r, "503 Service Unavailable", 503)
 			return
 		}
 		if r.ContentLength > 16384 {
-			http.Error(w, "413 Request Entity Too Large", 413)
+			publicationEntryError(w, r, "413 Request Entity Too Large", 413)
 			return
 		}
 		r = r.WithContext(context.WithValue(ctx, sabPublicationHTTPKey{}, entry))
 		if r.Body != nil {
-			r.Body = http.MaxBytesReader(w, r.Body, 16384)
+			r.Body = &sabPublicationObservedBody{ReadCloser: http.MaxBytesReader(w, r.Body, 16384), entry: entry}
 		}
 		next.ServeHTTP(&sabPublicationBoundedWriter{ResponseWriter: w, entry: entry}, r)
 	})
@@ -285,18 +343,6 @@ func (h *SABLibraryPublicationHandler) mutate(w http.ResponseWriter, r *http.Req
 	if datastore.ValidateSABLibraryPublicationSelection(raw) != nil {
 		clear(raw)
 		http.Error(w, "400 Bad Request", 400)
-		return
-	}
-	entry.ioMu.Lock()
-	if entry.ctx.Err() == nil {
-		entry.bodyDone = true
-		e = entry.controller.SetReadDeadline(entry.expiry)
-	} else {
-		e = entry.ctx.Err()
-	}
-	entry.ioMu.Unlock()
-	if e != nil {
-		publicationHTTPError(w, e)
 		return
 	}
 	var result *localmedia.SABLibraryPublicationResult
