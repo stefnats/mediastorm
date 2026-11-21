@@ -16,11 +16,11 @@ import (
 	"sync"
 	"time"
 
-	"novastream/internal/nzb/utils"
 	"novastream/internal/requestsecurity"
 	"novastream/internal/streamheaders"
 	"novastream/services/kidsvod"
 	"novastream/services/streaming"
+	"novastream/utils"
 )
 
 // Runtime identity is assigned only by normal server publication, never a
