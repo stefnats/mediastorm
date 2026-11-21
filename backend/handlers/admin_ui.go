@@ -12183,21 +12183,11 @@ func (h *AdminUIHandler) ListLocalMediaItems(w http.ResponseWriter, r *http.Requ
 		if remoteLibrary, remoteErr := h.remoteMediaService.GetLibrary(r.Context(), id); remoteErr != nil {
 			err = remoteErr
 		} else if remoteLibrary != nil {
-			groups, remoteErr := h.remoteMediaService.ListGroups(r.Context(), id, models.LocalMediaItemListQuery{Limit: 200, IncludeMissing: true})
-			if remoteErr != nil {
-				err = remoteErr
-			} else {
-				flat := []models.LocalMediaItem{}
-				for _, group := range groups.Groups {
-					flat = append(flat, group.Items...)
-					for _, season := range group.Seasons {
-						for _, episode := range season.Episodes {
-							flat = append(flat, episode.Items...)
-						}
-					}
-				}
-				items = &models.LocalMediaItemListResult{Items: flat, Total: len(flat), Limit: 200}
-			}
+			items, err = h.remoteMediaService.ListItems(r.Context(), id, listQuery)
+		} else if localLibrary, localErr := h.localMediaService.GetLibrary(r.Context(), id); localErr != nil {
+			err = localErr
+		} else if localLibrary == nil {
+			err = remotemedia.ErrNotFound
 		}
 	}
 	if items == nil && err == nil {
@@ -12209,6 +12199,10 @@ func (h *AdminUIHandler) ListLocalMediaItems(w http.ResponseWriter, r *http.Requ
 	}
 	if items == nil {
 		items = &models.LocalMediaItemListResult{Items: []models.LocalMediaItem{}}
+	}
+	if r.Context().Err() != nil {
+		http.Error(w, "catalogue request canceled", http.StatusServiceUnavailable)
+		return
 	}
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(items)
