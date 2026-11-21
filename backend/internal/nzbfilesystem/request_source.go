@@ -211,6 +211,27 @@ func RequireSourceCleanup(body io.ReadCloser) error {
 	return nil
 }
 
+// SourceCleanupDone exposes only the original actor's physical completion.
+// It neither authorizes I/O nor treats an arbitrary Closer as completion proof.
+// A file owning its request must include the outer request's callback, pending
+// operations and readers, rather than its earlier inner-file acknowledgement.
+func SourceCleanupDone(body io.ReadCloser) (<-chan struct{}, error) {
+	if file, ok := body.(*requestFile); ok {
+		if file == nil || file.owner == nil || file.owner.self != file.owner || !file.ownsSource {
+			return nil, ErrSourceCleanupUnsupported
+		}
+		if _, err := sourceLifetimeOf(file.File); err != nil {
+			return nil, err
+		}
+		return file.owner.done, nil
+	}
+	life, err := sourceLifetimeOf(body)
+	if err != nil || life.done == nil || life.setupDone == nil {
+		return nil, ErrSourceCleanupUnsupported
+	}
+	return life.done, nil
+}
+
 // SignalSourceClose never waits for an active Read or a cleanup callback.
 func SignalSourceClose(body io.ReadCloser) error {
 	s, err := sourceLifetimeOf(body)

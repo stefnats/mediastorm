@@ -31,6 +31,8 @@ type SABStagedPublication struct {
 	self          *SABStagedPublication
 	owner         *Service
 	ownerLife     context.Context
+	serviceFinish func()
+	setupDone     chan struct{}
 	original      context.Context
 	ctx           context.Context
 	cancel        context.CancelFunc
@@ -72,13 +74,16 @@ func (*SABStagedPublication) UnmarshalJSON([]byte) error {
 func (*SABStagedPublication) Format(f fmt.State, _ rune) {
 	_, _ = f.Write([]byte("SABStagedPublication(opaque)"))
 }
+
+// SABPublicationSourceReady permits wiring the original prepared handle only.
+// Actual file/SQL work still requires beginSourceWork after activation.
 func (s *Service) SABPublicationSourceReady() bool {
 	if s == nil {
 		return false
 	}
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	return s.database != nil && s.database.Connection() != nil && s.ctx != nil && s.ctx.Err() == nil
+	return !s.closed && !s.stopping && (!s.prepared || s.self == s) && s.database != nil && s.database.Connection() != nil && s.ctx != nil && s.ctx.Err() == nil
 }
 func (s *Service) sabPublicationOriginalContext(expected context.Context) bool {
 	if s == nil || expected == nil {
@@ -140,6 +145,17 @@ func sabPublicationRoot(name string) (*os.File, os.FileInfo, error) {
 	return current, info, nil
 }
 func (s *Service) OpenSABStagedPublication(ctx context.Context, id int64, policy config.SABPublicationPolicyValues, target string, ordinals []int) (result *SABStagedPublication, err error) {
+	work, finishSource, sourceError := s.beginSourceWork(ctx, false)
+	if sourceError != nil {
+		return nil, database.ErrSABPublicationUnavailable
+	}
+	transferred := false
+	defer func() {
+		if !transferred {
+			finishSource()
+		}
+	}()
+
 	if !s.SABPublicationSourceReady() || ctx == nil || ctx.Err() != nil || !reflect.ValueOf(ctx).Comparable() {
 		return nil, database.ErrSABPublicationUnavailable
 	}
@@ -153,20 +169,32 @@ func (s *Service) OpenSABStagedPublication(ctx context.Context, id int64, policy
 	if ownerLife == nil || ownerLife.Err() != nil {
 		return nil, database.ErrSABPublicationUnavailable
 	}
-	root, info, e := sabPublicationRoot(policy.StageRoot)
-	if e != nil {
-		return nil, e
-	}
-	life, cancel := context.WithCancel(ctx)
-	actor := &SABStagedPublication{owner: s, ownerLife: ownerLife, original: ctx, ctx: life, cancel: cancel, policy: policy, target: target, done: make(chan struct{})}
+	life, cancel := context.WithCancel(work)
+	actor := &SABStagedPublication{owner: s, ownerLife: ownerLife, original: ctx, ctx: life, cancel: cancel, policy: policy, target: target, done: make(chan struct{}), setupDone: make(chan struct{}), serviceFinish: finishSource}
 	actor.self = actor
-	actor.roots[0] = root
-	actor.infos[0] = info
+	s.mu.Lock()
+	if s.closed || s.stopping || s.ctx != ownerLife || ownerLife.Err() != nil {
+		s.mu.Unlock()
+		cancel()
+		return nil, database.ErrSABPublicationUnavailable
+	}
+	if s.publications == nil {
+		s.publications = make(map[*SABStagedPublication]struct{})
+	}
+	s.publications[actor] = struct{}{}
+	transferred = true
+	s.mu.Unlock()
 	defer func() {
+		close(actor.setupDone)
 		if result == nil {
 			actor.Close()
 		}
 	}()
+	root, info, e := sabPublicationRoot(policy.StageRoot)
+	if e != nil {
+		return nil, e
+	}
+	actor.roots[0], actor.infos[0] = root, info
 	actor.roots[1], actor.infos[1], e = sabPublicationRoot(target)
 	if e != nil || !stageDisjoint(actor.roots[0], actor.infos[1]) || !stageDisjoint(actor.roots[1], actor.infos[0]) {
 		return nil, database.ErrSABPublicationUnavailable
@@ -446,6 +474,9 @@ func (s *SABStagedPublication) Close() {
 		return
 	}
 	s.once.Do(func() {
+		if s.setupDone != nil {
+			<-s.setupDone
+		}
 		s.signal()
 		s.mu.Lock()
 		copy := s.copy
@@ -457,7 +488,15 @@ func (s *SABStagedPublication) Close() {
 		if s.stop != nil {
 			s.stop()
 		}
+		if s.serviceFinish != nil {
+			s.owner.mu.Lock()
+			delete(s.owner.publications, s)
+			s.owner.mu.Unlock()
+		}
 		close(s.done)
+		if s.serviceFinish != nil {
+			s.serviceFinish()
+		}
 	})
 	<-s.done
 }

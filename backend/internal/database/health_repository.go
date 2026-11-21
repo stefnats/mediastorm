@@ -1,6 +1,7 @@
 package database
 
 import (
+	"context"
 	"database/sql"
 	"fmt"
 	"strings"
@@ -643,6 +644,15 @@ func (r *HealthRepository) SetFileChecking(filePath string) error {
 }
 
 func (r *HealthRepository) ResetFileAllChecking() error {
+	return r.ResetFileAllCheckingContext(context.Background())
+}
+func (r *HealthRepository) ResetFileAllCheckingContext(ctx context.Context) error {
+	db, ok := r.db.(interface {
+		ExecContext(context.Context, string, ...any) (sql.Result, error)
+	})
+	if !ok || ctx == nil || ctx.Err() != nil {
+		return fmt.Errorf("original health reset context unavailable")
+	}
 	query := `
 		UPDATE file_health
 		SET status = ?,
@@ -650,7 +660,7 @@ func (r *HealthRepository) ResetFileAllChecking() error {
 		WHERE status = ?
 	`
 
-	_, err := r.db.Exec(query, HealthStatusPending, HealthStatusChecking)
+	_, err := db.ExecContext(ctx, query, HealthStatusPending, HealthStatusChecking)
 	if err != nil {
 		return fmt.Errorf("failed to reset all file statuses: %w", err)
 	}

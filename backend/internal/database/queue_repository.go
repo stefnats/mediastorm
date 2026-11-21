@@ -17,6 +17,83 @@ type QueueRepository struct {
 	}
 }
 
+type queueContextExecutor struct {
+	ctx context.Context
+	db  interface {
+		ExecContext(context.Context, string, ...any) (sql.Result, error)
+		QueryContext(context.Context, string, ...any) (*sql.Rows, error)
+		QueryRowContext(context.Context, string, ...any) *sql.Row
+	}
+}
+
+func (d *queueContextExecutor) Exec(query string, args ...any) (sql.Result, error) {
+	return d.db.ExecContext(d.ctx, query, args...)
+}
+func (d *queueContextExecutor) Query(query string, args ...any) (*sql.Rows, error) {
+	return d.db.QueryContext(d.ctx, query, args...)
+}
+func (d *queueContextExecutor) QueryRow(query string, args ...any) *sql.Row {
+	return d.db.QueryRowContext(d.ctx, query, args...)
+}
+
+func (r *QueueRepository) withContext(ctx context.Context) (*QueueRepository, error) {
+	if ctx == nil || ctx.Err() != nil || r == nil {
+		return nil, fmt.Errorf("original queue context unavailable")
+	}
+	db, ok := r.db.(interface {
+		ExecContext(context.Context, string, ...any) (sql.Result, error)
+		QueryContext(context.Context, string, ...any) (*sql.Rows, error)
+		QueryRowContext(context.Context, string, ...any) *sql.Row
+	})
+	if !ok {
+		return nil, fmt.Errorf("context-aware queue database required")
+	}
+	return &QueueRepository{db: &queueContextExecutor{ctx: ctx, db: db}}, nil
+}
+
+func (r *QueueRepository) AddToQueueContext(ctx context.Context, item *ImportQueueItem) error {
+	current, err := r.withContext(ctx)
+	if err != nil {
+		return err
+	}
+	return current.AddToQueue(item)
+}
+func (r *QueueRepository) AddStoragePathContext(ctx context.Context, id int64, path string) error {
+	current, err := r.withContext(ctx)
+	if err != nil {
+		return err
+	}
+	return current.AddStoragePath(id, path)
+}
+func (r *QueueRepository) UpdateQueueItemStatusContext(ctx context.Context, id int64, status QueueStatus, message *string) error {
+	current, err := r.withContext(ctx)
+	if err != nil {
+		return err
+	}
+	return current.UpdateQueueItemStatus(id, status, message)
+}
+func (r *QueueRepository) TryClaimQueueItemContext(ctx context.Context, id int64) (bool, error) {
+	current, err := r.withContext(ctx)
+	if err != nil {
+		return false, err
+	}
+	return current.TryClaimQueueItem(id)
+}
+func (r *QueueRepository) IsFileInQueueContext(ctx context.Context, path string) (bool, error) {
+	current, err := r.withContext(ctx)
+	if err != nil {
+		return false, err
+	}
+	return current.IsFileInQueue(path)
+}
+func (r *QueueRepository) GetQueueStatsContext(ctx context.Context) (*QueueStats, error) {
+	current, err := r.withContext(ctx)
+	if err != nil {
+		return nil, err
+	}
+	return current.GetQueueStats()
+}
+
 // NewQueueRepository creates a new queue repository
 func NewQueueRepository(db interface {
 	Exec(query string, args ...interface{}) (sql.Result, error)
@@ -213,10 +290,13 @@ func (r *QueueRepository) IsFileInQueue(filePath string) (bool, error) {
 
 // ClaimNextQueueItem atomically claims and returns the next available queue item
 func (r *QueueRepository) ClaimNextQueueItem() (*ImportQueueItem, error) {
+	return r.ClaimNextQueueItemContext(context.Background())
+}
+func (r *QueueRepository) ClaimNextQueueItemContext(ctx context.Context) (*ImportQueueItem, error) {
 	// Use immediate transaction to atomically claim an item
 	var claimedItem *ImportQueueItem
 
-	err := r.withQueueTransaction(func(txRepo *QueueRepository) error {
+	err := r.withQueueTransactionContext(ctx, func(txRepo *QueueRepository) error {
 		// First, get the next available item ID within the transaction
 		var itemID int64
 		selectQuery := `
@@ -477,19 +557,33 @@ func (r *QueueRepository) GetQueueItemContext(ctx context.Context, id int64) (*I
 
 // withQueueTransaction executes a function within a queue database transaction
 func (r *QueueRepository) withQueueTransaction(fn func(*QueueRepository) error) error {
+	return r.withQueueTransactionContext(context.Background(), fn)
+}
+func (r *QueueRepository) withQueueTransactionContext(ctx context.Context, fn func(*QueueRepository) error) error {
+	if ctx == nil || ctx.Err() != nil {
+		return fmt.Errorf("original queue transaction context unavailable")
+	}
 	// Cast to *sql.DB to access Begin method
 	sqlDB, ok := r.db.(*sql.DB)
 	if !ok {
 		return fmt.Errorf("queue repository not connected to sql.DB")
 	}
 
-	tx, err := sqlDB.Begin()
+	connection, err := sqlDB.Conn(ctx)
+	if err != nil {
+		return fmt.Errorf("failed to acquire original queue connection: %w", err)
+	}
+	// Conn.Close joins the transaction's actual driver release, including the
+	// database/sql cancellation rollback racing an explicit Rollback call.
+	defer connection.Close()
+	tx, err := connection.BeginTx(ctx, nil)
 	if err != nil {
 		return fmt.Errorf("failed to begin queue transaction: %w", err)
 	}
+	defer tx.Rollback()
 
 	// Create a repository that uses the transaction
-	txRepo := &QueueRepository{db: tx}
+	txRepo := &QueueRepository{db: &queueContextExecutor{ctx: ctx, db: tx}}
 
 	err = fn(txRepo)
 	if err != nil {
@@ -508,13 +602,22 @@ func (r *QueueRepository) withQueueTransaction(fn func(*QueueRepository) error) 
 
 // ResetStaleItems resets processing and retrying items back to pending on service startup
 func (r *QueueRepository) ResetStaleItems() error {
+	return r.ResetStaleItemsContext(context.Background())
+}
+func (r *QueueRepository) ResetStaleItemsContext(ctx context.Context) error {
+	db, ok := r.db.(interface {
+		ExecContext(context.Context, string, ...any) (sql.Result, error)
+	})
+	if !ok || ctx == nil || ctx.Err() != nil {
+		return fmt.Errorf("original queue reset context unavailable")
+	}
 	query := `
 		UPDATE import_queue 
 		SET status = 'pending', started_at = NULL, updated_at = datetime('now')
 		WHERE status IN ('processing', 'retrying')
 	`
 
-	result, err := r.db.Exec(query)
+	result, err := db.ExecContext(ctx, query)
 	if err != nil {
 		return fmt.Errorf("failed to reset stale queue items: %w", err)
 	}

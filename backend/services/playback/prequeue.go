@@ -276,6 +276,11 @@ type PrequeueEntry struct {
 // CreateReportReplacement keeps the source still playing in memory while a
 // replacement is prepared. Repeated submissions reuse the same preparation.
 func (s *PrequeueStore) CreateReportReplacement(previousID, clientScope string) (*PrequeueEntry, bool, error) {
+	_, finish, err := s.beginStoreWork(nil)
+	if err != nil {
+		return nil, false, err
+	}
+	defer finish()
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	previous, ok := s.entries[previousID]
@@ -288,7 +293,7 @@ func (s *PrequeueStore) CreateReportReplacement(previousID, clientScope string) 
 		}
 	}
 	if s.useDB() {
-		if err := s.repo.Delete(context.Background(), previousID); err != nil {
+		if err := s.repo.Delete(s.runtimeContext(), previousID); err != nil {
 			return nil, false, err
 		}
 	}
@@ -389,6 +394,7 @@ func copyNZBResult(result models.NZBResult) models.NZBResult {
 
 // PrequeueStore manages prequeue entries with TTL
 type PrequeueStore struct {
+	lifetime              *prequeueStoreLifetime
 	authorizationSequence uint64
 	mu                    sync.RWMutex
 	entries               map[string]*PrequeueEntry
@@ -437,19 +443,129 @@ func (s *PrequeueStore) SetStreamPathValidator(validator StreamPathValidator) {
 	s.streamPathValidator = validator
 }
 
-// NewPrequeueStore creates a new prequeue store with the specified default TTL
-func NewPrequeueStore(ttl time.Duration) *PrequeueStore {
-	store := &PrequeueStore{
-		entries:             make(map[string]*PrequeueEntry),
-		byTitleUser:         make(map[string]string),
-		defaultTTL:          ttl,
-		streamPathValidated: make(map[string]time.Time),
+// prequeueStoreLifetime owns work completion only, never playback authority.
+type prequeueStoreLifetime struct {
+	mu         sync.Mutex
+	self       *PrequeueStore
+	ctx        context.Context
+	cancel     context.CancelFunc
+	active     bool
+	closed     bool
+	operations sync.WaitGroup
+	closeOnce  sync.Once
+}
+
+// PreparePrequeueStore allocates a store without starting cleanup or persistence.
+func PreparePrequeueStore(original context.Context, ttl time.Duration) (*PrequeueStore, error) {
+	if original == nil || original.Err() != nil {
+		return nil, errors.New("prequeue runtime unavailable")
 	}
+	ctx, cancel := context.WithCancel(original)
+	store := &PrequeueStore{entries: make(map[string]*PrequeueEntry), byTitleUser: make(map[string]string), defaultTTL: ttl, streamPathValidated: make(map[string]time.Time)}
+	store.lifetime = &prequeueStoreLifetime{self: store, ctx: ctx, cancel: cancel}
+	return store, nil
+}
 
-	// Start cleanup goroutine
-	go store.cleanupLoop()
-
+// NewPrequeueStore preserves eager cleanup for legacy callers.
+func NewPrequeueStore(ttl time.Duration) *PrequeueStore {
+	store, _ := PreparePrequeueStore(context.Background(), ttl)
+	_ = store.Activate()
 	return store
+}
+
+// Activate starts the original store cleanup loop exactly once.
+func (s *PrequeueStore) Activate() error {
+	if s == nil || s.lifetime == nil {
+		return errors.New("prequeue runtime unavailable")
+	}
+	life := s.lifetime
+	life.mu.Lock()
+	defer life.mu.Unlock()
+	if life.self != s || life.closed || life.ctx.Err() != nil {
+		return errors.New("prequeue runtime unavailable")
+	}
+	if life.active {
+		return nil
+	}
+	life.active = true
+	life.operations.Add(1)
+	go func() { defer life.operations.Done(); s.cleanupLoop() }()
+	return nil
+}
+
+func (s *PrequeueStore) runtimeContext() context.Context {
+	if s.lifetime != nil {
+		return s.lifetime.ctx
+	}
+	return context.Background() // Isolated legacy value constructors have no managed runtime.
+}
+
+func (s *PrequeueStore) beginStoreWork(parent context.Context) (context.Context, func(), error) {
+	if s == nil {
+		return nil, nil, errors.New("prequeue runtime unavailable")
+	}
+	life := s.lifetime
+	if life == nil {
+		if parent == nil {
+			parent = context.Background()
+		}
+		return parent, func() {}, parent.Err()
+	}
+	life.mu.Lock()
+	if life.self != s || life.closed || !life.active || life.ctx.Err() != nil {
+		life.mu.Unlock()
+		return nil, nil, errors.New("prequeue runtime unavailable")
+	}
+	if parent == nil {
+		parent = life.ctx
+	}
+	if parent.Err() != nil {
+		life.mu.Unlock()
+		return nil, nil, parent.Err()
+	}
+	ctx, cancel := context.WithCancel(parent)
+	if deadline, ok := life.ctx.Deadline(); ok {
+		var stop context.CancelFunc
+		ctx, stop = context.WithDeadline(ctx, deadline)
+		old := cancel
+		cancel = func() { stop(); old() }
+	}
+	callbackDone := make(chan struct{})
+	stop := context.AfterFunc(life.ctx, func() { defer close(callbackDone); cancel() })
+	life.operations.Add(1)
+	life.mu.Unlock()
+	var once sync.Once
+	return ctx, func() {
+		once.Do(func() {
+			cancel()
+			if !stop() {
+				<-callbackDone
+			}
+			life.operations.Done()
+		})
+	}, nil
+}
+
+// Close closes admission, signals original work, and joins actual cleanup and SQL.
+func (s *PrequeueStore) Close() {
+	if s == nil || s.lifetime == nil || s.lifetime.self != s {
+		return
+	}
+	life := s.lifetime
+	life.closeOnce.Do(func() {
+		life.mu.Lock()
+		life.closed = true
+		life.cancel()
+		life.mu.Unlock()
+		s.mu.Lock()
+		for _, entry := range s.entries {
+			if entry.cancelFunc != nil {
+				entry.cancelFunc()
+			}
+		}
+		s.mu.Unlock()
+		life.operations.Wait()
+	})
 }
 
 // MagnetInfo contains the magnet link and debrid path info for a restored prequeue entry.
@@ -472,6 +588,12 @@ func (s *PrequeueStore) SetStoragePath(dir string) {
 // RestorePersisted loads ready entries from PostgreSQL or disk. Database work is
 // bounded so a slow or blocked persistence layer cannot hang background startup.
 func (s *PrequeueStore) RestorePersisted(ctx context.Context) error {
+	workContext, finish, err := s.beginStoreWork(ctx)
+	if err != nil {
+		return err
+	}
+	defer finish()
+	ctx = workContext
 	if s.storagePath == "" {
 		return nil
 	}
@@ -686,6 +808,12 @@ func (s *PrequeueStore) loadFromDB(parent context.Context) error {
 // CleanupExpiredPersisted removes expired database rows independently of the
 // restore path. It is safe to run after the listener is accepting requests.
 func (s *PrequeueStore) CleanupExpiredPersisted(parent context.Context) {
+	workContext, finish, err := s.beginStoreWork(parent)
+	if err != nil {
+		return
+	}
+	defer finish()
+	parent = workContext
 	if !s.useDB() {
 		return
 	}
@@ -774,7 +902,7 @@ func (s *PrequeueStore) saveEntryToDB(entry *PrequeueEntry) {
 		return
 	}
 	if err := s.repo.Upsert(
-		context.Background(),
+		s.runtimeContext(),
 		entry.ID,
 		entry.TitleID,
 		entry.UserID,
@@ -834,6 +962,11 @@ func IsPrequeueInProgress(status PrequeueStatus) bool {
 
 // CreateScoped creates a prequeue entry for a specific effective settings scope.
 func (s *PrequeueStore) CreateScoped(titleID, titleName, userID, mediaType string, year int, targetEpisode *models.EpisodeReference, reason, settingsScopeKey string, automaticLibrarySelection ...bool) (*PrequeueEntry, bool) {
+	_, finish, err := s.beginStoreWork(nil)
+	if err != nil {
+		return nil, false
+	}
+	defer finish()
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	entry, created := s.createScopedLocked(titleID, titleName, userID, mediaType, year, targetEpisode, reason, settingsScopeKey)
@@ -848,6 +981,11 @@ func (s *PrequeueStore) CreateScoped(titleID, titleName, userID, mediaType strin
 // is still resolving — typically a details-page prequeue the client is polling
 // — it leaves that entry alone and returns it with ErrPrequeueInProgress.
 func (s *PrequeueStore) CreateScopedUnlessInProgress(titleID, titleName, userID, mediaType string, year int, targetEpisode *models.EpisodeReference, reason, settingsScopeKey string) (*PrequeueEntry, error) {
+	_, finish, err := s.beginStoreWork(nil)
+	if err != nil {
+		return nil, err
+	}
+	defer finish()
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -878,7 +1016,7 @@ func (s *PrequeueStore) createScopedLocked(titleID, titleName, userID, mediaType
 			// Remove old entry from memory and DB
 			delete(s.entries, existingID)
 			if s.useDB() {
-				if err := s.repo.Delete(context.Background(), existingID); err != nil {
+				if err := s.repo.Delete(s.runtimeContext(), existingID); err != nil {
 					log.Printf("[prequeue] Warning: failed to delete old DB entry %s: %v", existingID, err)
 				}
 			}
@@ -933,6 +1071,11 @@ func (s *PrequeueStore) createScopedLocked(titleID, titleName, userID, mediaType
 // MakePersistent pins an existing entry until it is explicitly deleted. This
 // lets a manual request adopt work already started by the details prequeue.
 func (s *PrequeueStore) MakePersistent(id string) bool {
+	_, finish, err := s.beginStoreWork(nil)
+	if err != nil {
+		return false
+	}
+	defer finish()
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -962,6 +1105,11 @@ func (s *PrequeueStore) GetForPlayback(id string) (*PrequeueEntry, bool) {
 }
 
 func (s *PrequeueStore) get(id string, forPlayback bool) (*PrequeueEntry, bool) {
+	_, finish, err := s.beginStoreWork(nil)
+	if err != nil {
+		return nil, false
+	}
+	defer finish()
 	s.mu.RLock()
 
 	entry, exists := s.entries[id]
@@ -1036,7 +1184,7 @@ func (s *PrequeueStore) validateReadyEntry(entry readyValidationSnapshot, valida
 		return true
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	ctx, cancel := context.WithTimeout(s.runtimeContext(), 5*time.Second)
 	defer cancel()
 	if err := validator(ctx, entry.StreamPath); err != nil {
 		if isTransientLocalProbeError(entry.StreamPath, err) {
@@ -1121,6 +1269,11 @@ func (s *PrequeueStore) removeStreamPathValidationsLocked(id string) {
 
 // Update updates a prequeue entry
 func (s *PrequeueStore) Update(id string, updateFn func(*PrequeueEntry)) bool {
+	_, finish, err := s.beginStoreWork(nil)
+	if err != nil {
+		return false
+	}
+	defer finish()
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -1171,6 +1324,11 @@ func (s *PrequeueStore) Update(id string, updateFn func(*PrequeueEntry)) bool {
 // prequeue worker from overwriting a manual selection or migration while it is
 // unwinding.
 func (s *PrequeueStore) UpdateWorker(id string, updateFn func(*PrequeueEntry)) bool {
+	_, finish, err := s.beginStoreWork(nil)
+	if err != nil {
+		return false
+	}
+	defer finish()
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -1239,6 +1397,11 @@ func (s *PrequeueStore) SetCancelFunc(id string, cancelFunc context.CancelFunc) 
 
 // Delete removes a prequeue entry
 func (s *PrequeueStore) Delete(id string) {
+	_, finish, err := s.beginStoreWork(nil)
+	if err != nil {
+		return
+	}
+	defer finish()
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -1267,7 +1430,7 @@ func (s *PrequeueStore) deleteLocked(id string) {
 
 	// Remove from DB
 	if s.useDB() {
-		if err := s.repo.Delete(context.Background(), id); err != nil {
+		if err := s.repo.Delete(s.runtimeContext(), id); err != nil {
 			log.Printf("[prequeue] Warning: failed to delete entry %s from DB: %v", id, err)
 		}
 	} else {
@@ -1277,6 +1440,11 @@ func (s *PrequeueStore) deleteLocked(id string) {
 
 // DeleteByStreamPath removes ready entries that point at the given stream path.
 func (s *PrequeueStore) DeleteByStreamPath(streamPath string) []DeletedPrequeueEntry {
+	_, finish, err := s.beginStoreWork(nil)
+	if err != nil {
+		return nil
+	}
+	defer finish()
 	streamPath = strings.TrimSpace(streamPath)
 	if streamPath == "" {
 		return nil
@@ -1312,7 +1480,7 @@ func (s *PrequeueStore) DeleteByStreamPath(streamPath string) []DeletedPrequeueE
 		delete(s.entries, id)
 
 		if s.useDB() {
-			if err := s.repo.Delete(context.Background(), id); err != nil {
+			if err := s.repo.Delete(s.runtimeContext(), id); err != nil {
 				log.Printf("[prequeue] Warning: failed to delete stream-path entry %s from DB: %v", id, err)
 			}
 		}
@@ -1372,6 +1540,11 @@ func (s *PrequeueStore) Generation() uint64 { return s.generation.Load() }
 
 // DeleteAll removes all prequeue entries
 func (s *PrequeueStore) DeleteAll() {
+	_, finish, err := s.beginStoreWork(nil)
+	if err != nil {
+		return
+	}
+	defer finish()
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -1389,6 +1562,11 @@ func (s *PrequeueStore) DeleteAll() {
 
 // DeleteByUser removes all prequeue entries for a specific user.
 func (s *PrequeueStore) DeleteByUser(userID string) {
+	_, finish, err := s.beginStoreWork(nil)
+	if err != nil {
+		return
+	}
+	defer finish()
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -1413,7 +1591,7 @@ func (s *PrequeueStore) DeleteByUser(userID string) {
 		delete(s.entries, id)
 
 		if s.useDB() {
-			if err := s.repo.Delete(context.Background(), id); err != nil {
+			if err := s.repo.Delete(s.runtimeContext(), id); err != nil {
 				log.Printf("[prequeue] Warning: failed to delete user entry %s from DB: %v", id, err)
 			}
 		}
@@ -1436,13 +1614,23 @@ func (s *PrequeueStore) cleanupLoop() {
 	ticker := time.NewTicker(30 * time.Second)
 	defer ticker.Stop()
 
-	for range ticker.C {
-		s.cleanup()
+	for {
+		select {
+		case <-s.runtimeContext().Done():
+			return
+		case <-ticker.C:
+			s.cleanup()
+		}
 	}
 }
 
 // cleanup removes expired entries
 func (s *PrequeueStore) cleanup() {
+	_, finish, err := s.beginStoreWork(nil)
+	if err != nil {
+		return
+	}
+	defer finish()
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -1476,7 +1664,7 @@ func (s *PrequeueStore) cleanup() {
 
 	// Bulk-delete expired rows from DB (covers both in-memory and orphaned rows)
 	if s.useDB() {
-		if n, err := s.repo.DeleteExpired(context.Background()); err != nil {
+		if n, err := s.repo.DeleteExpired(s.runtimeContext()); err != nil {
 			log.Printf("[prequeue] Warning: failed to delete expired DB rows: %v", err)
 		} else if n > 0 {
 			log.Printf("[prequeue] Cleaned up %d expired rows from database", n)

@@ -12,6 +12,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"novastream/internal/nzbfilesystem"
 	"novastream/services/streaming"
 )
 
@@ -52,6 +53,12 @@ func initialPreBufferTarget(reqStart, reqEnd, totalSize int64) int64 {
 // CDN in the background, so subsequent requests at nearby positions are served
 // instantly from the buffer.
 type streamPool struct {
+	runtime                        context.Context
+	cancel                         context.CancelFunc
+	prepared, active, closed       bool
+	openWork, readWork, reaperWork sync.WaitGroup
+	closeOnce                      sync.Once
+
 	mu            sync.RWMutex
 	creationMu    sync.Mutex // protects creationGates; never held during provider I/O
 	creationGates map[string]*poolCreationGate
@@ -244,14 +251,43 @@ func (s *poolSlot) upstreamStallTimeout() time.Duration {
 }
 
 func newStreamPool(failures *streamFailureRegistry) *streamPool {
-	p := &streamPool{
-		creationGates: make(map[string]*poolCreationGate),
-		files:         make(map[string][]*poolSlot),
-		done:          make(chan struct{}),
-		failures:      failures,
+	pool := prepareStreamPool(context.Background(), failures)
+	pool.prepared = false
+	_ = pool.activatePreparedMedia()
+	return pool
+}
+func prepareStreamPool(original context.Context, failures *streamFailureRegistry) *streamPool {
+	life, cancel := context.WithCancel(original)
+	return &streamPool{runtime: life, cancel: cancel, prepared: true, creationGates: make(map[string]*poolCreationGate), files: make(map[string][]*poolSlot), done: make(chan struct{}), failures: failures}
+}
+func (p *streamPool) activatePreparedMedia() error {
+	if p == nil {
+		return errPreparedMediaLifetime
 	}
-	go p.reaper()
-	return p
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.closed || p.active || p.runtime == nil || p.runtime.Err() != nil {
+		return errPreparedMediaLifetime
+	}
+	p.active = true
+	p.reaperWork.Add(1)
+	go func() { defer p.reaperWork.Done(); p.reaper() }()
+	return nil
+}
+func (p *streamPool) beginOpen(caller context.Context) (context.Context, func(), error) {
+	if p == nil || caller == nil || caller.Err() != nil {
+		return nil, nil, errPreparedMediaLifetime
+	}
+	p.mu.Lock()
+	if p.closed || p.prepared && !p.active || p.runtime == nil || p.runtime.Err() != nil {
+		p.mu.Unlock()
+		return nil, nil, errPreparedMediaLifetime
+	}
+	ctx, cancel := context.WithCancel(caller)
+	p.openWork.Add(1)
+	p.mu.Unlock()
+	stop := familyMediaAfterFunc(p.runtime, cancel)
+	return ctx, func() { cancel(); stop(); p.openWork.Done() }, nil
 }
 
 // lockCreation serializes misses only for the same media path. Waiting is
@@ -292,15 +328,32 @@ func (p *streamPool) lockCreation(ctx context.Context, path string) (func(), err
 }
 
 func (p *streamPool) close() {
-	close(p.done)
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	for _, slots := range p.files {
-		for _, s := range slots {
-			s.cancel()
-		}
+	if p == nil {
+		return
 	}
-	p.files = nil
+	p.closeOnce.Do(func() {
+		p.mu.Lock()
+		p.closed = true
+		p.active = false
+		if p.cancel != nil {
+			p.cancel()
+		}
+		if p.done != nil {
+			close(p.done)
+		}
+		for _, slots := range p.files {
+			for _, slot := range slots {
+				slot.cancel()
+			}
+		}
+		p.mu.Unlock()
+		p.openWork.Wait()
+		p.readWork.Wait()
+		p.reaperWork.Wait()
+		p.mu.Lock()
+		p.files = nil
+		p.mu.Unlock()
+	})
 }
 
 func (p *streamPool) reaper() {
@@ -803,6 +856,13 @@ func logReusedPoolSlot(path string, reqPos int64, slot *poolSlot) {
 // getOrCreateInternal finds or creates a slot. When acquire is true, it pins a
 // reader while p.mu still protects pool membership and returns its reader ID.
 func (p *streamPool) getOrCreateInternal(waitCtx context.Context, path string, reqPos int64, streamer streaming.Provider, acquire bool) (*poolSlot, uint64, error) {
+	work, finishOpen, workError := p.beginOpen(waitCtx)
+	if workError != nil {
+		return nil, 0, workError
+	}
+	defer finishOpen()
+	waitCtx = work
+
 	p.mu.RLock()
 	slot, readerID := p.findSlotLocked(path, reqPos, acquire)
 	p.mu.RUnlock()
@@ -849,7 +909,9 @@ func (p *streamPool) getOrCreateInternal(waitCtx context.Context, path string, r
 	// Create a new slot — start a fresh CDN connection at reqPos.
 	// The provider is opened outside p.mu; membership is rechecked after the open
 	// so a concurrent acquisition can win without creating a duplicate slot.
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := context.WithCancel(p.runtime)
+	stopOpen := familyMediaAfterFunc(work, cancel)
+	defer stopOpen()
 	rangeHeader := fmt.Sprintf("bytes=%d-", reqPos)
 
 	resp, err := streamer.Stream(ctx, streaming.Request{
@@ -859,7 +921,14 @@ func (p *streamPool) getOrCreateInternal(waitCtx context.Context, path string, r
 	})
 	if err != nil {
 		cancel()
+		if resp != nil {
+			_ = newPoolSourceResponse(resp).close()
+		}
 		return nil, 0, err
+	}
+	if resp == nil || resp.Body == nil {
+		cancel()
+		return nil, 0, errPreparedMediaLifetime
 	}
 
 	// Parse total file size from Content-Range header
@@ -921,6 +990,13 @@ func (p *streamPool) getOrCreateInternal(waitCtx context.Context, path string, r
 
 	// Register slot, evicting the least recently used idle slot if at capacity.
 	p.mu.Lock()
+	if p.closed || ctx.Err() != nil || work.Err() != nil {
+		p.mu.Unlock()
+		cancel()
+		_ = newPoolSourceResponse(resp).close()
+		return nil, 0, errPreparedMediaLifetime
+	}
+
 	if existing, existingReaderID := p.findSlotLocked(path, reqPos, acquire); existing != nil {
 		p.mu.Unlock()
 		cancel()
@@ -962,9 +1038,10 @@ func (p *streamPool) getOrCreateInternal(waitCtx context.Context, path string, r
 		slot.mu.Unlock()
 	}
 	p.files[path] = append(slots, slot)
+	p.readWork.Add(1)
 	p.mu.Unlock()
 
-	go slot.backgroundReader(resp)
+	go func() { defer p.readWork.Done(); slot.backgroundReader(resp) }()
 
 	videoTracef("[stream-pool] NEW slot: path=%q startByte=%d totalSize=%d contentType=%q status=%d", path, reqPos, totalSize, contentType, resp.Status)
 	return slot, readerID, nil
@@ -988,9 +1065,10 @@ func (p *streamPool) getOrCreate(path string, reqPos int64, streamer streaming.P
 // consuming bandwidth.
 func (s *poolSlot) backgroundReader(resp *streaming.Response) {
 	currentResp := resp
+	currentClose := newPoolSourceResponse(resp)
 	defer func() {
-		if currentResp != nil {
-			_ = currentResp.Close()
+		if currentClose != nil {
+			_ = currentClose.close()
 		}
 		s.mu.Lock()
 		s.cdnDone = true
@@ -1067,19 +1145,27 @@ func (s *poolSlot) backgroundReader(resp *streaming.Response) {
 		// this point, and the streaming client deliberately has no whole-request
 		// timeout. Close only this response body after a sustained read stall; the
 		// reader below then reopens the same source at the exact next byte.
+		activeClose := currentClose
+		stopContext := familyMediaAfterFunc(s.ctx, func() { _ = activeClose.close() })
+		timerDone := make(chan struct{})
 		var reconnectTriggered atomic.Bool
 		stallTimer := time.AfterFunc(s.upstreamStallTimeout(), func() {
+			defer close(timerDone)
 			reconnectTriggered.Store(true)
 			log.Printf("[stream-pool] upstream body read timed out; closing for same-source reconnect: path=%q timeout=%v readers=%d",
 				s.path, s.upstreamStallTimeout(), atomic.LoadInt32(&s.readers))
-			_ = activeResp.Close()
+			_ = activeClose.close()
 		})
 
 		upstreamWatch.begin()
 		readStart := time.Now()
 		n, err := activeResp.Body.Read(buf)
 		upstreamWatch.end()
-		stallTimer.Stop()
+		if stallTimer.Stop() {
+			close(timerDone)
+		}
+		<-timerDone
+		stopContext()
 		cdnWindowRead += time.Since(readStart)
 		if n > 0 {
 			cdnWindowBytes += int64(n)
@@ -1106,8 +1192,9 @@ func (s *poolSlot) backgroundReader(resp *streaming.Response) {
 		}
 
 		if reconnectTriggered.Load() {
-			_ = activeResp.Close()
+			_ = activeClose.close()
 			currentResp = nil
+			currentClose = nil
 			if n == 0 {
 				consecutiveNoProgressReconnects++
 			} else {
@@ -1147,6 +1234,9 @@ func (s *poolSlot) backgroundReader(resp *streaming.Response) {
 				Method:      http.MethodGet,
 			})
 			if openErr != nil {
+				if replacement != nil {
+					_ = newPoolSourceResponse(replacement).close()
+				}
 				err = fmt.Errorf("same-source reconnect at byte %d: %w", resumeAt, openErr)
 				s.mu.Lock()
 				s.cdnErr = err
@@ -1179,6 +1269,7 @@ func (s *poolSlot) backgroundReader(resp *streaming.Response) {
 			}
 
 			currentResp = replacement
+			currentClose = newPoolSourceResponse(replacement)
 			log.Printf("[stream-pool] same-source reconnect opened: path=%q resumeAt=%d status=%d",
 				s.path, resumeAt, replacement.Status)
 			continue
@@ -1305,4 +1396,35 @@ func parseContentRangeStart(value string) (int64, bool) {
 		return 0, false
 	}
 	return start, true
+}
+
+// This wrapper keeps the raw concrete body for F2 cleanup. Standard HTTP/local
+// responses keep their existing synchronous Close contract; no arbitrary
+// interface method can declare an expected F2 actor physically complete.
+type poolSourceResponse struct {
+	response *streaming.Response
+	once     sync.Once
+	err      error
+}
+
+func newPoolSourceResponse(response *streaming.Response) *poolSourceResponse {
+	return &poolSourceResponse{response: response}
+}
+func (p *poolSourceResponse) close() error {
+	if p == nil || p.response == nil {
+		return nil
+	}
+	p.once.Do(func() {
+		raw := p.response.Body
+		if raw != nil {
+			_ = nzbfilesystem.SignalSourceClose(raw)
+		}
+		p.err = p.response.Close()
+		if raw != nil {
+			if done, err := nzbfilesystem.SourceCleanupDone(raw); err == nil {
+				<-done
+			}
+		}
+	})
+	return p.err
 }

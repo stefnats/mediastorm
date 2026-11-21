@@ -25,6 +25,9 @@ import (
 
 // SubtitleExtractSession represents an active subtitle extraction session
 type SubtitleExtractSession struct {
+	ctx  context.Context
+	done chan struct{}
+
 	ID             string
 	Path           string
 	SubtitleTrack  int
@@ -46,6 +49,12 @@ type SubtitleExtractSession struct {
 
 // SubtitleExtractManager manages subtitle extraction sessions
 type SubtitleExtractManager struct {
+	runtime                  context.Context
+	cancel                   context.CancelFunc
+	prepared, active, closed bool
+	workers                  sync.WaitGroup
+	shutdownOnce             sync.Once
+
 	sessions    map[string]*SubtitleExtractSession
 	mu          sync.RWMutex
 	baseDir     string // Persistent output directory for VTT files
@@ -62,22 +71,58 @@ type SubtitleExtractManager struct {
 
 // NewSubtitleExtractManager creates a new subtitle extraction manager
 func NewSubtitleExtractManager(baseDir, ffmpegPath, ffprobePath string, streamer streaming.Provider) *SubtitleExtractManager {
+	manager := prepareSubtitleExtractManager(context.Background(), baseDir, ffmpegPath, ffprobePath, streamer)
+	manager.prepared = false
+	_ = manager.activatePreparedMedia()
+	return manager
+}
+func prepareSubtitleExtractManager(original context.Context, baseDir, ffmpegPath, ffprobePath string, streamer streaming.Provider) *SubtitleExtractManager {
 	if baseDir == "" {
 		baseDir = filepath.Join(os.TempDir(), "strmr-subtitles")
 	}
-	if err := os.MkdirAll(baseDir, 0755); err != nil {
-		log.Printf("[subtitle-extract] failed to create base directory %q: %v", baseDir, err)
+	life, cancel := context.WithCancel(original)
+	return &SubtitleExtractManager{runtime: life, cancel: cancel, prepared: true, sessions: make(map[string]*SubtitleExtractSession), baseDir: baseDir, ffmpegPath: ffmpegPath, ffprobePath: ffprobePath, streamer: streamer, cleanupDone: make(chan struct{})}
+}
+func (m *SubtitleExtractManager) activatePreparedMedia() error {
+	if m == nil {
+		return errPreparedMediaLifetime
 	}
-	m := &SubtitleExtractManager{
-		sessions:    make(map[string]*SubtitleExtractSession),
-		baseDir:     baseDir,
-		ffmpegPath:  ffmpegPath,
-		ffprobePath: ffprobePath,
-		streamer:    streamer,
-		cleanupDone: make(chan struct{}),
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.closed || m.active || m.runtime == nil || m.runtime.Err() != nil {
+		return errPreparedMediaLifetime
 	}
-	go m.cleanupLoop()
-	return m
+	if err := os.MkdirAll(m.baseDir, 0755); err != nil {
+		return err
+	}
+	m.active = true
+	m.workers.Add(1)
+	go func() { defer m.workers.Done(); m.cleanupLoop() }()
+	return nil
+}
+func (m *SubtitleExtractManager) beginLegacySource(caller context.Context) (context.Context, func(), error) {
+	if m == nil || caller == nil || caller.Err() != nil {
+		return nil, nil, errPreparedMediaLifetime
+	}
+	m.mu.Lock()
+	// Path-only legacy extraction cannot attest an original managed media input.
+	// Prepared callers use the existing owned ancillary source actor instead.
+	if m.closed || m.prepared {
+		m.mu.Unlock()
+		return nil, nil, errPreparedMediaLifetime
+	}
+	if m.runtime == nil {
+		m.runtime, m.cancel = context.WithCancel(context.Background())
+	}
+	if m.runtime.Err() != nil {
+		m.mu.Unlock()
+		return nil, nil, errPreparedMediaLifetime
+	}
+	work, cancel := context.WithCancel(caller)
+	m.workers.Add(1)
+	m.mu.Unlock()
+	stop := familyMediaAfterFunc(m.runtime, cancel)
+	return work, func() { cancel(); stop(); m.workers.Done() }, nil
 }
 
 // ConfigureLocalWebDAVAccess configures WebDAV URL building for usenet paths
@@ -288,35 +333,38 @@ func parseVTTTimestamp(ts string) float64 {
 
 // cleanupStaleSessions removes sessions that haven't been accessed recently
 func (m *SubtitleExtractManager) cleanupStaleSessions() {
+	stale := make([]*SubtitleExtractSession, 0)
 	m.mu.Lock()
-	defer m.mu.Unlock()
-
-	staleThreshold := 5 * time.Minute
 	now := time.Now()
-
 	for id, session := range m.sessions {
 		session.mu.Lock()
-		lastAccess := session.LastAccess
+		last := session.LastAccess
 		session.mu.Unlock()
-
-		if now.Sub(lastAccess) > staleThreshold {
-			log.Printf("[subtitle-extract] cleaning up stale session %s (path=%s)", id, session.Path)
-			m.cleanupSessionLocked(session)
+		if now.Sub(last) > 5*time.Minute {
+			stale = append(stale, session)
 			delete(m.sessions, id)
 		}
 	}
-}
-
-// cleanupSessionLocked cleans up a session (caller must hold m.mu)
-func (m *SubtitleExtractManager) cleanupSessionLocked(session *SubtitleExtractSession) {
-	session.mu.Lock()
-	defer session.mu.Unlock()
-
-	if session.cancel != nil {
-		session.cancel()
+	m.mu.Unlock()
+	for _, session := range stale {
+		m.cleanupSession(session)
 	}
-	if session.OutputDir != "" {
-		os.RemoveAll(session.OutputDir)
+}
+func (m *SubtitleExtractManager) cleanupSession(session *SubtitleExtractSession) {
+	session.mu.Lock()
+	cancel, command, done, output := session.cancel, session.cmd, session.done, session.OutputDir
+	session.mu.Unlock()
+	if cancel != nil {
+		cancel()
+	}
+	if command != nil && command.Process != nil {
+		_ = command.Process.Kill()
+	}
+	if done != nil {
+		<-done
+	}
+	if output != "" {
+		_ = os.RemoveAll(output)
 	}
 }
 
@@ -352,79 +400,69 @@ func emptySubtitleExtractContent(format string) string {
 
 // getOrCreateSession gets an existing session or creates a new one
 func (m *SubtitleExtractManager) getOrCreateSession(ctx context.Context, path string, subtitleTrack int, startOffset float64, format string) (*SubtitleExtractSession, error) {
+	work, finish, err := m.beginLegacySource(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer finish()
 	format = normalizeSubtitleExtractFormat(format)
-	// Create a session key based on path and track
-	sessionKey := fmt.Sprintf("%s:%d:%s", path, subtitleTrack, format)
-
-	m.mu.Lock()
-
-	// Check for existing session
-	for id, session := range m.sessions {
-		if session.Path == path && session.SubtitleTrack == subtitleTrack && session.OutputFormat == format {
-			// Calculate offset difference
-			offsetDiff := startOffset - session.StartOffset
-
-			// If requested startOffset is significantly different from existing session's startOffset,
-			// we need a new session:
-			// - Backward seek: existing VTT doesn't have earlier cues
-			// - Forward seek: extraction may not have reached that point yet
-			// Use 60s threshold to allow normal playback progress but catch seeks
-			if offsetDiff < -10 || offsetDiff > 60 {
-				log.Printf("[subtitle-extract] existing session %s has startOffset=%.1f but requested %.1f (diff=%.1f), creating new session",
-					id, session.StartOffset, startOffset, offsetDiff)
-				// Clean up old session
-				m.cleanupSessionLocked(session)
-				delete(m.sessions, id)
-				break // Create new session below
-			}
-			session.mu.Lock()
-			session.LastAccess = time.Now()
-			session.mu.Unlock()
-			m.mu.Unlock()
-			log.Printf("[subtitle-extract] reusing session %s (startOffset=%.1f covers requested %.1f, diff=%.1f)",
-				id, session.StartOffset, startOffset, offsetDiff)
-			return session, nil
+	for {
+		if work.Err() != nil {
+			return nil, work.Err()
 		}
-	}
-
-	// Create new session using baseDir for persistent output
-	sessionID := uuid.New().String()
-	outputDir := filepath.Join(m.baseDir, sessionID)
-	if err := os.MkdirAll(outputDir, 0755); err != nil {
+		m.mu.Lock()
+		if m.closed {
+			m.mu.Unlock()
+			return nil, errPreparedMediaLifetime
+		}
+		var retired *SubtitleExtractSession
+		for id, session := range m.sessions {
+			if session.Path == path && session.SubtitleTrack == subtitleTrack && session.OutputFormat == format {
+				session.mu.Lock()
+				difference := startOffset - session.StartOffset
+				if difference >= -10 && difference <= 60 {
+					session.LastAccess = time.Now()
+					session.mu.Unlock()
+					m.mu.Unlock()
+					return session, nil
+				}
+				session.mu.Unlock()
+				delete(m.sessions, id)
+				retired = session
+				break
+			}
+		}
+		if retired != nil {
+			m.mu.Unlock()
+			m.cleanupSession(retired)
+			continue
+		}
+		id := uuid.New().String()
+		output := filepath.Join(m.baseDir, id)
+		if err := os.MkdirAll(output, 0755); err != nil {
+			m.mu.Unlock()
+			return nil, err
+		}
+		lifetime, cancel := context.WithCancel(m.runtime)
+		session := &SubtitleExtractSession{ctx: lifetime, cancel: cancel, done: make(chan struct{}), ID: id, Path: path, SubtitleTrack: subtitleTrack, StartOffset: startOffset, OutputFormat: format, OutputDir: output, VTTPath: filepath.Join(output, "subtitles.vtt"), OutputPath: filepath.Join(output, subtitleExtractOutputFileName(format)), CreatedAt: time.Now(), LastAccess: time.Now()}
+		m.sessions[id] = session
+		m.workers.Add(1)
 		m.mu.Unlock()
-		return nil, fmt.Errorf("failed to create output dir: %w", err)
+		go func() { defer m.workers.Done(); defer close(session.done); m.startExtraction(session) }()
+		return session, nil
 	}
-
-	vttPath := filepath.Join(outputDir, "subtitles.vtt")
-	outputFormat := format
-	outputPath := filepath.Join(outputDir, subtitleExtractOutputFileName(format))
-
-	session := &SubtitleExtractSession{
-		ID:            sessionID,
-		Path:          path,
-		SubtitleTrack: subtitleTrack,
-		StartOffset:   startOffset,
-		OutputFormat:  outputFormat,
-		OutputDir:     outputDir,
-		VTTPath:       vttPath,
-		OutputPath:    outputPath,
-		CreatedAt:     time.Now(),
-		LastAccess:    time.Now(),
-	}
-
-	m.sessions[sessionID] = session
-	m.mu.Unlock()
-
-	// Start extraction in background
-	go m.startExtraction(session)
-
-	log.Printf("[subtitle-extract] created session %s for path=%s track=%d startOffset=%.1f key=%s", sessionID, path, subtitleTrack, startOffset, sessionKey)
-	return session, nil
 }
 
 // probeSubtitleStreams gets the list of subtitle streams from a URL
 // Uses subtitleStreamInfo type defined in hls.go
 func (m *SubtitleExtractManager) probeSubtitleStreams(ctx context.Context, streamURL string) ([]subtitleStreamInfo, error) {
+	work, finishSource, sourceError := m.beginLegacySource(ctx)
+	if sourceError != nil {
+		return nil, sourceError
+	}
+	defer finishSource()
+	ctx = work
+
 	if m.ffprobePath == "" {
 		return nil, fmt.Errorf("ffprobe not configured")
 	}
@@ -472,6 +510,16 @@ func (m *SubtitleExtractManager) probeSubtitleStreams(ctx context.Context, strea
 
 // probeSubtitleStreamsFromProvider probes subtitle streams via the streaming provider
 func (m *SubtitleExtractManager) probeSubtitleStreamsFromProvider(ctx context.Context, path string) ([]subtitleStreamInfo, error) {
+	work, finishSource, sourceError := m.beginLegacySource(ctx)
+	if sourceError != nil {
+		return nil, sourceError
+	}
+	defer finishSource()
+	ctx = work
+	probeCtx, probeCancel := context.WithTimeout(ctx, 30*time.Second)
+	defer probeCancel()
+	ctx = probeCtx
+
 	if m.ffprobePath == "" {
 		return nil, fmt.Errorf("ffprobe not configured")
 	}
@@ -489,16 +537,25 @@ func (m *SubtitleExtractManager) probeSubtitleStreamsFromProvider(ctx context.Co
 
 	resp, err := m.streamer.Stream(ctx, request)
 	if err != nil {
+		if resp != nil {
+			_ = newPoolSourceResponse(resp).close()
+		}
 		return nil, fmt.Errorf("failed to stream for probe: %w", err)
 	}
-	if resp.Body == nil {
-		resp.Close()
+	if resp == nil || resp.Body == nil {
+		if resp != nil {
+			_ = resp.Close()
+		}
 		return nil, fmt.Errorf("probe returned empty body")
 	}
-	defer resp.Close()
+	ownedResponse := newPoolSourceResponse(resp)
+	defer ownedResponse.close()
 
 	pr, pw := io.Pipe()
 	copyDone := make(chan error, 1)
+	defer func() { _ = pr.Close(); _ = pw.Close(); _ = ownedResponse.close(); <-copyDone }()
+	stopRead := familyMediaAfterFunc(ctx, func() { _ = pr.Close(); _ = pw.Close(); _ = ownedResponse.close() })
+	defer stopRead()
 
 	go func() {
 		defer pw.Close()
@@ -506,9 +563,6 @@ func (m *SubtitleExtractManager) probeSubtitleStreamsFromProvider(ctx context.Co
 		_, copyErr := io.CopyBuffer(pw, resp.Body, buf)
 		copyDone <- copyErr
 	}()
-
-	probeCtx, probeCancel := context.WithTimeout(ctx, 30*time.Second)
-	defer probeCancel()
 
 	args := []string{
 		"-v", "error",
@@ -550,9 +604,12 @@ func (m *SubtitleExtractManager) probeSubtitleStreamsFromProvider(ctx context.Co
 // startExtraction starts the ffmpeg extraction process
 func (m *SubtitleExtractManager) startExtraction(session *SubtitleExtractSession) {
 	session.mu.Lock()
-	ctx, cancel := context.WithCancel(context.Background())
-	session.cancel = cancel
+	ctx, cancel := session.ctx, session.cancel
 	session.mu.Unlock()
+	if ctx == nil {
+		ctx, cancel = context.WithCancel(m.runtime)
+	}
+	defer cancel()
 
 	defer func() {
 		session.mu.Lock()
@@ -700,8 +757,16 @@ func (m *SubtitleExtractManager) startExtraction(session *SubtitleExtractSession
 		return
 	}
 
+	stderrDone := make(chan struct{})
+	defer func() {
+		if stderr != nil {
+			_ = stderr.Close()
+		}
+		<-stderrDone
+	}()
 	// Log stderr in background
 	go func() {
+		defer close(stderrDone)
 		if stderr != nil {
 			buf := make([]byte, 4096)
 			for {
@@ -832,6 +897,13 @@ type SubtitleTrackInfo struct {
 
 // probeSubtitleStreamsWithMetadata probes subtitle streams and returns detailed metadata
 func (m *SubtitleExtractManager) probeSubtitleStreamsWithMetadata(ctx context.Context, streamURL string) ([]SubtitleTrackInfo, error) {
+	work, finishSource, sourceError := m.beginLegacySource(ctx)
+	if sourceError != nil {
+		return nil, sourceError
+	}
+	defer finishSource()
+	ctx = work
+
 	if m.ffprobePath == "" {
 		return nil, fmt.Errorf("ffprobe not configured")
 	}
@@ -1366,6 +1438,13 @@ func parseFirstVTTCueTime(vttPath string) float64 {
 // startOffset is the seek position in seconds (0 to start from beginning)
 // Returns a map of track index -> session
 func (m *SubtitleExtractManager) StartPreExtraction(ctx context.Context, path string, tracks []SubtitleTrackInfo, startOffset float64) map[int]*SubtitleExtractSession {
+	work, finishSetup, sourceError := m.beginLegacySource(ctx)
+	if sourceError != nil {
+		return map[int]*SubtitleExtractSession{}
+	}
+	defer finishSetup()
+	ctx = work
+
 	sessions := make(map[int]*SubtitleExtractSession)
 
 	// Filter to text-based subtitles only
@@ -1383,6 +1462,23 @@ func (m *SubtitleExtractManager) StartPreExtraction(ctx context.Context, path st
 		return sessions
 	}
 
+	m.mu.Lock()
+	if m.closed {
+		m.mu.Unlock()
+		return sessions
+	}
+	batchContext, batchCancel := context.WithCancel(m.runtime)
+	batchDone := make(chan struct{})
+	m.workers.Add(1)
+	m.mu.Unlock()
+	launched := false
+	defer func() {
+		if !launched {
+			batchCancel()
+			close(batchDone)
+			m.workers.Done()
+		}
+	}()
 	// Create a shared output directory for all tracks using baseDir
 	batchID := uuid.New().String()
 	outputDir := filepath.Join(m.baseDir, "batch-"+batchID)
@@ -1397,6 +1493,7 @@ func (m *SubtitleExtractManager) StartPreExtraction(ctx context.Context, path st
 		sessionID := uuid.New().String()
 
 		session := &SubtitleExtractSession{
+			ctx: batchContext, cancel: batchCancel, done: batchDone,
 			ID:            sessionID,
 			Path:          path,
 			SubtitleTrack: track.Index,
@@ -1416,7 +1513,12 @@ func (m *SubtitleExtractManager) StartPreExtraction(ctx context.Context, path st
 	}
 
 	// Start ONE ffmpeg process to extract all tracks
-	go m.startBatchExtraction(path, outputDir, textTracks, sessions, startOffset)
+	launched = true
+	go func() {
+		defer m.workers.Done()
+		defer close(batchDone)
+		m.startBatchExtraction(batchContext, batchCancel, path, outputDir, textTracks, sessions, startOffset)
+	}()
 
 	log.Printf("[subtitle-extract] batch pre-extraction started for %d tracks with one ffmpeg process", len(textTracks))
 	return sessions
@@ -1426,8 +1528,7 @@ func (m *SubtitleExtractManager) StartPreExtraction(ctx context.Context, path st
 // This uses a single ffmpeg process with multiple outputs to avoid overwhelming
 // debrid providers with parallel connections (which causes rate limiting)
 // startOffset is the seek position in seconds (0 to start from beginning)
-func (m *SubtitleExtractManager) startBatchExtraction(path, outputDir string, tracks []SubtitleTrackInfo, sessions map[int]*SubtitleExtractSession, startOffset float64) {
-	ctx, cancel := context.WithCancel(context.Background())
+func (m *SubtitleExtractManager) startBatchExtraction(ctx context.Context, cancel context.CancelFunc, path, outputDir string, tracks []SubtitleTrackInfo, sessions map[int]*SubtitleExtractSession, startOffset float64) {
 	defer cancel()
 
 	// Store cancel func in all sessions so they can be cancelled
@@ -1529,8 +1630,16 @@ func (m *SubtitleExtractManager) startBatchExtraction(path, outputDir string, tr
 		return
 	}
 
+	stderrDone := make(chan struct{})
+	defer func() {
+		if stderr != nil {
+			_ = stderr.Close()
+		}
+		<-stderrDone
+	}()
 	// Log stderr in background
 	go func() {
+		defer close(stderrDone)
 		if stderr != nil {
 			buf := make([]byte, 4096)
 			for {
@@ -1580,14 +1689,30 @@ func (m *SubtitleExtractManager) GetSession(sessionID string) (*SubtitleExtractS
 
 // Shutdown cleans up all subtitle extraction sessions
 func (m *SubtitleExtractManager) Shutdown() {
-	close(m.cleanupDone)
-
-	m.mu.Lock()
-	defer m.mu.Unlock()
-
-	for id, session := range m.sessions {
-		log.Printf("[subtitle-extract] shutting down session %s", id)
-		m.cleanupSessionLocked(session)
+	if m == nil {
+		return
 	}
-	m.sessions = make(map[string]*SubtitleExtractSession)
+	m.shutdownOnce.Do(func() {
+		m.mu.Lock()
+		m.closed = true
+		m.active = false
+		if m.cancel != nil {
+			m.cancel()
+		}
+		if m.cleanupDone != nil {
+			close(m.cleanupDone)
+		}
+		m.mu.Unlock()
+		m.workers.Wait()
+		m.mu.Lock()
+		sessions := make([]*SubtitleExtractSession, 0, len(m.sessions))
+		for _, session := range m.sessions {
+			sessions = append(sessions, session)
+		}
+		m.sessions = make(map[string]*SubtitleExtractSession)
+		m.mu.Unlock()
+		for _, session := range sessions {
+			m.cleanupSession(session)
+		}
+	})
 }

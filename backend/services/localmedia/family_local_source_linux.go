@@ -18,6 +18,7 @@ import (
 )
 
 type familyLocalFile struct {
+	life                            context.Context
 	self                            *familyLocalFile
 	source                          *profileunlock.FamilyLocalSource
 	info                            profileunlock.FamilyLocalFileInfo
@@ -39,12 +40,29 @@ func (*familyLocalFile) Format(f fmt.State, _ rune) {
 	_, _ = f.Write([]byte("FamilyLocalFile(opaque)"))
 }
 func (s *Service) FamilyLocalSourceReady(expected *datastore.DataStore) bool {
-	return s != nil && expected != nil && s.store == expected && expected.FamilyLocalRepositoryReady(s.repo)
+	if s == nil || expected == nil {
+		return false
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return !s.closed && (!s.prepared || s.self == s && s.life != nil && s.life.Err() == nil) && s.store == expected && expected.FamilyLocalRepositoryReady(s.repo)
 }
 func (s *Service) OpenFamilyLocalSource(ctx context.Context, source *profileunlock.FamilyLocalSource) (opened profileunlock.FamilyLocalFile, err error) {
 	if s == nil || !s.FamilyLocalSourceReady(s.store) || source == nil || !source.ReadyForStore(s.store) || ctx == nil || ctx.Err() != nil {
 		return nil, profileunlock.ErrFamilyMediaChanged
 	}
+	// Keep the genuine source's fixed lifetime after setup, rather than
+	// borrowing the first HTTP consumer's shorter request context.
+	work, finishService, workErr := s.beginLocalWork(source.Context())
+	if workErr != nil {
+		return nil, profileunlock.ErrFamilyMediaChanged
+	}
+	transferred := false
+	defer func() {
+		if !transferred {
+			finishService()
+		}
+	}()
 	finish, err := source.BeginOpen(ctx)
 	if err != nil {
 		return nil, err
@@ -58,6 +76,9 @@ func (s *Service) OpenFamilyLocalSource(ctx context.Context, source *profileunlo
 		return nil, profileunlock.ErrFamilyMediaChanged
 	}
 	for _, configured := range info.Roots {
+		if work.Err() != nil {
+			return nil, profileunlock.ErrFamilyMediaChanged
+		}
 		if !filepath.IsAbs(configured) || filepath.Clean(configured) != configured {
 			continue
 		}
@@ -99,11 +120,14 @@ func (s *Service) OpenFamilyLocalSource(ctx context.Context, source *profileunlo
 		}
 		value := &familyLocalFile{source: source, info: profileunlock.FamilyLocalFileInfo{ItemID: info.ItemID, LibraryID: info.LibraryID, Name: info.FileName, Size: version.Size}, configured: configured, canonical: canonical, relative: relative, root: root, file: file, nodes: nodes, stat: version, readers: map[*familyLocalReader]bool{}, done: make(chan struct{})}
 		value.self = value
+		value.life = work
 		if value.Check(ctx) != nil {
 			value.retire()
 			continue
 		}
-		value.stop = familyLocalAfterFunc(source.Context(), value.retire)
+		stopSource := familyLocalAfterFunc(source.Context(), value.retire)
+		stopService := familyLocalAfterFunc(work, value.retire)
+		value.stop = func() { stopSource(); stopService() }
 		if source.BindRetirement(value.closeBound, value.done) != nil {
 			value.closeBound()
 			return nil, profileunlock.ErrFamilyMediaChanged
@@ -112,6 +136,12 @@ func (s *Service) OpenFamilyLocalSource(ctx context.Context, source *profileunlo
 			value.closeBound()
 			return nil, profileunlock.ErrFamilyMediaChanged
 		}
+		transferred = true
+		go func() {
+			<-value.done
+			value.stop()
+			finishService()
+		}()
 		return value, nil
 	}
 	return nil, profileunlock.ErrFamilyMediaChanged
@@ -122,7 +152,7 @@ func (f *familyLocalFile) Context() context.Context {
 		cancel()
 		return ctx
 	}
-	return f.source.Context()
+	return f.life
 }
 func (f *familyLocalFile) Info() profileunlock.FamilyLocalFileInfo {
 	if f == nil || f.self != f {
@@ -136,7 +166,7 @@ func (f *familyLocalFile) Check(ctx context.Context) (err error) {
 			f.source.Invalidate()
 		}
 	}()
-	if f == nil || f.self != f || ctx == nil || ctx.Err() != nil || f.source.Check(ctx) != nil {
+	if f == nil || f.self != f || f.life == nil || f.life.Err() != nil || ctx == nil || ctx.Err() != nil || f.source.Check(ctx) != nil {
 		return profileunlock.ErrFamilyMediaChanged
 	}
 	f.mu.Lock()

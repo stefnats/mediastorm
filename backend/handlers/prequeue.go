@@ -118,18 +118,23 @@ type PrequeueHandler struct {
 var prequeueLifecycleInit sync.Mutex
 
 type prequeueWorkerLifetimes struct {
-	mu      sync.Mutex
-	closed  bool
-	active  map[*prequeueWorkerLifetime]struct{}
-	workers sync.WaitGroup
+	runtime  context.Context
+	cancel   context.CancelFunc
+	prepared bool
+	enabled  bool
+	mu       sync.Mutex
+	closed   bool
+	active   map[*prequeueWorkerLifetime]struct{}
+	workers  sync.WaitGroup
 }
 type prequeueWorkerLifetime struct {
-	life   *prequeueWorkerLifetimes
-	id     string
-	ctx    context.Context
-	cancel context.CancelFunc
-	done   chan struct{}
-	once   sync.Once
+	life        *prequeueWorkerLifetimes
+	id          string
+	ctx         context.Context
+	cancel      context.CancelFunc
+	done        chan struct{}
+	once        sync.Once
+	stopRuntime func()
 }
 
 func (h *PrequeueHandler) workerLifetimes() *prequeueWorkerLifetimes {
@@ -147,7 +152,7 @@ func (h *PrequeueHandler) beginPrequeueWork(parent context.Context, id string) (
 	life := h.workerLifetimes()
 	life.mu.Lock()
 	defer life.mu.Unlock()
-	if life.closed || len(life.active) >= 512 {
+	if life.closed || (life.prepared && !life.enabled) || (life.runtime != nil && life.runtime.Err() != nil) || len(life.active) >= 512 {
 		return nil, errors.New("prequeue worker unavailable")
 	}
 	for current := range life.active {
@@ -156,7 +161,24 @@ func (h *PrequeueHandler) beginPrequeueWork(parent context.Context, id string) (
 		}
 	}
 	ctx, cancel := context.WithCancel(parent)
+	if life.runtime != nil {
+		if deadline, ok := life.runtime.Deadline(); ok {
+			bounded, stop := context.WithDeadline(ctx, deadline)
+			previous := cancel
+			ctx = bounded
+			cancel = func() { stop(); previous() }
+		}
+	}
 	work := &prequeueWorkerLifetime{life: life, id: id, ctx: ctx, cancel: cancel, done: make(chan struct{})}
+	if life.runtime != nil {
+		callbackDone := make(chan struct{})
+		stop := context.AfterFunc(life.runtime, func() { defer close(callbackDone); cancel() })
+		work.stopRuntime = func() {
+			if !stop() {
+				<-callbackDone
+			}
+		}
+	}
 	life.active[work] = struct{}{}
 	life.workers.Add(1)
 	return work, nil
@@ -164,6 +186,9 @@ func (h *PrequeueHandler) beginPrequeueWork(parent context.Context, id string) (
 func (w *prequeueWorkerLifetime) finish() {
 	w.once.Do(func() {
 		w.cancel()
+		if w.stopRuntime != nil {
+			w.stopRuntime()
+		}
 		w.life.mu.Lock()
 		delete(w.life.active, w)
 		w.life.mu.Unlock()
@@ -195,11 +220,17 @@ func (h *PrequeueHandler) Shutdown() {
 	life := h.workerLifetimes()
 	life.mu.Lock()
 	life.closed = true
+	if life.cancel != nil {
+		life.cancel()
+	}
 	for work := range life.active {
 		work.cancel()
 	}
 	life.mu.Unlock()
 	life.workers.Wait()
+	if h.store != nil {
+		h.store.Close()
+	}
 }
 
 func (h *PrequeueHandler) canAccessUser(r *http.Request, userID string) bool {
@@ -943,6 +974,59 @@ func NewPrequeueHandler(
 	}
 }
 
+// PreparePrequeueHandler allocates the original inactive store and worker lifetime.
+func PreparePrequeueHandler(original context.Context, indexerSvc *indexer.Service, playbackSvc *playback.Service, historySvc *history.Service, videoProber VideoProber, hlsCreator HLSCreator, demoMode bool) (*PrequeueHandler, error) {
+	store, err := playback.PreparePrequeueStore(original, 30*time.Minute)
+	if err != nil {
+		return nil, err
+	}
+	ctx, cancel := context.WithCancel(original)
+	return &PrequeueHandler{store: store, indexerSvc: indexerSvc, playbackSvc: playbackSvc, historySvc: historySvc, videoProber: videoProber, hlsCreator: hlsCreator, failures: defaultStreamFailureRegistry, demoMode: demoMode,
+		workerLife: &prequeueWorkerLifetimes{runtime: ctx, cancel: cancel, prepared: true, active: make(map[*prequeueWorkerLifetime]struct{})}}, nil
+}
+
+// ActivatePreparedMedia activates the same installed store without replacing it.
+func (h *PrequeueHandler) ActivatePreparedMedia() error {
+	if h == nil {
+		return errors.New("prequeue runtime unavailable")
+	}
+	life := h.workerLifetimes()
+	life.mu.Lock()
+	defer life.mu.Unlock()
+	if !life.prepared || life.closed || life.runtime == nil || life.runtime.Err() != nil || h.store == nil {
+		return errors.New("prequeue runtime unavailable")
+	}
+	if life.enabled {
+		return nil
+	}
+	if err := h.store.Activate(); err != nil {
+		return err
+	}
+	life.enabled = true
+	return nil
+}
+
+func (h *PrequeueHandler) prequeueRuntimeCheck() error {
+	if h == nil {
+		return errors.New("prequeue runtime unavailable")
+	}
+	life := h.workerLifetimes()
+	life.mu.Lock()
+	defer life.mu.Unlock()
+	if life.closed || (life.prepared && !life.enabled) || (life.runtime != nil && life.runtime.Err() != nil) {
+		return errors.New("prequeue runtime unavailable")
+	}
+	return nil
+}
+
+func (h *PrequeueHandler) prequeueRuntimeContext() context.Context {
+	life := h.workerLifetimes()
+	if life.runtime != nil {
+		return life.runtime
+	}
+	return context.Background() // Legacy constructors retain detached preparation semantics.
+}
+
 // SetVideoProber sets the video prober for HDR detection
 func (h *PrequeueHandler) SetVideoProber(prober VideoProber) {
 	h.videoProber = prober
@@ -1025,6 +1109,12 @@ func (h *PrequeueHandler) GetStore() *playback.PrequeueStore {
 // RunWorkerSync runs the prequeue worker synchronously and returns the prequeue ID.
 // Used by the prewarm service to pre-resolve continue watching items.
 func (h *PrequeueHandler) RunWorkerSync(ctx context.Context, titleID, titleName, imdbID, mediaType string, year int, userID string, targetEpisode *models.EpisodeReference) (string, error) {
+	work, err := h.beginPrequeueWork(ctx, "scope:"+titleID+":"+userID)
+	if err != nil {
+		return "", err
+	}
+	defer work.finish()
+	ctx = work.ctx
 	settingsScopeKey := h.prequeueSettingsScopeKey(userID, "", titleID)
 	return h.RunWorkerSyncScoped(ctx, titleID, titleName, imdbID, mediaType, year, userID, "", settingsScopeKey, targetEpisode)
 }
@@ -1053,6 +1143,9 @@ func (h *PrequeueHandler) RunWorkerSyncScoped(ctx context.Context, titleID, titl
 	// search and leaves the client polling a deleted ID.
 	entry, err := h.store.CreateScopedUnlessInProgress(titleID, titleName, userID, mediaType, year, targetEpisode, "prewarm", settingsScopeKey)
 	if err != nil {
+		if entry == nil {
+			return "", err
+		}
 		return entry.ID, fmt.Errorf("%w: %s (status=%s)", err, entry.ID, entry.Status)
 	}
 
@@ -1103,6 +1196,10 @@ func normalizeClientID(raw string) string {
 
 // Prequeue initiates a prequeue request for a title
 func (h *PrequeueHandler) Prequeue(w http.ResponseWriter, r *http.Request) {
+	if h.prequeueRuntimeCheck() != nil {
+		http.Error(w, "prequeue unavailable", http.StatusServiceUnavailable)
+		return
+	}
 	if r.Method == http.MethodOptions {
 		w.WriteHeader(http.StatusOK)
 		return
@@ -1387,7 +1484,7 @@ func (h *PrequeueHandler) Prequeue(w http.ResponseWriter, r *http.Request) {
 		h.prewarmSvc.AdoptEntry(entry.ID)
 	}
 
-	work, workErr := h.beginPrequeueWork(context.Background(), entry.ID)
+	work, workErr := h.beginPrequeueWork(h.prequeueRuntimeContext(), entry.ID)
 	if workErr != nil {
 		h.store.Delete(entry.ID)
 		http.Error(w, "prequeue worker unavailable", http.StatusServiceUnavailable)
@@ -1446,6 +1543,10 @@ func normalizePrequeueSeriesTitle(title string) string {
 
 // GetStatus returns the status of a prequeue request
 func (h *PrequeueHandler) GetStatus(w http.ResponseWriter, r *http.Request) {
+	if h.prequeueRuntimeCheck() != nil {
+		http.Error(w, "prequeue unavailable", http.StatusServiceUnavailable)
+		return
+	}
 	if r.Method == http.MethodOptions {
 		w.WriteHeader(http.StatusOK)
 		return
@@ -1520,6 +1621,10 @@ func (h *PrequeueHandler) manualPrequeueEntry(r *http.Request) (*playback.Preque
 
 // ManualPrequeueStatus reports whether a title is pinned for the requested profile.
 func (h *PrequeueHandler) ManualPrequeueStatus(w http.ResponseWriter, r *http.Request) {
+	if h.prequeueRuntimeCheck() != nil {
+		http.Error(w, "prequeue unavailable", http.StatusServiceUnavailable)
+		return
+	}
 	owner, permitted := h.vodBoundary.requestOwner(w, r, vodReady, "")
 	if !permitted {
 		return
@@ -1548,6 +1653,10 @@ func (h *PrequeueHandler) ManualPrequeueStatus(w http.ResponseWriter, r *http.Re
 
 // RemoveManualPrequeue removes a persistent prequeue without exposing other profiles' entries.
 func (h *PrequeueHandler) RemoveManualPrequeue(w http.ResponseWriter, r *http.Request) {
+	if h.prequeueRuntimeCheck() != nil {
+		http.Error(w, "prequeue unavailable", http.StatusServiceUnavailable)
+		return
+	}
 	entry, userID, valid := h.manualPrequeueEntry(r)
 	if !valid {
 		if userID == "" || strings.TrimSpace(r.URL.Query().Get("titleId")) == "" {
@@ -1590,6 +1699,10 @@ type adoptMigrationRequest struct {
 // migrates to another candidate. This keeps details-page reuse aligned with the
 // stream the player actually handed over to.
 func (h *PrequeueHandler) AdoptMigration(w http.ResponseWriter, r *http.Request) {
+	if h.prequeueRuntimeCheck() != nil {
+		http.Error(w, "prequeue unavailable", http.StatusServiceUnavailable)
+		return
+	}
 	r, bodyOK := h.vodBoundary.boundBody(w, r)
 	if !bodyOK {
 		return
@@ -1752,7 +1865,7 @@ type adoptedMigrationMetadata struct {
 
 func (h *PrequeueHandler) refreshAdoptedMigrationMetadata(prequeueID, streamPath, clientID string, owners ...*vodOwnerContext) {
 	// Isolated legacy tests retain this signature; HTTP passes its real context.
-	parent := context.Background()
+	parent := h.prequeueRuntimeContext()
 	if len(owners) > 0 && owners[0] != nil {
 		parent = owners[0].ctx
 	}
@@ -2002,7 +2115,7 @@ func prequeueSetupContext(parent context.Context, work *prequeueWorkerLifetime) 
 }
 
 func (h *PrequeueHandler) runPrequeueWorker(prequeueID, titleID, titleName, imdbID, mediaType string, year int, userID, clientID string, throughput *models.AdaptiveThroughputContext, targetEpisode *models.EpisodeReference, startOffset float64, skipHLS bool, workerMode prequeueWorkerMode, localScopes ...prequeueLocalScope) {
-	h.runPrequeueWorkerContext(context.Background(), prequeueID, titleID, titleName, imdbID, mediaType, year, userID, clientID, throughput, targetEpisode, startOffset, skipHLS, workerMode, localScopes...)
+	h.runPrequeueWorkerContext(h.prequeueRuntimeContext(), prequeueID, titleID, titleName, imdbID, mediaType, year, userID, clientID, throughput, targetEpisode, startOffset, skipHLS, workerMode, localScopes...)
 }
 func (h *PrequeueHandler) runPrequeueWorkerContext(parent context.Context, prequeueID, titleID, titleName, imdbID, mediaType string, year int, userID, clientID string, throughput *models.AdaptiveThroughputContext, targetEpisode *models.EpisodeReference, startOffset float64, skipHLS bool, workerMode prequeueWorkerMode, localScopes ...prequeueLocalScope) {
 	work, err := h.beginPrequeueWork(parent, prequeueID)
@@ -4509,6 +4622,10 @@ type StartSubtitlesResponse struct {
 // StartSubtitles starts subtitle extraction for a prequeue with the given offset
 // This is called when the user clicks play, after they've chosen resume/start position
 func (h *PrequeueHandler) StartSubtitles(w http.ResponseWriter, r *http.Request) {
+	if h.prequeueRuntimeCheck() != nil {
+		http.Error(w, "prequeue unavailable", http.StatusServiceUnavailable)
+		return
+	}
 	r, bodyOK := h.vodBoundary.boundBody(w, r)
 	if !bodyOK {
 		return

@@ -26,6 +26,10 @@ type vodRawOwnerKey struct{}
 
 func (h *VideoHandler) beginVideoVOD(w http.ResponseWriter, r *http.Request, source string) (http.ResponseWriter, *http.Request, func(), bool) {
 	noop := func() {}
+	if h.preparedMediaCheck() != nil {
+		http.Error(w, "Media unavailable", http.StatusServiceUnavailable)
+		return w, r, noop, false
+	}
 	if g := shareMediaFrom(r.Context()); g != nil {
 		if g.handler != h || normalizeShareResource(source) != g.owner.Resource() || g.current(r.Context()) != nil {
 			shareMediaError(w, datastore.ErrSharePlaybackChanged)
@@ -142,6 +146,9 @@ func (h *VideoHandler) beginVideoVOD(w http.ResponseWriter, r *http.Request, sou
 var errVODRawStaleRegistration = errors.New("stale private raw registration")
 
 func (h *VideoHandler) vodRawCheck(ctx context.Context) error {
+	if err := h.preparedMediaCheck(); err != nil {
+		return err
+	}
 	if g := shareMediaFrom(ctx); g != nil {
 		if g.handler != h {
 			return datastore.ErrSharePlaybackChanged

@@ -4,8 +4,10 @@ package nntpcli
 import (
 	"context"
 	"crypto/tls"
+	"errors"
 	"fmt"
 	"net"
+	"sync"
 	"time"
 )
 
@@ -59,6 +61,9 @@ func New(
 // setupTCPConn configures a TCP connection with keep-alive and other options.
 // If cfg.Dialer is set, it will be used for dialing (e.g., for proxy connections).
 func (c *client) setupTCPConn(ctx context.Context, host string, port int, cfg DialConfig) (net.Conn, time.Duration, error) {
+	if ctx == nil || ctx.Err() != nil {
+		return nil, 0, errors.New("NNTP context unavailable")
+	}
 	var dialer ContextDialer
 
 	if cfg.Dialer != nil {
@@ -76,6 +81,12 @@ func (c *client) setupTCPConn(ctx context.Context, host string, port int, cfg Di
 		return nil, 0, err
 	}
 
+	keep := false
+	defer func() {
+		if !keep {
+			_ = conn.Close()
+		}
+	}()
 	keepAlive := c.config.KeepAliveTime
 	if cfg.KeepAliveTime != 0 {
 		keepAlive = cfg.KeepAliveTime
@@ -96,7 +107,67 @@ func (c *client) setupTCPConn(ctx context.Context, host string, port int, cfg Di
 		}
 	}
 
+	keep = true
 	return conn, keepAlive, nil
+}
+
+// watchSocketCancellation only interrupts the actual owned socket. The caller
+// must join this signal callback before transferring or releasing the connection.
+func watchSocketCancellation(ctx context.Context, conn net.Conn) func() {
+	done := make(chan struct{})
+	stop := context.AfterFunc(ctx, func() { defer close(done); _ = conn.Close() })
+	var once sync.Once
+	return func() {
+		once.Do(func() {
+			if !stop() {
+				<-done
+			}
+		})
+	}
+}
+
+// BindConnectionCancellation links an operation to a genuine original NNTP
+// socket. It is lifetime plumbing and supplies no provider/source permission.
+// InterruptConnection interrupts only an initialized concrete socket. A later
+// pool cleanup still has to join actual borrowers, constructors and destructors.
+func InterruptConnection(value Connection) error {
+	actual, ok := value.(*connection)
+	if !ok || actual == nil || actual.netconn == nil {
+		return errors.New("NNTP cancellation unsupported")
+	}
+	return actual.netconn.Close()
+}
+
+func BindConnectionCancellation(ctx context.Context, value Connection) (func(), error) {
+	actual, ok := value.(*connection)
+	if !ok || actual == nil || actual.netconn == nil || ctx == nil {
+		return nil, errors.New("NNTP cancellation unsupported")
+	}
+	return watchSocketCancellation(ctx, actual.netconn), nil
+}
+
+func (c *client) finishSetup(ctx context.Context, raw net.Conn, maxAge time.Time) (Connection, error) {
+	stop := watchSocketCancellation(ctx, raw)
+	defer stop()
+	if deadline, ok := ctx.Deadline(); ok {
+		if err := raw.SetDeadline(deadline); err != nil {
+			_ = raw.Close()
+			return nil, err
+		}
+	}
+	result, err := newConnection(raw, maxAge, c.config.OperationTimeout)
+	stop()
+	if err == nil {
+		err = ctx.Err()
+	}
+	if err == nil {
+		err = raw.SetDeadline(time.Time{})
+	}
+	if err != nil {
+		_ = raw.Close()
+		return nil, err
+	}
+	return result, nil
 }
 
 // Dial connects to an NNTP server using a plain TCP connection.
@@ -129,7 +200,7 @@ func (c *client) Dial(
 
 	maxAgeTime := time.Now().Add(keepAlive)
 
-	return newConnection(conn, maxAgeTime, c.config.OperationTimeout)
+	return c.finishSetup(ctx, conn, maxAgeTime)
 }
 
 // DialTLS connects to an NNTP server using a TLS-encrypted connection.
@@ -167,12 +238,15 @@ func (c *client) DialTLS(
 		InsecureSkipVerify: insecureSSL,
 	})
 
-	err = tlsConn.Handshake()
+	stopHandshake := watchSocketCancellation(ctx, conn)
+	err = tlsConn.HandshakeContext(ctx)
+	stopHandshake()
 	if err != nil {
+		_ = conn.Close()
 		return nil, err
 	}
 
 	maxAgeTime := time.Now().Add(keepAlive)
 
-	return newConnection(tlsConn, maxAgeTime, c.config.OperationTimeout)
+	return c.finishSetup(ctx, tlsConn, maxAgeTime)
 }

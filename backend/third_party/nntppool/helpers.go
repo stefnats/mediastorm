@@ -34,6 +34,7 @@ func getPools(
 	nttpCli nntpcli.Client,
 	log Logger,
 	metrics *PoolMetrics,
+	managed bool,
 ) ([]*providerPool, error) {
 	pSlice := make([]*providerPool, 0)
 
@@ -62,6 +63,9 @@ func getPools(
 					}, nil
 				},
 				Destructor: func(value *internalConnection) {
+					if managed {
+						_ = nntpcli.InterruptConnection(value.nntp)
+					}
 					_ = value.nntp.Close()
 
 					// Record connection destruction
@@ -73,6 +77,9 @@ func getPools(
 			},
 		)
 		if err != nil {
+			for _, created := range pSlice {
+				created.connectionPool.Close()
+			}
 			return nil, err
 		}
 
@@ -87,13 +94,20 @@ func getPools(
 }
 
 func verifyProviders(pools []*providerPool, log Logger) error {
-	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	return verifyProvidersContext(context.Background(), pools, log)
+}
+
+func verifyProvidersContext(original context.Context, pools []*providerPool, log Logger) error {
+	if original == nil || original.Err() != nil {
+		return ErrPoolCleanupUnsupported
+	}
+	ctx, cancel := context.WithTimeout(original, 60*time.Second)
 	defer cancel()
 
 	wg := multierror.Group{}
-	var offlineProviders []string
+	offline := make([]string, len(pools))
 
-	for _, pool := range pools {
+	for index, pool := range pools {
 		poolCopy := pool // Capture the loop variable
 		wg.Go(func() error {
 			c, err := poolCopy.connectionPool.Acquire(ctx)
@@ -109,12 +123,15 @@ func verifyProviders(pools []*providerPool, log Logger) error {
 				}
 
 				poolCopy.SetConnectionAttempt(err)
-				offlineProviders = append(offlineProviders, poolCopy.provider.Host)
+				offline[index] = poolCopy.provider.Host
 
 				return nil
 			}
 
 			defer c.Release()
+			if stop, bindErr := nntpcli.BindConnectionCancellation(ctx, c.Value().nntp); bindErr == nil {
+				defer stop()
+			}
 
 			if len(poolCopy.provider.VerifyCapabilities) > 0 {
 				conn := c.Value()
@@ -128,7 +145,7 @@ func verifyProviders(pools []*providerPool, log Logger) error {
 						log.Warn(fmt.Sprintf("capability check failed for provider %s, marking as offline: %v", poolCopy.provider.Host, err))
 						poolCopy.SetState(ProviderStateOffline)
 						poolCopy.SetConnectionAttempt(err)
-						offlineProviders = append(offlineProviders, poolCopy.provider.Host)
+						offline[index] = poolCopy.provider.Host
 
 						return nil
 					}
@@ -146,6 +163,15 @@ func verifyProviders(pools []*providerPool, log Logger) error {
 	}
 
 	err := wg.Wait().ErrorOrNil()
+	if original.Err() != nil {
+		return original.Err()
+	}
+	var offlineProviders []string
+	for _, host := range offline {
+		if host != "" {
+			offlineProviders = append(offlineProviders, host)
+		}
+	}
 
 	if len(offlineProviders) > 0 {
 		log.Info(fmt.Sprintf("pool created with %d offline providers: %v", len(offlineProviders), offlineProviders))
@@ -216,6 +242,9 @@ func TestProviderConnectivity(ctx context.Context, config UsenetProviderConfig, 
 		}
 	}()
 
+	if stop, err := nntpcli.BindConnectionCancellation(ctx, conn); err == nil {
+		defer stop()
+	}
 	// Verify required capabilities if specified
 	if len(config.VerifyCapabilities) > 0 {
 		// Test the connection by getting capabilities
@@ -303,12 +332,28 @@ func dialNNTP(
 		}
 	}
 
+	stop, bindErr := nntpcli.BindConnectionCancellation(ctx, c)
+	if bindErr == nil {
+		defer stop()
+	}
+	keep := false
+	defer func() {
+		if !keep {
+			_ = nntpcli.InterruptConnection(c)
+			_ = c.Close()
+		}
+	}()
+
 	if p.Username != "" && p.Password != "" {
 		if err := c.Authenticate(p.Username, p.Password); err != nil {
 			return nil, fmt.Errorf("error authenticating to %v/%v: %w", p.Host, p.Username, err)
 		}
 	}
 
+	if ctx.Err() != nil {
+		return nil, ctx.Err()
+	}
+	keep = true
 	return c, nil
 }
 

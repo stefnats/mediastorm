@@ -42,6 +42,9 @@ const (
 )
 
 type ThumbnailManager struct {
+	runtime          context.Context
+	prepared, active bool
+
 	baseDir      string
 	ffmpegPath   string
 	sourceBridge *thumbnailSourceBridge
@@ -139,15 +142,34 @@ type thumbnailRateLimitCooldown struct {
 }
 
 func NewThumbnailManager(baseDir, ffmpegPath string) *ThumbnailManager {
-	manager := &ThumbnailManager{
-		baseDir:      baseDir,
-		ffmpegPath:   ffmpegPath,
-		sourceBridge: newThumbnailSourceBridge(),
-		inFlight:     make(map[string]struct{}),
-		prewarmed:    make(map[string]time.Time),
-	}
+	manager := prepareThumbnailManager(context.Background(), baseDir, ffmpegPath)
+	manager.prepared = false
+	manager.active = true
 	manager.pruneSharedSourceCache(time.Now())
 	return manager
+}
+func prepareThumbnailManager(original context.Context, baseDir, ffmpegPath string) *ThumbnailManager {
+	return &ThumbnailManager{runtime: original, prepared: true, baseDir: baseDir, ffmpegPath: ffmpegPath, sourceBridge: newThumbnailSourceBridge(), inFlight: make(map[string]struct{}), prewarmed: make(map[string]time.Time)}
+}
+func (m *ThumbnailManager) activatePreparedMedia() error {
+	if m == nil || m.runtime == nil {
+		return errPreparedMediaLifetime
+	}
+	m.mu.Lock()
+	if m.active || m.runtime.Err() != nil {
+		m.mu.Unlock()
+		return errPreparedMediaLifetime
+	}
+	m.mu.Unlock()
+	managerTime := time.Now()
+	m.pruneSharedSourceCache(managerTime)
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.runtime.Err() != nil {
+		return errPreparedMediaLifetime
+	}
+	m.active = true
+	return nil
 }
 
 func thumbnailKey(cleanPath string) string {
@@ -546,6 +568,12 @@ func (m *ThumbnailManager) markUnsupported(cleanPath string, durationSec float64
 }
 
 func (m *ThumbnailManager) start(cleanPath, sourceURL, authHeader string, durationSec float64, intervalSec int, workerCount int, toneMapMode thumbnailToneMapMode, dvProfile string, chapterTimes []float64, providers ...func() bool) (string, bool, error) {
+	// This path-only legacy API has no original media actor. Prepared managed
+	// callers use the existing genuine share/party ancillary actor instead.
+	if m != nil && m.prepared {
+		return "", false, errPreparedMediaLifetime
+	}
+
 	if m == nil {
 		return "", false, fmt.Errorf("thumbnail manager unavailable")
 	}
@@ -750,6 +778,10 @@ func (h *VideoHandler) thumbnailGenerationSettings() config.PlaybackThumbnailSet
 // reusable upstream connection while the client is still preparing playback.
 // Frame generation remains chapter-driven once metadata reaches StartThumbnails.
 func (h *VideoHandler) PrewarmThumbnails(path string) {
+	if h.preparedMediaCheck() != nil || h.mediaLifetime != nil && h.mediaLifetime.prepared {
+		return
+	}
+
 	if h == nil || h.thumbnailManager == nil || strings.TrimSpace(path) == "" || !h.thumbnailGenerationSettings().Enabled {
 		return
 	}
@@ -846,6 +878,11 @@ func (m *ThumbnailManager) isInflight(key string) bool {
 }
 
 func (h *VideoHandler) StartThumbnails(w http.ResponseWriter, r *http.Request) {
+	if h.preparedMediaCheck() != nil {
+		http.Error(w, "Media unavailable", http.StatusServiceUnavailable)
+		return
+	}
+
 	if shareMediaFrom(r.Context()) != nil {
 		h.shareStartThumbnails(w, r)
 		return
@@ -961,6 +998,11 @@ func parseThumbnailChapterTimes(values []string) []float64 {
 }
 
 func (h *VideoHandler) GetThumbnailsStatus(w http.ResponseWriter, r *http.Request) {
+	if h.preparedMediaCheck() != nil {
+		http.Error(w, "Media unavailable", http.StatusServiceUnavailable)
+		return
+	}
+
 	if shareMediaFrom(r.Context()) != nil {
 		h.shareThumbnailStatus(w, r)
 		return
@@ -998,6 +1040,11 @@ func (h *VideoHandler) GetThumbnailsStatus(w http.ResponseWriter, r *http.Reques
 }
 
 func (h *VideoHandler) ServeThumbnailImage(w http.ResponseWriter, r *http.Request) {
+	if h.preparedMediaCheck() != nil {
+		http.Error(w, "Media unavailable", http.StatusServiceUnavailable)
+		return
+	}
+
 	if shareMediaFrom(r.Context()) != nil {
 		h.shareServeThumbnail(w, r)
 		return

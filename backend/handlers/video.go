@@ -115,6 +115,7 @@ func videoTracef(format string, args ...any) {
 
 // VideoHandler handles video streaming requests using the local stream provider.
 type VideoHandler struct {
+	mediaLifetime    *preparedVideoLifetime
 	transmux         bool
 	ffmpegPath       string
 	ffprobePath      string
@@ -204,6 +205,78 @@ type VideoHandler struct {
 	// disabled globally (no manager exists) and a DLNA renderer forces the path.
 	dlnaCapsOnce sync.Once
 	dlnaCaps     HWAccelCaps
+}
+
+// This lifetime gates actual component work only. Current PG/profile/source
+// authorization remains the responsibility of the original media consumers.
+type preparedVideoLifetime struct {
+	mu         sync.Mutex
+	handler    *VideoHandler
+	ctx        context.Context
+	cancel     context.CancelFunc
+	prepared   bool
+	active     bool
+	activating bool
+	closed     bool
+	workers    sync.WaitGroup
+	closeOnce  sync.Once
+}
+
+var errPreparedMediaLifetime = errors.New("original prepared media lifetime unavailable")
+
+func (h *VideoHandler) preparedMediaCheck() error {
+	if h == nil {
+		return errPreparedMediaLifetime
+	}
+	life := h.mediaLifetime
+	if life == nil {
+		return nil // Isolated historical handler fixtures retain their constructor.
+	}
+	life.mu.Lock()
+	defer life.mu.Unlock()
+	if life.handler != h || life.closed || life.ctx.Err() != nil || life.prepared && !life.active {
+		return errPreparedMediaLifetime
+	}
+	return nil
+}
+
+// beginPreparedMediaWork counts actual provider/probe work before its first
+// cache/source access. It links cancellation only; existing source owners and
+// original framed requests keep all of their authority checks.
+func (h *VideoHandler) beginPreparedMediaWork(caller context.Context) (context.Context, func(), error) {
+	if h == nil || caller == nil || caller.Err() != nil {
+		return nil, nil, errPreparedMediaLifetime
+	}
+	life := h.mediaLifetime
+	if life == nil {
+		return caller, func() {}, nil
+	}
+	life.mu.Lock()
+	if life.handler != h || life.closed || life.ctx.Err() != nil || life.prepared && !life.active {
+		life.mu.Unlock()
+		return nil, nil, errPreparedMediaLifetime
+	}
+	ctx, cancel := context.WithCancel(caller)
+	if deadline, ok := life.ctx.Deadline(); ok {
+		bounded, stop := context.WithDeadline(ctx, deadline)
+		previous := cancel
+		ctx = bounded
+		cancel = func() { stop(); previous() }
+	}
+	life.workers.Add(1)
+	life.mu.Unlock()
+	callbackDone := make(chan struct{})
+	stop := context.AfterFunc(life.ctx, func() { defer close(callbackDone); cancel() })
+	var once sync.Once
+	return ctx, func() {
+		once.Do(func() {
+			cancel()
+			if !stop() {
+				<-callbackDone
+			}
+			life.workers.Done()
+		})
+	}, nil
 }
 
 // LiveChannelProvider resolves the profile-filtered channels that the backend
@@ -631,7 +704,25 @@ func NewVideoHandlerWithNzbSystem(transmuxEnabled bool, ffmpegPath, ffprobePath 
 	return newVideoHandler(transmuxEnabled, ffmpegPath, ffprobePath, "", nzbSystem)
 }
 
+// PrepareVideoHandlerWithProvider allocates inert original media components.
+// Main must install its actual family/source consumers before activation.
+func PrepareVideoHandlerWithProvider(original context.Context, transmuxEnabled bool, ffmpegPath, ffprobePath, hlsTempDir string, provider streaming.Provider) (*VideoHandler, error) {
+	if original == nil || original.Err() != nil {
+		return nil, errPreparedMediaLifetime
+	}
+	handler := allocateVideoHandler(original, true, transmuxEnabled, ffmpegPath, ffprobePath, hlsTempDir, provider)
+	if original.Err() != nil {
+		handler.Shutdown()
+		return nil, errPreparedMediaLifetime
+	}
+	return handler, nil
+}
 func newVideoHandler(transmuxEnabled bool, ffmpegPath, ffprobePath, hlsTempDir string, provider streaming.Provider) *VideoHandler {
+	return allocateVideoHandler(context.Background(), false, transmuxEnabled, ffmpegPath, ffprobePath, hlsTempDir, provider)
+}
+func allocateVideoHandler(original context.Context, prepared bool, transmuxEnabled bool, ffmpegPath, ffprobePath, hlsTempDir string, provider streaming.Provider) *VideoHandler {
+	life, cancel := context.WithCancel(original)
+
 	resolvedFFmpeg := strings.TrimSpace(ffmpegPath)
 	if resolvedFFmpeg == "" {
 		resolvedFFmpeg = "ffmpeg"
@@ -661,7 +752,11 @@ func newVideoHandler(transmuxEnabled bool, ffmpegPath, ffprobePath, hlsTempDir s
 	// Initialize HLS manager if transmux is enabled
 	var hlsMgr *HLSManager
 	if transmuxEnabled {
-		hlsMgr = NewHLSManager(hlsTempDir, resolvedFFmpeg, resolvedFFprobe, provider)
+		if prepared {
+			hlsMgr = prepareHLSManager(life, hlsTempDir, resolvedFFmpeg, resolvedFFprobe, provider)
+		} else {
+			hlsMgr = NewHLSManager(hlsTempDir, resolvedFFmpeg, resolvedFFprobe, provider)
+		}
 		log.Printf("[video] initialized HLS manager for Dolby Vision streaming (temp dir: %s)", hlsMgr.baseDir)
 	}
 
@@ -669,7 +764,11 @@ func newVideoHandler(transmuxEnabled bool, ffmpegPath, ffprobePath, hlsTempDir s
 	var subtitleMgr *SubtitleExtractManager
 	if resolvedFFmpeg != "" && resolvedFFprobe != "" && provider != nil {
 		subtitleBaseDir := filepath.Join(os.TempDir(), "strmr-subtitles")
-		subtitleMgr = NewSubtitleExtractManager(subtitleBaseDir, resolvedFFmpeg, resolvedFFprobe, provider)
+		if prepared {
+			subtitleMgr = prepareSubtitleExtractManager(life, subtitleBaseDir, resolvedFFmpeg, resolvedFFprobe, provider)
+		} else {
+			subtitleMgr = NewSubtitleExtractManager(subtitleBaseDir, resolvedFFmpeg, resolvedFFprobe, provider)
+		}
 		log.Printf("[video] initialized subtitle extraction manager (base dir: %s)", subtitleBaseDir)
 	}
 
@@ -682,9 +781,15 @@ func newVideoHandler(transmuxEnabled bool, ffmpegPath, ffprobePath, hlsTempDir s
 		failures:               defaultStreamFailureRegistry,
 		subtitleExtractManager: subtitleMgr,
 		metadataCache:          make(map[string]*cachedMetadataEntry),
-		streamPool:             newStreamPool(defaultStreamFailureRegistry),
-		externalRedirects:      make(map[string]cachedExternalRedirect),
-		liveDirectTargets:      make(map[string]*liveDirectTarget),
+
+		externalRedirects: make(map[string]cachedExternalRedirect),
+		liveDirectTargets: make(map[string]*liveDirectTarget),
+	}
+	h.mediaLifetime = &preparedVideoLifetime{handler: h, ctx: life, cancel: cancel, prepared: prepared, active: !prepared}
+	if prepared {
+		h.streamPool = prepareStreamPool(life, defaultStreamFailureRegistry)
+	} else {
+		h.streamPool = newStreamPool(defaultStreamFailureRegistry)
 	}
 	h.externalProxyHTTPClient = requestsecurity.NewSafeHTTPClientWithPolicyProvider(
 		0,
@@ -694,11 +799,17 @@ func newVideoHandler(transmuxEnabled bool, ffmpegPath, ffprobePath, hlsTempDir s
 		},
 	)
 	if resolvedFFmpeg != "" {
-		h.thumbnailManager = NewThumbnailManager(filepath.Join(os.TempDir(), "strmr-thumbnails"), resolvedFFmpeg)
+		if prepared {
+			h.thumbnailManager = prepareThumbnailManager(life, filepath.Join(os.TempDir(), "strmr-thumbnails"), resolvedFFmpeg)
+		} else {
+			h.thumbnailManager = NewThumbnailManager(filepath.Join(os.TempDir(), "strmr-thumbnails"), resolvedFFmpeg)
+		}
 	}
 
-	// Start background cleanup for metadata cache
-	go h.runMetadataCacheCleanup()
+	if !prepared {
+		h.mediaLifetime.workers.Add(1)
+		go func() { defer h.mediaLifetime.workers.Done(); h.runMetadataCacheCleanup() }()
+	}
 
 	return h
 }
@@ -4154,9 +4265,17 @@ func (h *VideoHandler) setCachedMetadata(path string, response *videoMetadataRes
 func (h *VideoHandler) runMetadataCacheCleanup() {
 	ticker := time.NewTicker(10 * time.Minute)
 	defer ticker.Stop()
-
-	for range ticker.C {
-		h.cleanExpiredMetadataCache()
+	var retired <-chan struct{}
+	if h.mediaLifetime != nil {
+		retired = h.mediaLifetime.ctx.Done()
+	}
+	for {
+		select {
+		case <-retired:
+			return
+		case <-ticker.C:
+			h.cleanExpiredMetadataCache()
+		}
 	}
 }
 
@@ -6104,12 +6223,87 @@ func (h *VideoHandler) SeekHLSSession(w http.ResponseWriter, r *http.Request) {
 }
 
 // Shutdown gracefully shuts down the video handler and cleans up resources
-func (h *VideoHandler) Shutdown() {
-	h.shutdownShareAncillary()
-	if h.hlsManager != nil {
-		log.Printf("[video] shutting down HLS manager")
-		h.hlsManager.Shutdown()
+func (h *VideoHandler) ActivatePreparedMedia() error {
+	if h == nil || h.mediaLifetime == nil {
+		return errPreparedMediaLifetime
 	}
+	life := h.mediaLifetime
+	life.mu.Lock()
+	if life.handler != h || !life.prepared || life.closed || life.active || life.activating || life.ctx.Err() != nil {
+		life.mu.Unlock()
+		return errPreparedMediaLifetime
+	}
+	life.activating = true
+	life.workers.Add(1)
+	life.mu.Unlock()
+	defer life.workers.Done()
+	defer func() { life.mu.Lock(); life.activating = false; life.mu.Unlock() }()
+	if h.hlsManager != nil {
+		if err := h.hlsManager.activatePreparedMedia(); err != nil {
+			return err
+		}
+	}
+	if h.subtitleExtractManager != nil {
+		if err := h.subtitleExtractManager.activatePreparedMedia(); err != nil {
+			return err
+		}
+	}
+	if h.streamPool != nil {
+		if err := h.streamPool.activatePreparedMedia(); err != nil {
+			return err
+		}
+	}
+	if h.thumbnailManager != nil {
+		if err := h.thumbnailManager.activatePreparedMedia(); err != nil {
+			return err
+		}
+	}
+	life.mu.Lock()
+	defer life.mu.Unlock()
+	if life.closed || life.ctx.Err() != nil {
+		return errPreparedMediaLifetime
+	}
+	life.active = true
+	life.workers.Add(1)
+	go func() { defer life.workers.Done(); h.runMetadataCacheCleanup() }()
+	return nil
+}
+
+// Shutdown joins actual component work before its caller tears down source
+// dependencies. It is never called from one of its own worker callbacks.
+func (h *VideoHandler) Shutdown() {
+	if h == nil {
+		return
+	}
+	finish := func() {
+		h.shutdownShareAncillary()
+		if h.hlsManager != nil {
+			h.hlsManager.Shutdown()
+		}
+		if h.subtitleExtractManager != nil {
+			h.subtitleExtractManager.Shutdown()
+		}
+		if h.streamPool != nil {
+			h.streamPool.close()
+		}
+	}
+	life := h.mediaLifetime
+	if life == nil {
+		finish()
+		return
+	}
+	if life.handler != h {
+		return
+	}
+	life.closeOnce.Do(func() {
+		life.mu.Lock()
+		life.closed = true
+		life.active = false
+		life.cancel()
+		life.mu.Unlock()
+		life.workers.Wait()
+		finish()
+	})
 }
 
 // ConfigureLocalWebDAVAccess passes local WebDAV connection info to the HLS manager
@@ -6346,6 +6540,11 @@ func (h *VideoHandler) CreateHLSSession(ctx context.Context, path string, hasDV 
 // ProbeVideoPath implements the VideoProber interface for HDR detection.
 // This allows the prequeue handler to detect Dolby Vision and HDR10 content.
 func (h *VideoHandler) ProbeVideoPath(ctx context.Context, path string) (*VideoProbeResult, error) {
+	ctx, finish, workErr := h.beginPreparedMediaWork(ctx)
+	if workErr != nil {
+		return nil, workErr
+	}
+	defer finish()
 	if h == nil {
 		return nil, errors.New("video handler is nil")
 	}
@@ -6431,6 +6630,11 @@ func (h *VideoHandler) ProbeVideoPath(ctx context.Context, path string) (*VideoP
 // ProbeVideoMetadata implements the VideoMetadataProber interface for track selection.
 // This allows the prequeue handler to get audio/subtitle stream info for preference matching.
 func (h *VideoHandler) ProbeVideoMetadata(ctx context.Context, path string) (*VideoMetadataResult, error) {
+	ctx, finish, workErr := h.beginPreparedMediaWork(ctx)
+	if workErr != nil {
+		return nil, workErr
+	}
+	defer finish()
 	if h == nil {
 		return nil, errors.New("video handler is nil")
 	}
@@ -6541,6 +6745,11 @@ func (h *VideoHandler) ProbeVideoMetadata(ctx context.Context, path string) (*Vi
 // This consolidates ProbeVideoPath and ProbeVideoMetadata into one call for efficiency.
 // Results are cached in HLSManager.probeCache to avoid redundant probes between prequeue and HLS.
 func (h *VideoHandler) ProbeVideoFull(ctx context.Context, path string) (*VideoFullResult, error) {
+	ctx, finish, workErr := h.beginPreparedMediaWork(ctx)
+	if workErr != nil {
+		return nil, workErr
+	}
+	defer finish()
 	if h == nil {
 		return nil, errors.New("video handler is nil")
 	}
