@@ -450,14 +450,15 @@ func (t *throttledReader) Read(p []byte) (n int, err error) {
 
 // HLSSession represents an active HLS transcoding session
 type HLSSession struct {
-	ordinary     *ordinaryHLSSession
-	shareOwned   *shareHLSOwned
-	vodInput     *vodHLSInput
-	vodIdentity  *hlsSessionIdentity
-	vodDirectory *hlsDirectoryClaim
-	ID           string
-	Path         string
-	OriginalPath string
+	liveSupervisorDone chan struct{} // actual original outer live actor only
+	ordinary           *ordinaryHLSSession
+	shareOwned         *shareHLSOwned
+	vodInput           *vodHLSInput
+	vodIdentity        *hlsSessionIdentity
+	vodDirectory       *hlsDirectoryClaim
+	ID                 string
+	Path               string
+	OriginalPath       string
 	// RequestedSource is the source the client asked for when provider
 	// resolution (Stalker portals, Stremio streams) rewrote Path and
 	// OriginalPath. Share-link access is checked against it; empty means
@@ -2879,6 +2880,7 @@ func (m *HLSManager) CreateLiveSession(ctx context.Context, liveURL, provider, b
 
 	now := time.Now()
 	session := &HLSSession{
+		liveSupervisorDone:      make(chan struct{}),
 		vodDirectory:            claim,
 		ID:                      sessionID,
 		Path:                    liveURL,
@@ -2936,9 +2938,10 @@ func (m *HLSManager) CreateLiveSession(ctx context.Context, liveURL, provider, b
 
 	// Start live transcoding in background
 	go func() {
+		defer close(session.liveSupervisorDone)
 		// The supervisor joins FFmpeg and closes its upstream before releasing.
 		defer func() { session.mu.RLock(); last := session.liveCapacityLease; session.mu.RUnlock(); last.Release() }()
-		if err := m.superviseLiveTranscoding(bgCtx, session); err != nil {
+		if err := m.superviseOriginalLiveTranscoding(bgCtx, session); err != nil {
 			log.Printf("[hls] live session %s transcoding failed: %v", sessionID, err)
 			session.mu.Lock()
 			session.Completed = true
@@ -3052,7 +3055,12 @@ func (m *HLSManager) GetLiveUsage(provider, bucketKey string, maxStreams int) Li
 // startLiveTranscoding starts FFmpeg for live TV HLS output. `resumeFrom` is 0 for a fresh session
 // and the next segment number when restarting a starved one, which appends to the existing playlist
 // instead of truncating it.
+// Legacy isolated process-fixture wrapper. Actual CreateLiveSession enters the
+// concrete original supervisor below; this wrapper grants no managed source.
 func (m *HLSManager) startLiveTranscoding(ctx context.Context, session *HLSSession, resumeFrom int) error {
+	return m.runLiveTranscoding(ctx, session, resumeFrom, nil)
+}
+func (m *HLSManager) runLiveTranscoding(ctx context.Context, session *HLSSession, resumeFrom int, original *liveOriginalSource) error {
 	if m.hlsInputConfigured() {
 		return errVODOwner
 	}
@@ -3091,7 +3099,16 @@ func (m *HLSManager) startLiveTranscoding(ctx context.Context, session *HLSSessi
 	// Share the provider connection with any other session on this channel; see
 	// live_upstream_share.go. HLS inputs are left to FFmpeg below.
 	if key := liveUpstreamShareKey(session.Path, session.LiveTuning); key != "" {
-		sub, shared, err := sharedLiveUpstreams.Subscribe(key, requestsecurity.URLForLog(session.Path), openLiveUpstream(session))
+		var sub *liveUpstreamSubscriber
+		var shared bool
+		var err error
+		if original != nil {
+			sub, shared, err = original.subscribe(ctx, m, session)
+		} else {
+			// Only the explicit isolated legacy wrapper supplies no lifetime
+			// binding. Media permission is still denied above when configured.
+			sub, shared, err = sharedLiveUpstreams.Subscribe(key, requestsecurity.URLForLog(session.Path), openLiveUpstream(session))
+		}
 		switch {
 		case err == nil:
 			// Idempotent; also covers any return before the stdin copier owns it.
@@ -3483,7 +3500,18 @@ func (m *HLSManager) startLiveTranscoding(ctx context.Context, session *HLSSessi
 // Bounded on purpose. A channel that is simply gone would otherwise restart forever and hold an
 // FFmpeg slot; after liveMaxRestarts inside liveRestartWindow the session is left to fail, which is
 // what surfaces a dead channel to the user instead of an eternal spinner.
+// Legacy isolated supervisor fixture; no production caller uses this port.
 func (m *HLSManager) superviseLiveTranscoding(ctx context.Context, session *HLSSession) error {
+	return m.runLiveSupervisor(ctx, session, nil)
+}
+func (m *HLSManager) superviseOriginalLiveTranscoding(ctx context.Context, session *HLSSession) error {
+	original, err := m.captureOriginalLiveSource(session)
+	if err != nil {
+		return err
+	}
+	return m.runLiveSupervisor(ctx, session, original)
+}
+func (m *HLSManager) runLiveSupervisor(ctx context.Context, session *HLSSession, original *liveOriginalSource) error {
 	if m.hlsInputConfigured() {
 		return errVODOwner
 	}
@@ -3517,7 +3545,7 @@ func (m *HLSManager) superviseLiveTranscoding(ctx context.Context, session *HLSS
 			})
 			stopStartup = timer.Stop
 		}
-		err := m.startLiveTranscoding(attemptCtx, session, resumeFrom)
+		err := m.runLiveTranscoding(attemptCtx, session, resumeFrom, original)
 		stopStartup()
 		cancelAttempt()
 		if errors.Is(err, livecapacity.ErrLimit) {

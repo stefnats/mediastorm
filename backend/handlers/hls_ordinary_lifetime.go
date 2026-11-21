@@ -23,15 +23,16 @@ const ordinaryHLSChildLimit = 16
 const ordinaryHLSOutputLimit = 32
 
 type ordinaryHLSManager struct {
-	manager    *HLSManager
-	ctx        context.Context
-	cancel     context.CancelFunc
-	mu         sync.Mutex
-	closed     bool
-	active     int
-	operations sync.WaitGroup
-	pending    map[*ordinaryHLSSession]struct{} // unpublished setup reservations only
-	retired    map[*ordinaryHLSSession]error    // exact ended outputs whose removal failed
+	manager        *HLSManager
+	ctx            context.Context
+	cancel         context.CancelFunc
+	mu             sync.Mutex
+	closed         bool
+	active         int
+	liveReferences int // actual pending/active/closing Live body references
+	operations     sync.WaitGroup
+	pending        map[*ordinaryHLSSession]struct{} // unpublished setup reservations only
+	retired        map[*ordinaryHLSSession]error    // exact ended outputs whose removal failed
 }
 
 type ordinaryHLSSession struct {
