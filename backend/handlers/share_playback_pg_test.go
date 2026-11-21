@@ -516,8 +516,49 @@ func TestSharePlaybackSecondarySourceConsumers(t *testing.T) {
 				return
 			}
 			w := shareInvokeHTTP(t, f, path, handler)
-			if w.Code != 501 || p.calls.Load() != 0 {
-				t.Fatal("unsupported ancillary share opened a source/job", kind, w.Code, p.calls.Load())
+			expected := http.StatusForbidden
+			switch kind {
+			case "live-hls-worker":
+				expected = http.StatusNotImplemented
+			case "subtitle-extract-worker":
+				expected = http.StatusBadRequest
+			case "thumbnail-worker":
+				expected = http.StatusServiceUnavailable
+			case "credits-source":
+				if w.Code != http.StatusAccepted {
+					t.Fatal("actual owned credits admission", w.Code, w.Body.String())
+				}
+				registry := f.video.ancillaryRegistry()
+				registry.mu.Lock()
+				var job *shareAncillaryJob
+				for _, candidate := range registry.jobs {
+					if candidate.kind == "credits" {
+						job = candidate
+					}
+				}
+				registry.mu.Unlock()
+				if job == nil {
+					t.Fatal("actual credits producer was not retained")
+				}
+				defer job.close()
+				select {
+				case <-job.producerDone:
+				case <-time.After(15 * time.Second):
+					t.Fatal("actual credits producer did not join")
+				}
+				if job.guard.handler != f.video || job.profile != f.profileID || job.resource != f.resource || job.token != f.token || job.guard.owner.Check(job.ctx) != nil {
+					t.Fatal("credits producer lost original source/recipient")
+				}
+				job.mu.Lock()
+				actualErr, detected := job.err, job.detected
+				job.mu.Unlock()
+				if actualErr == nil || detected || p.calls.Load() != 1 || p.closed.Load() != 1 {
+					t.Fatal("audio-only source fabricated credits or leaked actual probe body", actualErr, p.calls.Load(), p.closed.Load())
+				}
+				return
+			}
+			if w.Code != expected || p.calls.Load() != 0 {
+				t.Fatal("invalid/unconfigured ancillary request opened a source/job", kind, w.Code, expected, p.calls.Load())
 			}
 		})
 	}

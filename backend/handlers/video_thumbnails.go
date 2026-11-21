@@ -846,7 +846,8 @@ func (m *ThumbnailManager) isInflight(key string) bool {
 }
 
 func (h *VideoHandler) StartThumbnails(w http.ResponseWriter, r *http.Request) {
-	if rejectShareAncillary(w, r) {
+	if shareMediaFrom(r.Context()) != nil {
+		h.shareStartThumbnails(w, r)
 		return
 	}
 	if r.Method == http.MethodOptions {
@@ -960,7 +961,8 @@ func parseThumbnailChapterTimes(values []string) []float64 {
 }
 
 func (h *VideoHandler) GetThumbnailsStatus(w http.ResponseWriter, r *http.Request) {
-	if rejectShareAncillary(w, r) {
+	if shareMediaFrom(r.Context()) != nil {
+		h.shareThumbnailStatus(w, r)
 		return
 	}
 	if r.Method == http.MethodOptions {
@@ -996,7 +998,8 @@ func (h *VideoHandler) GetThumbnailsStatus(w http.ResponseWriter, r *http.Reques
 }
 
 func (h *VideoHandler) ServeThumbnailImage(w http.ResponseWriter, r *http.Request) {
-	if rejectShareAncillary(w, r) {
+	if shareMediaFrom(r.Context()) != nil {
+		h.shareServeThumbnail(w, r)
 		return
 	}
 	if r.Method == http.MethodOptions {

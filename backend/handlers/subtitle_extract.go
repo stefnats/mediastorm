@@ -745,7 +745,8 @@ func (m *SubtitleExtractManager) startExtraction(session *SubtitleExtractSession
 
 // ProbeSubtitleTracks probes a file and returns available subtitle tracks
 func (h *VideoHandler) ProbeSubtitleTracks(w http.ResponseWriter, r *http.Request) {
-	if rejectShareAncillary(w, r) {
+	if shareMediaFrom(r.Context()) != nil {
+		h.shareProbeSubtitles(w, r)
 		return
 	}
 	if r.Method == http.MethodOptions {
@@ -1167,7 +1168,8 @@ func (m *SubtitleExtractManager) ServeSubtitles(w http.ResponseWriter, r *http.R
 
 // StartSubtitleExtract is the HTTP handler to start/get a subtitle extraction session
 func (h *VideoHandler) StartSubtitleExtract(w http.ResponseWriter, r *http.Request) {
-	if rejectShareAncillary(w, r) {
+	if shareMediaFrom(r.Context()) != nil {
+		h.shareStartSubtitle(w, r)
 		return
 	}
 	if r.Method == http.MethodOptions {
@@ -1242,7 +1244,8 @@ func (h *VideoHandler) StartSubtitleExtract(w http.ResponseWriter, r *http.Reque
 
 // ServeExtractedSubtitles serves the VTT file for a subtitle extraction session
 func (h *VideoHandler) ServeExtractedSubtitles(w http.ResponseWriter, r *http.Request) {
-	if rejectShareAncillary(w, r) {
+	if shareMediaFrom(r.Context()) != nil {
+		h.shareServeSubtitle(w, r)
 		return
 	}
 	if r.Method == http.MethodOptions {
