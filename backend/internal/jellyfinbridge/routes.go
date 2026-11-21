@@ -37,7 +37,7 @@ func (s *Server) routes(r *mux.Router) {
 	h("/quickconnect/enabled", s.handleQuickConnectEnabled, get)
 	h("/quickconnect/initiate", s.handleQuickConnectInitiate, post)
 	h("/quickconnect/connect", s.handleQuickConnectConnect, get)
-	h("/quickconnect/authorize", auth(s.handleQuickConnectAuthorize), post)
+	h("/quickconnect/authorize", s.handleQuickConnectAuthorizeRoute, post)
 	h("/playback/bitratetest", auth(s.handleBitrateTest), get)
 	h("/socket", s.handleSocket, get)
 	h("/", func(w http.ResponseWriter, r *http.Request) {

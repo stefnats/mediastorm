@@ -53,6 +53,7 @@ type Server struct {
 	views     *viewCache
 	login     *loginLimiter
 	qc        *quickConnect
+	managedQC *managedQuickConnect
 	tiles     *tileCache
 	live      liveSettings
 	sockets   *socketHub
@@ -119,6 +120,9 @@ func New(deps Deps, cfg config.JellyfinBridgeSettings) *Server {
 		sockets:   newSocketHub(),
 		msKey:     randomBytes(32),
 		states:    userStateCache{entries: map[string]userStateEntry{}},
+	}
+	if s.managedQuickConnectRequired() {
+		s.managedQC, _ = newManagedQuickConnect(deps.ManagedPassword)
 	}
 	for _, cidr := range cfg.TrustedProxies {
 		cidr = strings.TrimSpace(cidr)
@@ -207,6 +211,7 @@ func (s *Server) Start() error {
 	if err != nil {
 		// New started the stores' flush loops; a server that never ran is
 		// discarded, so stop them here.
+		s.managedQC.close()
 		s.ids.close()
 		s.prefs.close()
 		s.tracks.close()
@@ -243,6 +248,10 @@ func (s *Server) Start() error {
 func (s *Server) Shutdown(ctx context.Context) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	// Cancel actual QC request/body/metadata work before waiting for HTTP.
+	// This child belongs to this listener; a controller restart creates a new
+	// issuer from the still-live original Main/Startup runtime.
+	s.managedQC.close()
 	var err error
 	if s.udp != nil {
 		s.udp.close()

@@ -118,7 +118,17 @@ func (i *BridgeQuickConnectIssuer) Approve(r *http.Request, token, client string
 	if err != nil || session.Scope != models.SessionScopeJellyfin || session.ClientID != client {
 		return nil, ErrBridgeQuickConnectUnsupported
 	}
-	core, err := i.core.Approve(checked, c.core)
+	return i.ApproveAuthenticated(checked, c)
+}
+
+// ApproveAuthenticated consumes this exact already-genuine PG request frame.
+// A transport may inspect its Identity DATA only to deny a selector or charge
+// its limiter before this call; no frame clone or recapture occurs here.
+func (i *BridgeQuickConnectIssuer) ApproveAuthenticated(r *http.Request, c *BridgeQuickConnectChallenge) (*BridgeQuickConnectApproval, error) {
+	if !i.valid() || !c.valid(i) || r == nil {
+		return nil, ErrBridgeQuickConnectChanged
+	}
+	core, err := i.core.Approve(r, c.core)
 	if err != nil {
 		return nil, err
 	}
