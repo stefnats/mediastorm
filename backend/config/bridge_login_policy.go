@@ -24,10 +24,11 @@ type bridgeLoginPolicyVersion struct {
 }
 
 type bridgeLoginPolicyRead struct {
-	values      BridgeLoginPolicyValues
-	version     bridgeLoginPolicyVersion
-	digest      [32]byte
-	databaseURL string
+	values                          BridgeLoginPolicyValues
+	version                         bridgeLoginPolicyVersion
+	digest                          [32]byte
+	databaseURL                     string
+	quickConnect, quickConnectValid bool
 }
 
 type BridgeLoginPolicyObservation struct {
