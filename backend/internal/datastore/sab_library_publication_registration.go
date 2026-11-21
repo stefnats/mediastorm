@@ -40,6 +40,8 @@ type SABLibraryPublicationFileView struct {
 	MatchStatus string `json:"matchStatus,omitempty"`
 }
 type SABLibraryPublicationView struct {
+	LibraryID string                          `json:"libraryId"`
+	Ordinals  []int                           `json:"ordinals"`
 	Reference string                          `json:"reference"`
 	State     string                          `json:"state"`
 	Bytes     int64                           `json:"bytes"`
@@ -267,7 +269,7 @@ func (t *sabPublicationRegistrationTx) project(s *sabLibraryPublicationState, re
 	if !matches || len(binding) != 64 || !fresh && binding != publicationOriginalBinding(s) {
 		return SABLibraryPublicationView{}, ErrSABLibraryPublicationChanged
 	}
-	view := SABLibraryPublicationView{Reference: record.OperationID, State: state, Bytes: record.Bytes}
+	view := SABLibraryPublicationView{LibraryID: s.library, Ordinals: append([]int(nil), s.ordinals...), Reference: record.OperationID, State: state, Bytes: record.Bytes}
 	if state == "reserved" {
 		return view, nil
 	}
@@ -638,6 +640,7 @@ func (v *SABLibraryPublicationRead) View() SABLibraryPublicationView {
 		return SABLibraryPublicationView{}
 	}
 	out := v.view
+	out.Ordinals = append([]int(nil), out.Ordinals...)
 	out.Files = append([]SABLibraryPublicationFileView(nil), out.Files...)
 	return out
 }
