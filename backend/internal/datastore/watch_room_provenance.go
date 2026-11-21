@@ -40,23 +40,25 @@ var (
 // WatchRoomAuthority writes original room/invite/source provenance DATA. It
 // cannot admit a guest, mint media/PIN permission or replace a scoped owner.
 type WatchRoomAuthority struct {
-	self        *WatchRoomAuthority
-	store       *DataStore
-	manager     *config.Manager
-	security    *config.ManagedSecurity
-	coordinator *settingscommit.Coordinator
-	ctx         context.Context
-	cancel      context.CancelFunc
-	mu          sync.Mutex
-	closed      bool
-	active      int
-	httpActive  int
-	httpPeers   map[string]int
-	actors      map[string]int
-	partyOwners map[*WatchPartyPlaybackOwner]struct{}
-	operations  sync.WaitGroup
-	once        sync.Once
-	done        chan struct{}
+	self            *WatchRoomAuthority
+	store           *DataStore
+	manager         *config.Manager
+	security        *config.ManagedSecurity
+	coordinator     *settingscommit.Coordinator
+	ctx             context.Context
+	cancel          context.CancelFunc
+	mu              sync.Mutex
+	closed          bool
+	active          int
+	httpActive      int
+	httpPeers       map[string]int
+	actors          map[string]int
+	partyOwners     map[*WatchPartyPlaybackOwner]struct{}
+	partyCheckLanes map[string]*partyPlaybackCheckLane
+	partyCheckCount int
+	operations      sync.WaitGroup
+	once            sync.Once
+	done            chan struct{}
 }
 
 func NewWatchRoomAuthority(lifetime context.Context, store *DataStore, manager *config.Manager, security *config.ManagedSecurity, coordinator *settingscommit.Coordinator) (*WatchRoomAuthority, error) {

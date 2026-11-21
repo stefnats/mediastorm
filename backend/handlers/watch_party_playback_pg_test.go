@@ -145,8 +145,15 @@ func closeOnceChannel(ch chan struct{}) {
 func TestWatchPartyActualMediaOwner(t *testing.T) {
 	for _, kind := range []string{"raw-stream", "metadata", "same-app-direct-url", "restricted-profile-resource", "lookalike-party-denied", "held-provider-read-revocation", "held-response-write-revocation", "source-worker-joins", "runtime-close-joins", "global-vod-boundary-nil", "share-and-full-unchanged", "unsupported-secondary-no-job"} {
 		t.Run(kind, func(t *testing.T) {
-			p := &shareStaticProvider{data: shareWAV()}
+			payload := shareWAV()
+			if kind == "metadata" {
+				payload = shareHLSTestSubtitleMedia(t)
+			}
+			p := &shareStaticProvider{data: payload}
 			f := newPartyHTTP(t, t.Context(), p, "", false)
+			if kind == "metadata" {
+				f.resource = "synthetic:original-HTTP-party.mkv"
+			}
 			if kind == "restricted-profile-resource" {
 				f.resource = "localmedia:party-item/synthetic.wav"
 				for _, q := range []string{`INSERT INTO local_media_libraries(id,name,library_type,root_path)VALUES('party-lib','Synthetic party library','movie','/synthetic')`, `INSERT INTO local_media_items(id,library_id,relative_path,file_path,library_type)VALUES('party-item','party-lib','synthetic.wav','/synthetic/synthetic.wav','movie')`, `INSERT INTO media_library_access_policies(library_id,access_mode)VALUES('party-lib','restricted')`} {
