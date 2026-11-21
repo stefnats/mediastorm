@@ -101,9 +101,12 @@ func (h *VideoHandler) vodOpenStream(ctx context.Context, req streaming.Request)
 		}
 	}
 	if g := shareMediaFrom(ctx); g != nil {
-		if err := g.ensureLease(); err != nil {
-			return nil, err
+		bounded, finish, e := g.beginSourceOperation(ctx)
+		if e != nil {
+			return nil, e
 		}
+		defer finish()
+		ctx = bounded
 	}
 	resp, err := h.streamer.Stream(ctx, req)
 	if g := shareMediaFrom(ctx); g != nil {
@@ -178,9 +181,12 @@ func (h *VideoHandler) vodHTTPDo(client *http.Client, req *http.Request) (*http.
 		return nil, err
 	}
 	if g := shareMediaFrom(req.Context()); g != nil {
-		if err := g.ensureLease(); err != nil {
-			return nil, err
+		ctx, finish, e := g.beginSourceOperation(req.Context())
+		if e != nil {
+			return nil, e
 		}
+		defer finish()
+		req = req.WithContext(ctx)
 	}
 	selected := client
 	if h.vodBoundary != nil || shareMediaFrom(req.Context()) != nil {

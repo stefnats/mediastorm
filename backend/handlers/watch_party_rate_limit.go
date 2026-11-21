@@ -30,6 +30,11 @@ func (h *WatchPartyHandler) GuestRateLimitKey(r *http.Request) (*http.Request, s
 	if err != nil {
 		return r, "", false
 	}
+	if h.publicPartyEntry != nil {
+		// Current managed lookup checked the SAME genuine frame/private SQL.
+		// The returned key is a deny-only budget identity, never auth DATA.
+		return r, guestID, true
+	}
 	verified := verifiedGuest{roomID: roomID, session: session, guestID: guestID}
 	return r.WithContext(context.WithValue(r.Context(), verifiedGuestContextKey{}, verified)), guestID, true
 }

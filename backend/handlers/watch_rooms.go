@@ -384,7 +384,7 @@ func (w *watchRoomHTTPWriter) deny() {
 		return
 	}
 	w.started = true
-	for _, h := range []string{"Content-Length", "Content-Range", "Content-Encoding", "Location"} {
+	for _, h := range []string{"Content-Length", "Content-Range", "Content-Encoding", "Location", "Set-Cookie"} {
 		w.Header().Del(h)
 	}
 	writeJSONError(w.ResponseWriter, "watch room operation unavailable", http.StatusServiceUnavailable)

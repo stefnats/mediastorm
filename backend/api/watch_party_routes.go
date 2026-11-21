@@ -37,7 +37,7 @@ func registerWatchPartyGuestRoutes(router *mux.Router, handler *handlers.WatchPa
 	}
 	limiter := NewIPRateLimiter(rate.Every(time.Second), 20)
 	wrap := func(next http.HandlerFunc) http.HandlerFunc {
-		return watchPartyRateLimitHandlerFunc(limiter, handler.GuestRateLimitKey, next)
+		return handler.BoundedManagedPartyEntry(http.HandlerFunc(watchPartyRateLimitHandlerFunc(limiter, handler.GuestRateLimitKey, next))).ServeHTTP
 	}
 	router.HandleFunc("/watch-party/room/{roomID}", wrap(handler.RoomSnapshot)).Methods(http.MethodGet)
 	router.HandleFunc("/watch-party/room/{roomID}/heartbeat", wrap(handler.Heartbeat)).Methods(http.MethodPost)
@@ -52,11 +52,12 @@ func RegisterWatchPartyPageRoutes(router *mux.Router, handler *handlers.WatchPar
 		return
 	}
 	invitations := NewIPRateLimiter(rate.Every(time.Second), 20)
+	wrap := func(next http.HandlerFunc) http.HandlerFunc { return handler.BoundedManagedPartyEntry(next).ServeHTTP }
 	router.HandleFunc("/watch-party", handler.Landing).Methods(http.MethodGet)
-	router.HandleFunc("/watch-party/code", RateLimitHandlerFunc(invitations, handler.ResolveCode)).Methods(http.MethodPost)
-	router.HandleFunc("/watch-party/code/{code}", RateLimitHandlerFunc(invitations, handler.OpenCode)).Methods(http.MethodGet)
-	router.HandleFunc("/watch-party/code/{code}", RateLimitHandlerFunc(invitations, handler.JoinCode)).Methods(http.MethodPost)
-	router.HandleFunc("/watch-party/room/{roomID}", handler.RoomPage).Methods(http.MethodGet)
-	router.HandleFunc("/watch-party/{token}", RateLimitHandlerFunc(invitations, handler.OpenToken)).Methods(http.MethodGet)
-	router.HandleFunc("/watch-party/{token}", RateLimitHandlerFunc(invitations, handler.JoinToken)).Methods(http.MethodPost)
+	router.HandleFunc("/watch-party/code", wrap(RateLimitHandlerFunc(invitations, handler.ResolveCode))).Methods(http.MethodPost)
+	router.HandleFunc("/watch-party/code/{code}", wrap(RateLimitHandlerFunc(invitations, handler.OpenCode))).Methods(http.MethodGet)
+	router.HandleFunc("/watch-party/code/{code}", wrap(RateLimitHandlerFunc(invitations, handler.JoinCode))).Methods(http.MethodPost)
+	router.HandleFunc("/watch-party/room/{roomID}", wrap(handler.RoomPage)).Methods(http.MethodGet)
+	router.HandleFunc("/watch-party/{token}", wrap(RateLimitHandlerFunc(invitations, handler.OpenToken))).Methods(http.MethodGet)
+	router.HandleFunc("/watch-party/{token}", wrap(RateLimitHandlerFunc(invitations, handler.JoinToken))).Methods(http.MethodPost)
 }

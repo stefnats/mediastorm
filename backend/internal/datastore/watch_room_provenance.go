@@ -53,6 +53,7 @@ type WatchRoomAuthority struct {
 	httpActive  int
 	httpPeers   map[string]int
 	actors      map[string]int
+	partyOwners map[*WatchPartyPlaybackOwner]struct{}
 	operations  sync.WaitGroup
 	once        sync.Once
 	done        chan struct{}
@@ -63,7 +64,7 @@ func NewWatchRoomAuthority(lifetime context.Context, store *DataStore, manager *
 		return nil, ErrWatchRoomUnavailable
 	}
 	ctx, cancel := context.WithCancel(lifetime)
-	a := &WatchRoomAuthority{store: store, manager: manager, security: security, coordinator: coordinator, ctx: ctx, cancel: cancel, actors: make(map[string]int), httpPeers: make(map[string]int), done: make(chan struct{})}
+	a := &WatchRoomAuthority{store: store, manager: manager, security: security, coordinator: coordinator, ctx: ctx, cancel: cancel, actors: make(map[string]int), partyOwners: make(map[*WatchPartyPlaybackOwner]struct{}), httpPeers: make(map[string]int), done: make(chan struct{})}
 	a.self = a
 	return a, nil
 }
@@ -92,7 +93,14 @@ func (a *WatchRoomAuthority) Close() {
 		a.mu.Lock()
 		a.closed = true
 		a.cancel()
+		owners := make([]*WatchPartyPlaybackOwner, 0, len(a.partyOwners))
+		for owner := range a.partyOwners {
+			owners = append(owners, owner)
+		}
 		a.mu.Unlock()
+		for _, owner := range owners {
+			owner.Close()
+		}
 		a.operations.Wait()
 		close(a.done)
 	})

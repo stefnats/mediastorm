@@ -26,21 +26,166 @@ type sharePlaybackInstallation struct {
 	runtime *datastore.ShareLinkRedeemer
 	pins    *profileunlock.PGProfilePins
 }
+type partyPlaybackInstallation struct {
+	handler *VideoHandler
+	runtime *datastore.WatchRoomAuthority
+	pins    *profileunlock.PGProfilePins
+}
+
+// This private concrete dispatcher holds exactly one genuine scoped core. It
+// supplies no validator callback or public permission interface.
+type scopedMediaOwner struct {
+	self  *scopedMediaOwner
+	share *profileunlock.SharePlaybackOwner
+	party *profileunlock.WatchPartyPlaybackOwner
+}
+type scopedMediaLease struct {
+	self  *scopedMediaLease
+	share *profileunlock.SharePlaybackSourceLease
+	party *profileunlock.WatchPartyPlaybackSourceLease
+}
+
+func newSharedMediaOwner(owner *profileunlock.SharePlaybackOwner) *scopedMediaOwner {
+	o := &scopedMediaOwner{share: owner}
+	o.self = o
+	return o
+}
+func newPartyMediaOwner(owner *profileunlock.WatchPartyPlaybackOwner) *scopedMediaOwner {
+	o := &scopedMediaOwner{party: owner}
+	o.self = o
+	return o
+}
+func (o *scopedMediaOwner) valid() bool {
+	return o != nil && o.self == o && (o.share != nil) != (o.party != nil)
+}
+func (o *scopedMediaOwner) Context() context.Context {
+	if o.valid() {
+		if o.share != nil {
+			return o.share.Context()
+		}
+		return o.party.Context()
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	return ctx
+}
+func (o *scopedMediaOwner) ExpiresAt() time.Time {
+	if !o.valid() {
+		return time.Time{}
+	}
+	if o.share != nil {
+		return o.share.ExpiresAt()
+	}
+	return o.party.ExpiresAt()
+}
+func (o *scopedMediaOwner) ProfileID() string {
+	if !o.valid() {
+		return ""
+	}
+	if o.share != nil {
+		return o.share.ProfileID()
+	}
+	return o.party.ProfileID()
+}
+func (o *scopedMediaOwner) Resource() string {
+	if !o.valid() {
+		return ""
+	}
+	if o.share != nil {
+		return o.share.Resource()
+	}
+	return o.party.Resource()
+}
+func (o *scopedMediaOwner) Check(ctx context.Context) error {
+	if !o.valid() {
+		return datastore.ErrSharePlaybackChanged
+	}
+	if o.share != nil {
+		return o.share.Check(ctx)
+	}
+	return o.party.Check(ctx)
+}
+func (o *scopedMediaOwner) CheckRequest(r *http.Request, profile, resource string) error {
+	if !o.valid() {
+		return datastore.ErrSharePlaybackChanged
+	}
+	if o.share != nil {
+		return o.share.CheckRequest(r, profile, resource)
+	}
+	return o.party.CheckRequest(r, profile, resource)
+}
+func (o *scopedMediaOwner) BindResourceRequest(r *http.Request) (*http.Request, error) {
+	if !o.valid() {
+		return nil, datastore.ErrSharePlaybackChanged
+	}
+	if o.share != nil {
+		return o.share.BindResourceRequest(r)
+	}
+	return o.party.BindResourceRequest(r)
+}
+func (o *scopedMediaOwner) Handoff(r *http.Request) (*scopedMediaLease, error) {
+	if !o.valid() {
+		return nil, datastore.ErrSharePlaybackChanged
+	}
+	l := &scopedMediaLease{}
+	l.self = l
+	var e error
+	if o.share != nil {
+		l.share, e = o.share.Handoff(r)
+	} else {
+		l.party, e = o.party.Handoff(r)
+	}
+	if e != nil {
+		return nil, e
+	}
+	return l, nil
+}
+func (o *scopedMediaOwner) Close() {
+	if o.valid() {
+		if o.share != nil {
+			o.share.Close()
+		} else {
+			o.party.Close()
+		}
+	}
+}
+func (l *scopedMediaLease) Close() {
+	if l != nil && l.self == l && (l.share != nil) != (l.party != nil) {
+		if l.share != nil {
+			l.share.Close()
+		} else {
+			l.party.Close()
+		}
+	}
+}
+func (l *scopedMediaLease) Context() context.Context {
+	if l != nil && l.self == l && (l.share != nil) != (l.party != nil) {
+		if l.share != nil {
+			return l.share.Context()
+		}
+		return l.party.Context()
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	return ctx
+}
+
 type shareMediaKey struct{}
 
 // One actual consumer owns one original source lease. It may transfer that
 // SAME lease once to its real async producer, never refresh authentication.
 type shareMediaGuard struct {
 	handler                 *VideoHandler
-	owner                   *profileunlock.SharePlaybackOwner
+	owner                   *scopedMediaOwner
 	original                *http.Request
 	ctx                     context.Context
 	cancel                  context.CancelFunc
 	stopOriginal, stopOwner func()
 	mu                      sync.Mutex
-	lease                   *profileunlock.SharePlaybackSourceLease
+	lease                   *scopedMediaLease
 	transferred, closed     bool
 	bodies                  map[*shareMediaBody]struct{}
+	ioActive                int
 	operations              sync.WaitGroup
 	watchDone               chan struct{}
 	once                    sync.Once
@@ -56,6 +201,14 @@ func (h *VideoHandler) SetManagedSharePlayback(runtime *datastore.ShareLinkRedee
 	}
 	return nil
 }
+func (h *VideoHandler) SetManagedWatchPartyPlayback(runtime *datastore.WatchRoomAuthority, pins *profileunlock.PGProfilePins) error {
+	h.partyPlayback = &partyPlaybackInstallation{handler: h, runtime: runtime, pins: pins}
+	if runtime == nil || pins == nil || !pins.WatchPartyPlaybackReady(runtime) {
+		return datastore.ErrWatchRoomUnavailable
+	}
+	return nil
+}
+
 func shareMediaFrom(ctx context.Context) *shareMediaGuard {
 	if ctx == nil {
 		return nil
@@ -107,14 +260,10 @@ func shareSelectedProfile(r *http.Request) (string, error) {
 // ownership/body/source middleware. Ordinary full/party routes stay unchanged.
 func (h *VideoHandler) ManagedSharePlaybackEntry(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		installed := h.sharePlayback
+		installed, partyInstalled := h.sharePlayback, h.partyPlayback
 		session, ok := auth.GetSession(r)
-		if installed == nil || !ok || session.Scope != models.SessionScopeStream {
+		if !ok || session.Scope != models.SessionScopeStream || installed == nil && partyInstalled == nil {
 			next.ServeHTTP(w, r)
-			return
-		}
-		if installed.pins == nil {
-			shareMediaError(w, datastore.ErrSharePlaybackUnavailable)
 			return
 		}
 		selected, err := shareSelectedProfile(r)
@@ -122,19 +271,46 @@ func (h *VideoHandler) ManagedSharePlaybackEntry(next http.Handler) http.Handler
 			shareMediaError(w, err)
 			return
 		}
-		owner, err := installed.pins.CaptureSharePlaybackOwner(r, selected, session.ScopeResource)
-		if errors.Is(err, datastore.ErrSharePlaybackParty) {
-			next.ServeHTTP(w, r)
-			return
+		var owner *scopedMediaOwner
+		if partyInstalled != nil && partyInstalled.pins != nil {
+			actual, e := partyInstalled.pins.CaptureWatchPartyPlaybackOwner(r, selected, session.ScopeResource)
+			if e == nil && actual != nil {
+				if partyInstalled.handler != h || partyInstalled.runtime == nil || !partyInstalled.pins.WatchPartyPlaybackReady(partyInstalled.runtime) {
+					actual.Close()
+					shareMediaError(w, datastore.ErrSharePlaybackUnavailable)
+					return
+				}
+				owner = newPartyMediaOwner(actual)
+			} else if !errors.Is(e, profileunlock.ErrWatchPartyNotOriginal) {
+				shareMediaError(w, e)
+				return
+			}
 		}
-		if err != nil || owner == nil {
-			shareMediaError(w, err)
-			return
-		}
-		if installed.handler != h || installed.runtime == nil || !installed.pins.SharePlaybackReady(installed.runtime) {
-			owner.Close()
-			shareMediaError(w, datastore.ErrSharePlaybackUnavailable)
-			return
+		if owner == nil {
+			if installed == nil || installed.pins == nil {
+				shareMediaError(w, datastore.ErrSharePlaybackUnavailable)
+				return
+			}
+			actual, e := installed.pins.CaptureSharePlaybackOwner(r, selected, session.ScopeResource)
+			if errors.Is(e, datastore.ErrSharePlaybackParty) {
+				if partyInstalled != nil {
+					shareMediaError(w, datastore.ErrSharePlaybackUnavailable)
+					return
+				}
+				// Only explicit isolated legacy composition reaches this branch.
+				next.ServeHTTP(w, r)
+				return
+			}
+			if e != nil || actual == nil {
+				shareMediaError(w, e)
+				return
+			}
+			if installed.handler != h || installed.runtime == nil || !installed.pins.SharePlaybackReady(installed.runtime) {
+				actual.Close()
+				shareMediaError(w, datastore.ErrSharePlaybackUnavailable)
+				return
+			}
+			owner = newSharedMediaOwner(actual)
 		}
 		if shareInitialPath(r.URL.Path) && selected == "" {
 			owner.Close()
@@ -363,10 +539,11 @@ func (g *shareMediaGuard) borrowHTTP(w http.ResponseWriter, r *http.Request, pro
 		return w, r, noop, noop, datastore.ErrSharePlaybackChanged
 	}
 	g.mu.Lock()
-	if g.closed || g.ctx.Err() != nil {
+	if g.closed || g.ctx.Err() != nil || g.owner.party != nil && g.ioActive+len(g.bodies) >= 32 {
 		g.mu.Unlock()
 		return w, r, noop, noop, datastore.ErrSharePlaybackChanged
 	}
+	g.ioActive++
 	g.operations.Add(1)
 	g.mu.Unlock()
 	ctx, cancel := context.WithCancel(r.Context())
@@ -388,6 +565,9 @@ func (g *shareMediaGuard) borrowHTTP(w http.ResponseWriter, r *http.Request, pro
 			}
 			stopSource()
 			cancel()
+			g.mu.Lock()
+			g.ioActive--
+			g.mu.Unlock()
 			g.operations.Done()
 		})
 	}
@@ -400,6 +580,51 @@ func (g *shareMediaGuard) borrowHTTP(w http.ResponseWriter, r *http.Request, pro
 		return w, r, noop, noop, datastore.ErrSharePlaybackChanged
 	}
 	return writer, request, flush, cleanup, nil
+}
+
+type scopedSourceOpenKey struct{}
+type scopedSourceOpen struct {
+	self                *scopedSourceOpen
+	guard               *shareMediaGuard
+	transferred, closed bool
+}
+
+// The pending slot owns only actual IO lifetime. Permission is still the
+// concrete original owner's current check; this context value cannot grant it.
+func (g *shareMediaGuard) beginSourceOperation(ctx context.Context) (context.Context, func(), error) {
+	noop := func() {}
+	if g == nil || ctx == nil || ctx.Err() != nil {
+		return ctx, noop, datastore.ErrSharePlaybackChanged
+	}
+	if e := g.current(ctx); e != nil {
+		return ctx, noop, e
+	}
+	if e := g.ensureLease(); e != nil {
+		return ctx, noop, e
+	}
+	g.mu.Lock()
+	if g.closed || g.ctx.Err() != nil || g.owner.party != nil && g.ioActive+len(g.bodies) >= 32 {
+		g.mu.Unlock()
+		return ctx, noop, errors.Join(datastore.ErrSharePlaybackUnavailable, datastore.ErrSharePlaybackBusy)
+	}
+	op := &scopedSourceOpen{guard: g}
+	op.self = op
+	g.ioActive++
+	g.operations.Add(1)
+	g.mu.Unlock()
+	var once sync.Once
+	finish := func() {
+		once.Do(func() {
+			g.mu.Lock()
+			if !op.transferred {
+				g.ioActive--
+			}
+			op.closed = true
+			g.mu.Unlock()
+			g.operations.Done()
+		})
+	}
+	return context.WithValue(ctx, scopedSourceOpenKey{}, op), finish, nil
 }
 
 func (g *shareMediaGuard) wrapProviderBody(ctx context.Context, body io.ReadCloser, provider streaming.Provider, method string, status int) (io.ReadCloser, error) {
@@ -422,14 +647,29 @@ func (g *shareMediaGuard) wrapBodyKind(ctx context.Context, body io.ReadCloser, 
 	b := &shareMediaBody{guard: g, ctx: ctx, body: body, genuineNZB: genuine, expectedNZB: expectedUsenet, done: make(chan struct{})}
 	// An opener can return after its original source was retired. Retain and
 	// physically join that actual body too; ordinary Close is not an NZB join.
+	pending, _ := ctx.Value(scopedSourceOpenKey{}).(*scopedSourceOpen)
 	g.mu.Lock()
+	reserved := pending != nil && pending.self == pending && pending.guard == g && !pending.closed && !pending.transferred
 	retired := g.closed || g.ctx.Err() != nil
-	g.bodies[b] = struct{}{}
-	g.mu.Unlock()
-	if retired {
+	if retired || g.owner.party != nil && !reserved {
+		// The actual original pending/HLS producer still owns this late body.
+		// Join it before returning to that producer; never Add after Close/Wait.
+		g.mu.Unlock()
 		_ = b.Close()
 		return nil, datastore.ErrSharePlaybackChanged
 	}
+	if reserved {
+		pending.transferred = true
+		g.ioActive--
+	} else if g.owner.party != nil && g.ioActive+len(g.bodies) >= 32 {
+		g.mu.Unlock()
+		_ = b.Close()
+		return nil, datastore.ErrSharePlaybackBusy
+	}
+	// Pending -> actual registered body is atomic under the same closed gate.
+	// Its charge remains until the genuine body/worker/ref cleanup completes.
+	g.bodies[b] = struct{}{}
+	g.mu.Unlock()
 	if err := g.current(ctx); err != nil {
 		_ = b.Close()
 		return nil, err

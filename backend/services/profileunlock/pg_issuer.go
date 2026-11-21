@@ -112,6 +112,8 @@ type PGProfilePins struct {
 	parentModeBytes int
 	managedShare    bool
 	sharePlayback   *datastore.ShareLinkRedeemer
+	managedParty    bool
+	partyPlayback   *datastore.WatchRoomAuthority
 }
 
 func NewPGProfilePins(store *datastore.DataStore, scoped ...*sessions.Service) *PGProfilePins {
@@ -142,7 +144,21 @@ func (v *PGProfilePins) Authenticate(r *http.Request, token, clientID string) (*
 		resolver = v.scopeSessions.ResolveProfilePinStreamResource
 	}
 	beforeScope, _ := auth.GetSession(checked)
-	checked, err = v.store.ResolveProfilePinStreamRequest(checked, resolver)
+	if beforeScope.Scope == models.SessionScopeStream && strings.HasPrefix(beforeScope.ScopeResource, "watch-party-playback:v1:") {
+		runtime, selected, partyErr := v.partyRuntime()
+		if selected {
+			if partyErr != nil {
+				release()
+				return nil, nil, partyAuthenticationError(partyErr)
+			}
+			checked, err = runtime.ResolveOriginalPartyRequest(checked)
+			err = partyAuthenticationError(err)
+		} else {
+			checked, err = v.store.ResolveProfilePinStreamRequest(checked, resolver)
+		}
+	} else {
+		checked, err = v.store.ResolveProfilePinStreamRequest(checked, resolver)
+	}
 	if err != nil {
 		release()
 		return nil, nil, err

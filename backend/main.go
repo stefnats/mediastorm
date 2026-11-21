@@ -1259,6 +1259,9 @@ func main() {
 	if shareErr := configureManagedSharePlayback(managedStartup, store, currentProfilePins, videoHandler, shareHandler); shareErr != nil {
 		log.Printf("[share] managed playback unavailable: %v", shareErr)
 	}
+	if partyErr := api.ConfigureManagedWatchPartyPlayback(managedStartup, store, currentProfilePins, videoHandler, watchPartyHandler); partyErr != nil {
+		log.Printf("[watch-together] managed public playback unavailable: %v", partyErr)
+	}
 
 	profileSecurityPolicy := api.CachedSecuritySettings(cfgManager, 3*time.Second)
 	profileRecoveryHandler := handlers.NewProfileRecoveryHandler(profile_recovery.NewService(store, userService, userSettingsService, currentProfilePins), profileSecurityPolicy)

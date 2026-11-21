@@ -127,6 +127,7 @@ type VideoHandler struct {
 	recordingAccess  *RecordingStreamAccess
 	vodBoundary      *vodBoundary
 	sharePlayback    *sharePlaybackInstallation
+	partyPlayback    *partyPlaybackInstallation
 	shareAncillaryMu sync.Mutex
 	shareAncillary   *shareAncillaryRegistry
 
