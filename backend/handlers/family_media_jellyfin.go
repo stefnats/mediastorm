@@ -27,6 +27,7 @@ type familyJellyfinRawHandler struct {
 	manager      *config.Manager
 	bridge       func(context.Context, func()) func()
 	completion   func(<-chan struct{})
+	original     context.Context
 	mu           sync.Mutex
 	closed       bool
 	active       map[*familyJellyfinRawEntry]struct{}
@@ -34,24 +35,30 @@ type familyJellyfinRawHandler struct {
 	done         chan struct{}
 }
 type familyJellyfinRawEntry struct {
-	handler *familyJellyfinRawHandler
-	ctx     context.Context
-	cancel  context.CancelFunc
-	done    chan struct{}
-	once    sync.Once
+	handler     *familyJellyfinRawHandler
+	ctx         context.Context
+	cancel      context.CancelFunc
+	done        chan struct{}
+	once        sync.Once
+	stopRuntime func()
 }
 
 func newFamilyJellyfinRawHandler(deps FamilyMediaDependencies, manager *config.Manager, remote *remotemedia.Service) (*familyJellyfinRawHandler, error) {
-	sources, err := remotemedia.NewFamilyJellyfinSources(deps.Store, manager, remote)
-	if err != nil || !sources.ReadyFor(deps.Store, manager) {
-		return nil, profileunlock.ErrFamilyMediaUnavailable
-	}
-	installation, err := InstallFamilyMedia(deps)
+	installed, err := InstallFamilyMedia(deps)
 	if err != nil {
+		return nil, err
+	}
+	return newFamilyJellyfinRawHandlerForInstallation(installed, manager, remote)
+}
+func newFamilyJellyfinRawHandlerForInstallation(installed *FamilyMediaInstallation, manager *config.Manager, remote *remotemedia.Service) (*familyJellyfinRawHandler, error) {
+	if !installed.valid() {
 		return nil, profileunlock.ErrFamilyMediaUnavailable
 	}
-	return &familyJellyfinRawHandler{installation: installation, sources: sources, store: deps.Store, manager: manager,
-		bridge: familyMediaAfterFunc, active: make(map[*familyJellyfinRawEntry]struct{}), done: make(chan struct{})}, nil
+	sources, err := remotemedia.NewFamilyJellyfinSources(installed.deps.Store, manager, remote)
+	if err != nil || !sources.ReadyFor(installed.deps.Store, manager) {
+		return nil, profileunlock.ErrFamilyMediaUnavailable
+	}
+	return &familyJellyfinRawHandler{installation: installed, sources: sources, store: installed.deps.Store, manager: manager, original: installed.original, bridge: familyMediaAfterFunc, active: make(map[*familyJellyfinRawEntry]struct{}), done: make(chan struct{})}, nil
 }
 
 func (h *familyJellyfinRawHandler) admit(ctx context.Context) (*familyJellyfinRawEntry, error) {
@@ -60,7 +67,7 @@ func (h *familyJellyfinRawHandler) admit(ctx context.Context) (*familyJellyfinRa
 	}
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	if h.closed || h.active == nil {
+	if h.closed || h.active == nil || h.original != nil && h.original.Err() != nil {
 		return nil, profileunlock.ErrFamilyMediaUnavailable
 	}
 	if len(h.active) >= 8 {
@@ -68,11 +75,17 @@ func (h *familyJellyfinRawHandler) admit(ctx context.Context) (*familyJellyfinRa
 	}
 	life, cancel := context.WithCancel(ctx)
 	entry := &familyJellyfinRawEntry{handler: h, ctx: life, cancel: cancel, done: make(chan struct{})}
+	if h.original != nil {
+		entry.stopRuntime = familyMediaAfterFunc(h.original, cancel)
+	}
 	h.active[entry] = struct{}{}
 	return entry, nil
 }
 func (entry *familyJellyfinRawEntry) finish() {
 	entry.once.Do(func() {
+		if entry.stopRuntime != nil {
+			entry.stopRuntime()
+		}
 		entry.cancel()
 		entry.handler.mu.Lock()
 		delete(entry.handler.active, entry)
@@ -81,23 +94,35 @@ func (entry *familyJellyfinRawEntry) finish() {
 	})
 }
 
-// Close is an external lifecycle operation. It signals all requests before
-// joining any one, and never runs from an admitted handler or cancel callback.
+func (h *familyJellyfinRawHandler) signalClose() {
+	if h == nil {
+		return
+	}
+	h.mu.Lock()
+	h.closed = true
+	entries := make([]*familyJellyfinRawEntry, 0, len(h.active))
+	for entry := range h.active {
+		entries = append(entries, entry)
+	}
+	h.mu.Unlock()
+	for _, entry := range entries {
+		entry.cancel()
+	}
+}
+
+// Close is external and joins actual requests after signalling every entry.
 func (h *familyJellyfinRawHandler) Close() {
 	if h == nil || h.done == nil {
 		return
 	}
 	h.once.Do(func() {
+		h.signalClose()
 		h.mu.Lock()
-		h.closed = true
 		entries := make([]*familyJellyfinRawEntry, 0, len(h.active))
 		for entry := range h.active {
 			entries = append(entries, entry)
 		}
 		h.mu.Unlock()
-		for _, entry := range entries {
-			entry.cancel()
-		}
 		for _, entry := range entries {
 			<-entry.done
 		}
@@ -241,6 +266,10 @@ func (h *familyJellyfinRawHandler) open(runtime *familyMediaRuntime, setup conte
 }
 
 func (h *familyJellyfinRawHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	h.serveHTTP(w, r)
+}
+
+func (h *familyJellyfinRawHandler) serveHTTP(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Cache-Control", "private, no-store")
 	w.Header().Set("X-Content-Type-Options", "nosniff")
 	w.Header().Set("Allow", "GET, OPTIONS")
@@ -261,8 +290,27 @@ func (h *familyJellyfinRawHandler) ServeHTTP(w http.ResponseWriter, r *http.Requ
 		familyJellyfinRawDeny(w, err)
 		return
 	}
-	defer entry.finish() // q.Close below must finish before this entry refunds.
-	r = r.WithContext(entry.ctx)
+	defer entry.finish() // q.Close and physical final Flush precede refund.
+	if h.original != nil {
+		output, stop, e := familyKnownRawOutput(w, entry.ctx)
+		if e != nil {
+			familyJellyfinRawDeny(w, e)
+			return
+		}
+		defer stop()
+		completed := false
+		defer func() {
+			if completed && output.FlushError() != nil {
+				panic(http.ErrAbortHandler)
+			}
+		}()
+		h.serveEntry(output, r.WithContext(entry.ctx), entry)
+		completed = true
+		return
+	}
+	h.serveEntry(w, r.WithContext(entry.ctx), entry)
+}
+func (h *familyJellyfinRawHandler) serveEntry(w http.ResponseWriter, r *http.Request, entry *familyJellyfinRawEntry) {
 	item, err := familyJellyfinRawItem(r)
 	if err != nil {
 		http.Error(w, "Invalid media download request.", http.StatusBadRequest)
@@ -273,6 +321,12 @@ func (h *familyJellyfinRawHandler) ServeHTTP(w http.ResponseWriter, r *http.Requ
 		return
 	}
 	defer q.Close()
+	h.serveCaptured(w, r, q, item)
+	if err := http.NewResponseController(w).Flush(); err != nil {
+		panic(http.ErrAbortHandler)
+	}
+}
+func (h *familyJellyfinRawHandler) serveCaptured(w http.ResponseWriter, r *http.Request, q *FamilyMediaRequest, item string) {
 	runtime, err := q.adoptRuntime(r)
 	if err != nil {
 		familyJellyfinRawDeny(w, err)
@@ -302,7 +356,7 @@ func (h *familyJellyfinRawHandler) ServeHTTP(w http.ResponseWriter, r *http.Requ
 		familyJellyfinRawDeny(w, err)
 		return
 	}
-	defer body.Close()
+
 	info := stream.Info()
 	if info.Length <= 0 || info.Length > 8<<30 || stream.ExpiresAt().IsZero() || familyJellyfinRawCurrent(consumer, stream) != nil {
 		familyJellyfinRawDeny(w, profileunlock.ErrFamilyMediaChanged)
@@ -333,6 +387,9 @@ func (h *familyJellyfinRawHandler) ServeHTTP(w http.ResponseWriter, r *http.Requ
 	}
 	writer.WriteHeader(http.StatusOK)
 	if familyJellyfinRawCurrent(consumer, stream) != nil || familyJellyfinRawCopy(consumer, stream, writer, body, info.Length) != nil {
+		panic(http.ErrAbortHandler)
+	}
+	if e := http.NewResponseController(writer).Flush(); e != nil || familyJellyfinRawCurrent(consumer, stream) != nil {
 		panic(http.ErrAbortHandler)
 	}
 }
