@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"net/http"
 	"strings"
 	"time"
@@ -45,6 +46,10 @@ func (h *WatchRoomsHandler) Create(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *WatchRoomsHandler) InviteAccount(w http.ResponseWriter, r *http.Request) {
+	if h.managedRoom != nil {
+		h.serveManagedNative(w, r, nativeInviteAccount)
+		return
+	}
 	var body struct {
 		Username string `json:"username"`
 	}
@@ -61,6 +66,10 @@ func (h *WatchRoomsHandler) InviteAccount(w http.ResponseWriter, r *http.Request
 }
 
 func (h *WatchRoomsHandler) AccountInvitations(w http.ResponseWriter, r *http.Request) {
+	if h.managedRoom != nil {
+		h.serveManagedNative(w, r, nativeAccountInvitations)
+		return
+	}
 	invites, err := h.service.AccountInvitations(r.Context(), auth.GetAccountID(r))
 	if err != nil {
 		h.writeError(w, err)
@@ -70,6 +79,10 @@ func (h *WatchRoomsHandler) AccountInvitations(w http.ResponseWriter, r *http.Re
 }
 
 func (h *WatchRoomsHandler) RoomAccountInvitations(w http.ResponseWriter, r *http.Request) {
+	if h.managedRoom != nil {
+		h.serveManagedNative(w, r, nativeRoomAccountInvitations)
+		return
+	}
 	invites, err := h.service.RoomAccountInvitations(r.Context(), auth.GetAccountID(r), mux.Vars(r)["userID"], mux.Vars(r)["roomID"])
 	if err != nil {
 		h.writeError(w, err)
@@ -79,6 +92,10 @@ func (h *WatchRoomsHandler) RoomAccountInvitations(w http.ResponseWriter, r *htt
 }
 
 func (h *WatchRoomsHandler) AcceptAccountInvitation(w http.ResponseWriter, r *http.Request) {
+	if h.managedRoom != nil {
+		h.serveManagedNative(w, r, nativeAcceptAccountInvitation)
+		return
+	}
 	room, err := h.service.AcceptAccountInvitation(r.Context(), auth.GetAccountID(r), mux.Vars(r)["userID"], mux.Vars(r)["inviteID"])
 	if err != nil {
 		h.writeError(w, err)
@@ -88,6 +105,10 @@ func (h *WatchRoomsHandler) AcceptAccountInvitation(w http.ResponseWriter, r *ht
 }
 
 func (h *WatchRoomsHandler) DeclineAccountInvitation(w http.ResponseWriter, r *http.Request) {
+	if h.managedRoom != nil {
+		h.serveManagedNative(w, r, nativeDeclineAccountInvitation)
+		return
+	}
 	if err := h.service.DeclineAccountInvitation(r.Context(), auth.GetAccountID(r), mux.Vars(r)["inviteID"]); err != nil {
 		h.writeError(w, err)
 		return
@@ -96,6 +117,10 @@ func (h *WatchRoomsHandler) DeclineAccountInvitation(w http.ResponseWriter, r *h
 }
 
 func (h *WatchRoomsHandler) RevokeAccountInvitation(w http.ResponseWriter, r *http.Request) {
+	if h.managedRoom != nil {
+		h.serveManagedNative(w, r, nativeRevokeAccountInvitation)
+		return
+	}
 	err := h.service.RevokeAccountInvitation(r.Context(), auth.GetAccountID(r), mux.Vars(r)["userID"], mux.Vars(r)["roomID"], mux.Vars(r)["inviteID"])
 	if err != nil {
 		h.writeError(w, err)
@@ -105,6 +130,10 @@ func (h *WatchRoomsHandler) RevokeAccountInvitation(w http.ResponseWriter, r *ht
 }
 
 func (h *WatchRoomsHandler) Invitations(w http.ResponseWriter, r *http.Request) {
+	if h.managedRoom != nil {
+		h.serveManagedNative(w, r, nativeInvitations)
+		return
+	}
 	rooms, err := h.service.Invitations(r.Context(), mux.Vars(r)["userID"])
 	if err != nil {
 		h.writeError(w, err)
@@ -114,6 +143,10 @@ func (h *WatchRoomsHandler) Invitations(w http.ResponseWriter, r *http.Request) 
 }
 
 func (h *WatchRoomsHandler) Get(w http.ResponseWriter, r *http.Request) {
+	if h.managedRoom != nil {
+		h.serveManagedNative(w, r, nativeGet)
+		return
+	}
 	room, err := h.service.Get(r.Context(), mux.Vars(r)["roomID"], mux.Vars(r)["userID"])
 	if err != nil {
 		h.writeError(w, err)
@@ -123,6 +156,10 @@ func (h *WatchRoomsHandler) Get(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *WatchRoomsHandler) Join(w http.ResponseWriter, r *http.Request) {
+	if h.managedRoom != nil {
+		h.serveManagedNative(w, r, nativeJoin)
+		return
+	}
 	var body struct {
 		ClientID     string                             `json:"clientId"`
 		Capabilities models.WatchRoomClientCapabilities `json:"capabilities"`
@@ -137,6 +174,10 @@ func (h *WatchRoomsHandler) Join(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *WatchRoomsHandler) Ready(w http.ResponseWriter, r *http.Request) {
+	if h.managedRoom != nil {
+		h.serveManagedNative(w, r, nativeReady)
+		return
+	}
 	var body struct {
 		Ready bool `json:"ready"`
 	}
@@ -153,6 +194,10 @@ func (h *WatchRoomsHandler) Ready(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *WatchRoomsHandler) State(w http.ResponseWriter, r *http.Request) {
+	if h.managedRoom != nil {
+		h.serveManagedNative(w, r, nativeState)
+		return
+	}
 	var body models.WatchRoomStateUpdate
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 		writeJSONError(w, "invalid request body", http.StatusBadRequest)
@@ -167,6 +212,10 @@ func (h *WatchRoomsHandler) State(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *WatchRoomsHandler) Heartbeat(w http.ResponseWriter, r *http.Request) {
+	if h.managedRoom != nil {
+		h.serveManagedNative(w, r, nativeHeartbeat)
+		return
+	}
 	var body struct {
 		ClientID  string `json:"clientId"`
 		Buffering bool   `json:"buffering"`
@@ -180,6 +229,10 @@ func (h *WatchRoomsHandler) Heartbeat(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *WatchRoomsHandler) Leave(w http.ResponseWriter, r *http.Request) {
+	if h.managedRoom != nil {
+		h.serveManagedNative(w, r, nativeLeave)
+		return
+	}
 	if err := h.service.Leave(r.Context(), mux.Vars(r)["roomID"], mux.Vars(r)["userID"]); err != nil {
 		h.writeError(w, err)
 		return
@@ -188,6 +241,10 @@ func (h *WatchRoomsHandler) Leave(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *WatchRoomsHandler) End(w http.ResponseWriter, r *http.Request) {
+	if h.managedRoom != nil {
+		h.serveManagedNative(w, r, nativeEnd)
+		return
+	}
 	if err := h.service.End(r.Context(), mux.Vars(r)["roomID"], mux.Vars(r)["userID"]); err != nil {
 		h.writeError(w, err)
 		return
@@ -259,19 +316,46 @@ func (e *managedWatchRoomEntry) matches(r *http.Request) bool {
 	if e.basePath != "" && strings.HasPrefix(p, e.basePath+"/") {
 		p = strings.TrimPrefix(p, e.basePath)
 	}
+	if p == "/api/watch-room-account-invitations" {
+		return r.Method == http.MethodGet
+	}
+	if strings.HasPrefix(p, "/api/watch-room-account-invitations/") {
+		parts := strings.Split(strings.TrimPrefix(p, "/api/watch-room-account-invitations/"), "/")
+		return len(parts) == 2 && parts[0] != "" && parts[1] == "decline" && r.Method == http.MethodPost
+	}
 	const prefix = "/api/users/"
 	if !strings.HasPrefix(p, prefix) {
 		return false
 	}
 	parts := strings.Split(strings.TrimPrefix(p, prefix), "/")
-	if len(parts) == 2 && parts[0] != "" && parts[1] == "watch-rooms" {
+	if len(parts) < 2 || parts[0] == "" {
+		return false
+	}
+	if len(parts) == 4 && parts[1] == "watch-room-account-invitations" && parts[2] != "" && parts[3] == "accept" {
 		return r.Method == http.MethodPost
 	}
-	if len(parts) == 4 && parts[0] != "" && parts[1] == "watch-rooms" && parts[2] != "" {
-		return parts[3] == "external-invite" && (r.Method == http.MethodPost || r.Method == http.MethodDelete) || parts[3] == "external-source" && r.Method == http.MethodPost
+	if parts[1] != "watch-rooms" {
+		return false
 	}
-	return false
+	if len(parts) == 2 {
+		return r.Method == http.MethodPost
+	}
+	if len(parts) == 3 && parts[2] != "" {
+		return r.Method == http.MethodGet
+	}
+	if len(parts) == 4 && parts[2] != "" {
+		switch parts[3] {
+		case "external-invite":
+			return r.Method == http.MethodPost || r.Method == http.MethodDelete
+		case "external-source", "join", "ready", "state", "heartbeat", "leave", "end":
+			return r.Method == http.MethodPost
+		case "account-invites":
+			return r.Method == http.MethodGet || r.Method == http.MethodPost
+		}
+	}
+	return len(parts) == 5 && parts[2] != "" && parts[3] == "account-invites" && parts[4] != "" && r.Method == http.MethodDelete
 }
+
 func (h *WatchRoomsHandler) BoundedManagedEntry(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if h.managedRoom != nil && h.managedRoom.matches(r) {
@@ -315,6 +399,11 @@ func watchRoomIO(w http.ResponseWriter, r *http.Request, next http.Handler, auth
 	})
 	writer := &watchRoomHTTPWriter{ResponseWriter: w, request: r, authority: authority}
 	defer func() {
+		// A real Body.Close may drain unread input. Keep the original read deadline
+		// and cancellation signal armed until that physical body work also ends.
+		if r.Body != nil {
+			_ = r.Body.Close()
+		}
 		if !writer.started && writer.unavailable() {
 			writer.deny()
 		}
@@ -495,4 +584,206 @@ func (h *WatchRoomsHandler) createManagedRoom(w http.ResponseWriter, r *http.Req
 		return
 	}
 	writeManagedRoomResult(w, r, h.managedRoom, http.StatusCreated, room, room.ExpiresAt)
+}
+
+// This private dispatch selects a concrete original operation; no enum value is
+// a user/profile/source grant. Every branch consumes the actual original frame.
+type nativeRoomHTTPMethod uint8
+
+const (
+	nativeInviteAccount nativeRoomHTTPMethod = iota
+	nativeAccountInvitations
+	nativeRoomAccountInvitations
+	nativeAcceptAccountInvitation
+	nativeDeclineAccountInvitation
+	nativeRevokeAccountInvitation
+	nativeInvitations
+	nativeGet
+	nativeJoin
+	nativeReady
+	nativeState
+	nativeHeartbeat
+	nativeLeave
+	nativeEnd
+)
+
+func nativeRoomDecode(w http.ResponseWriter, r *http.Request, value any, empty bool) error {
+	decoder := json.NewDecoder(http.MaxBytesReader(w, r.Body, 32<<10))
+	decoder.DisallowUnknownFields()
+	e := decoder.Decode(value)
+	if e == io.EOF && empty {
+		return nil
+	}
+	if e != nil {
+		if r.Context().Err() != nil {
+			return datastore.ErrWatchRoomUnavailable
+		}
+		return datastore.ErrWatchRoomInvalid
+	}
+	var trailing any
+	if decoder.Decode(&trailing) != io.EOF {
+		return datastore.ErrWatchRoomInvalid
+	}
+	return nil
+}
+func nativeRoomEmptyBody(w http.ResponseWriter, r *http.Request) error {
+	raw, e := io.ReadAll(http.MaxBytesReader(w, r.Body, 1024))
+	if e != nil {
+		if r.Context().Err() != nil {
+			return datastore.ErrWatchRoomUnavailable
+		}
+		return datastore.ErrWatchRoomInvalid
+	}
+	if value := strings.TrimSpace(string(raw)); value != "" && value != "{}" {
+		return datastore.ErrWatchRoomInvalid
+	}
+	return nil
+}
+func (h *WatchRoomsHandler) serveManagedNative(w http.ResponseWriter, r *http.Request, method nativeRoomHTTPMethod) {
+	h.managedRoom.serve(w, r, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		entry := h.managedRoom
+		if entry == nil || entry.authority == nil || entry.authority.Context().Err() != nil {
+			writeManagedRoomError(w, datastore.ErrWatchRoomUnavailable)
+			return
+		}
+		vars := mux.Vars(r)
+		profile, room, id := vars["userID"], vars["roomID"], vars["inviteID"]
+		var value any
+		var until time.Time
+		var e error
+		status := http.StatusOK
+		switch method {
+		case nativeInviteAccount:
+			var in struct {
+				Username string `json:"username"`
+			}
+			if e = nativeRoomDecode(w, r, &in, false); e != nil {
+				break
+			}
+			var result *datastore.WatchRoomNativeInviteResult
+			result, e = entry.authority.InviteNativeAccount(r, profile, room, in.Username)
+			if e == nil && result != nil {
+				value = result.Invite
+				until = result.PublicationUntil
+				status = http.StatusCreated
+			}
+		case nativeAccountInvitations, nativeRoomAccountInvitations:
+			var result *datastore.WatchRoomNativeInvitesResult
+			if method == nativeAccountInvitations {
+				result, e = entry.authority.ListNativeAccountInvitations(r)
+			} else {
+				result, e = entry.authority.ListNativeRoomAccountInvitations(r, profile, room)
+			}
+			if e == nil && result != nil {
+				value = result.Invites
+				until = result.PublicationUntil
+			}
+		case nativeAcceptAccountInvitation:
+			if e = nativeRoomEmptyBody(w, r); e != nil {
+				break
+			}
+			var result *datastore.WatchRoomNativeResult
+			result, e = entry.authority.AcceptNativeAccountInvitation(r, profile, id)
+			if e == nil && result != nil {
+				value = result.Room
+				until = result.PublicationUntil
+			}
+		case nativeInvitations:
+			var result *datastore.WatchRoomNativeRoomsResult
+			result, e = entry.authority.ListNativeInvitations(r, profile)
+			if e == nil && result != nil {
+				value = result.Rooms
+				until = result.PublicationUntil
+			}
+		case nativeGet:
+			var result *datastore.WatchRoomNativeResult
+			result, e = entry.authority.ReadNativeRoom(r, profile, room)
+			if e == nil && result != nil {
+				value = result.Room
+				until = result.PublicationUntil
+			}
+		case nativeJoin:
+			var in struct {
+				ClientID     string                             `json:"clientId"`
+				Capabilities models.WatchRoomClientCapabilities `json:"capabilities"`
+			}
+			if e = nativeRoomDecode(w, r, &in, false); e != nil {
+				break
+			}
+			var result *datastore.WatchRoomNativeResult
+			result, e = entry.authority.JoinNativeRoom(r, profile, room, in.ClientID, in.Capabilities)
+			if e == nil && result != nil {
+				value = result.Room
+				until = result.PublicationUntil
+			}
+		case nativeReady:
+			var in struct {
+				Ready bool `json:"ready"`
+			}
+			if e = nativeRoomDecode(w, r, &in, false); e != nil {
+				break
+			}
+			var result *datastore.WatchRoomNativeResult
+			result, e = entry.authority.SetNativeReady(r, profile, room, in.Ready)
+			if e == nil && result != nil {
+				value = result.Room
+				until = result.PublicationUntil
+			}
+		case nativeState:
+			var in models.WatchRoomStateUpdate
+			if e = nativeRoomDecode(w, r, &in, false); e != nil {
+				break
+			}
+			var result *datastore.WatchRoomNativeResult
+			result, e = entry.authority.UpdateNativeState(r, profile, room, in)
+			if e == nil && result != nil {
+				value = result.Room
+				until = result.PublicationUntil
+			}
+		case nativeHeartbeat:
+			var in struct {
+				ClientID  string `json:"clientId"`
+				Buffering bool   `json:"buffering"`
+			}
+			if e = nativeRoomDecode(w, r, &in, true); e != nil {
+				break
+			}
+			var result *datastore.WatchRoomNativeMutationResult
+			result, e = entry.authority.HeartbeatNativeRoom(r, profile, room, in.ClientID, in.Buffering)
+			if e == nil && result != nil {
+				until = result.PublicationUntil
+				status = http.StatusNoContent
+			}
+		case nativeLeave, nativeEnd, nativeDeclineAccountInvitation, nativeRevokeAccountInvitation:
+			if e = nativeRoomEmptyBody(w, r); e != nil {
+				break
+			}
+			var result *datastore.WatchRoomNativeMutationResult
+			switch method {
+			case nativeLeave:
+				result, e = entry.authority.LeaveNativeRoom(r, profile, room)
+			case nativeEnd:
+				result, e = entry.authority.EndNativeRoom(r, profile, room)
+			case nativeDeclineAccountInvitation:
+				result, e = entry.authority.DeclineNativeAccountInvitation(r, id)
+			case nativeRevokeAccountInvitation:
+				result, e = entry.authority.RevokeNativeAccountInvitation(r, profile, room, id)
+			}
+			if e == nil && result != nil {
+				until = result.PublicationUntil
+				status = http.StatusNoContent
+			}
+		default:
+			e = datastore.ErrWatchRoomInvalid
+		}
+		if e != nil {
+			writeManagedRoomError(w, e)
+			return
+		}
+		if until.IsZero() {
+			writeManagedRoomError(w, datastore.ErrWatchRoomUnavailable)
+			return
+		}
+		writeManagedRoomResult(w, r, entry, status, value, until)
+	}))
 }

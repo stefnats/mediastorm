@@ -40,25 +40,28 @@ var (
 // WatchRoomAuthority writes original room/invite/source provenance DATA. It
 // cannot admit a guest, mint media/PIN permission or replace a scoped owner.
 type WatchRoomAuthority struct {
-	self            *WatchRoomAuthority
-	store           *DataStore
-	manager         *config.Manager
-	security        *config.ManagedSecurity
-	coordinator     *settingscommit.Coordinator
-	ctx             context.Context
-	cancel          context.CancelFunc
-	mu              sync.Mutex
-	closed          bool
-	active          int
-	httpActive      int
-	httpPeers       map[string]int
-	actors          map[string]int
-	partyOwners     map[*WatchPartyPlaybackOwner]struct{}
-	partyCheckLanes map[string]*partyPlaybackCheckLane
-	partyCheckCount int
-	operations      sync.WaitGroup
-	once            sync.Once
-	done            chan struct{}
+	self               *WatchRoomAuthority
+	store              *DataStore
+	manager            *config.Manager
+	security           *config.ManagedSecurity
+	coordinator        *settingscommit.Coordinator
+	ctx                context.Context
+	cancel             context.CancelFunc
+	mu                 sync.Mutex
+	closed             bool
+	active             int
+	httpActive         int
+	httpPeers          map[string]int
+	actors             map[string]int
+	partyOwners        map[*WatchPartyPlaybackOwner]struct{}
+	partyCheckLanes    map[string]*partyPlaybackCheckLane
+	partyCheckCount    int
+	maintenanceStarted bool
+	maintenanceCursor  string
+	maintenanceDone    chan struct{}
+	operations         sync.WaitGroup
+	once               sync.Once
+	done               chan struct{}
 }
 
 func NewWatchRoomAuthority(lifetime context.Context, store *DataStore, manager *config.Manager, security *config.ManagedSecurity, coordinator *settingscommit.Coordinator) (*WatchRoomAuthority, error) {
@@ -149,8 +152,21 @@ type watchRoomOperation struct {
 	account     shareAccountRow
 }
 
-func (a *WatchRoomAuthority) begin(r *http.Request, profile string) (o *watchRoomOperation, err error) {
-	if !a.valid() || r == nil || r.URL == nil || r.Context().Err() != nil || !parentMutationID(profile) {
+func (a *WatchRoomAuthority) begin(r *http.Request, profile string) (*watchRoomOperation, error) {
+	if !parentMutationID(profile) {
+		return nil, ErrWatchRoomUnavailable
+	}
+	op, err := a.beginOriginalRoomOperation(r)
+	if op != nil {
+		op.profile = profile
+	}
+	return op, err
+}
+
+// Account inbox/decline operations retain the real original full frame without
+// selecting a profile. No caller flag can turn a profile request into authority.
+func (a *WatchRoomAuthority) beginOriginalRoomOperation(r *http.Request) (o *watchRoomOperation, err error) {
+	if !a.valid() || r == nil || r.URL == nil || r.Context().Err() != nil {
 		return nil, ErrWatchRoomUnavailable
 	}
 	frame, _ := r.Context().Value(pgRequestFrameKey{}).(*pgRequestFrame)
@@ -169,7 +185,7 @@ func (a *WatchRoomAuthority) begin(r *http.Request, profile string) (o *watchRoo
 		deadline = at
 	}
 	ctx, cancel := context.WithDeadline(r.Context(), deadline)
-	o = &watchRoomOperation{authority: a, request: r, frame: frame, original: original, ctx: ctx, cancel: cancel, deadline: deadline, profile: profile}
+	o = &watchRoomOperation{authority: a, request: r, frame: frame, original: original, ctx: ctx, cancel: cancel, deadline: deadline}
 	o.stopRuntime = familyMediaAfterFunc(a.ctx, cancel)
 	defer func() {
 		if err != nil {
@@ -364,7 +380,6 @@ func (a *WatchRoomAuthority) CreateRoom(r *http.Request, creator string, in mode
 	if e = op.lockActor(); e != nil {
 		return nil, e
 	}
-	invitees := make([]string, 0, len(ids))
 	profiles := make([]watchRoomProfile, 0, len(ids))
 	var selected watchRoomProfile
 	for _, id := range ids {
@@ -378,7 +393,6 @@ func (a *WatchRoomAuthority) CreateRoom(r *http.Request, creator string, in mode
 		if id == creator {
 			selected = profile
 		} else {
-			invitees = append(invitees, id)
 			profiles = append(profiles, profile)
 		}
 	}
@@ -388,7 +402,7 @@ func (a *WatchRoomAuthority) CreateRoom(r *http.Request, creator string, in mode
 	if e = shareLockPolicyRelations(op.ctx, op.g.tx); e != nil {
 		return nil, ErrWatchRoomUnavailable
 	}
-	if e = shareLockRelations(op.ctx, op.g.tx, []string{"watch_rooms", "watch_room_members", "watch_room_invites", "watch_room_provenance"}); e != nil {
+	if e = shareLockRelations(op.ctx, op.g.tx, []string{"watch_rooms", "watch_room_members", "watch_room_invites", "watch_room_provenance", "watch_room_native_admissions"}); e != nil {
 		return nil, ErrWatchRoomUnavailable
 	}
 	if e = op.fence(); e != nil {
@@ -416,12 +430,20 @@ func (a *WatchRoomAuthority) CreateRoom(r *http.Request, creator string, in mode
 	if e != nil {
 		return nil, ErrWatchRoomInvalid
 	}
-	if _, e = op.g.tx.Exec(op.ctx, `INSERT INTO watch_room_members(room_id,profile_id,client_id,is_creator,ready,joined_at,last_seen_at,capabilities)VALUES($1,$2,$3,true,true,$4,$4,$5)`, room.ID, creator, in.ClientID, now, caps); e != nil {
+	var memberIncarnation string
+	if e = op.g.tx.QueryRow(op.ctx, `INSERT INTO watch_room_members(room_id,profile_id,client_id,is_creator,ready,joined_at,last_seen_at,capabilities)VALUES($1,$2,$3,true,true,$4,$4,$5) RETURNING member_incarnation::text`, room.ID, creator, in.ClientID, now, caps).Scan(&memberIncarnation); e != nil || !shareCanonicalUUID(memberIncarnation) {
 		return nil, ErrWatchRoomUnavailable
 	}
-	for _, profile := range invitees {
-		if _, e = op.g.tx.Exec(op.ctx, `INSERT INTO watch_room_invites(room_id,profile_id,invited_at)VALUES($1,$2,$3)`, room.ID, profile, now); e != nil {
+	if e = op.insertNativeAdmission(room.ID, incarnation, selected, op.account, "creator", now, expiry, "", "", memberIncarnation, &now); e != nil {
+		return nil, e
+	}
+	for _, profile := range profiles {
+		var inviteReceipt string
+		if e = op.g.tx.QueryRow(op.ctx, `INSERT INTO watch_room_invites(room_id,profile_id,invited_at)VALUES($1,$2,$3) RETURNING concat(tableoid::oid,':',xmin::text,':',ctid::text)`, room.ID, profile.id, now).Scan(&inviteReceipt); e != nil {
 			return nil, ErrWatchRoomUnavailable
+		}
+		if e = op.insertNativeAdmission(room.ID, incarnation, profile, op.account, "household", now, expiry, "", inviteReceipt, "", nil); e != nil {
+			return nil, e
 		}
 	}
 	// Construct only descriptive bounded model DATA from the exact locked

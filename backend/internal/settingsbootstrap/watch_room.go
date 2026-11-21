@@ -47,3 +47,14 @@ func (s *Startup) closeWatchRoom() {
 		owned.Close()
 	}
 }
+
+// StartWatchRoomMaintenance starts DATA housekeeping on the same actual
+// already-owned authority. closeWatchRoom joins its physical work before the
+// security/source/store teardown; it never fabricates a user/source principal.
+func (s *Startup) StartWatchRoomMaintenance(store *datastore.DataStore) error {
+	authority, err := s.NewWatchRoomAuthority(store)
+	if err != nil {
+		return err
+	}
+	return authority.StartMaintenance()
+}
