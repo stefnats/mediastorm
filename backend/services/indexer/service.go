@@ -1848,6 +1848,41 @@ func (s *Service) Search(ctx context.Context, opts SearchOptions) ([]models.NZBR
 	return aggregated, nil
 }
 
+// Joined search changes only concrete source cleanup ownership. It neither
+// grants provider permission nor manufactures an authenticated request frame.
+type joinedIndexerSourceKey struct{}
+type joinedIndexerSource struct{}
+
+func joinedIndexerSourceContext(ctx context.Context) context.Context {
+	return context.WithValue(ctx, joinedIndexerSourceKey{}, joinedIndexerSource{})
+}
+func (s *Service) SearchWithScoringJoined(ctx context.Context, opts SearchOptions) ([]models.ScoredNZBResult, error) {
+	if ctx == nil {
+		return nil, context.Canceled
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	return s.SearchWithScoring(joinedIndexerSourceContext(ctx), opts)
+}
+func (s *Service) SearchWithScoringSplitJoined(ctx context.Context, opts SearchOptions) (<-chan ScoredSplitSearchResult, <-chan ScoredSplitSearchResult) {
+	var err error
+	if ctx == nil {
+		err = context.Canceled
+	} else {
+		err = ctx.Err()
+	}
+	if err != nil {
+		usenet, debrid := make(chan ScoredSplitSearchResult, 1), make(chan ScoredSplitSearchResult, 1)
+		usenet <- ScoredSplitSearchResult{Source: "usenet", Err: err}
+		debrid <- ScoredSplitSearchResult{Source: "debrid", Err: err}
+		close(usenet)
+		close(debrid)
+		return usenet, debrid
+	}
+	return s.SearchWithScoringSplit(joinedIndexerSourceContext(ctx), opts)
+}
+
 // SearchWithScoring runs Search and wraps results as ScoredNZBResult with filter status.
 // When opts.IncludeFiltered is true, filtered results are appended after passed results.
 func (s *Service) SearchWithScoring(ctx context.Context, opts SearchOptions) ([]models.ScoredNZBResult, error) {
@@ -2228,10 +2263,13 @@ func (s *Service) searchWithScoringSplit(ctx context.Context, opts SearchOptions
 	sourceOpts.MaxResults = 0 // ranking is final-order; source caps would truncate before it
 
 	resultsCh := make(chan searchSplitOutcome, 2)
+	var sourceWorkers sync.WaitGroup
 
 	// Launch usenet source
 	if includeUsenet {
+		sourceWorkers.Add(1)
 		go func() {
+			defer sourceWorkers.Done()
 			out := s.splitSearchUsenet(ctx, settings, sourceOpts, parsedQuery, alternateTitles, filterTitles, searchQueries, filterBundle, animeSettings, filterOverrides, rankingBundle)
 			resultsCh <- out
 		}()
@@ -2241,7 +2279,9 @@ func (s *Service) searchWithScoringSplit(ctx context.Context, opts SearchOptions
 
 	// Launch debrid source
 	if includeDebrid {
+		sourceWorkers.Add(1)
 		go func() {
+			defer sourceWorkers.Done()
 			out := s.splitSearchDebrid(ctx, settings, sourceOpts, parsedQuery, alternateTitles, filterTitles, filterBundle, animeSettings, filterOverrides, rankingBundle, bypassAIOStreamsRanking)
 			resultsCh <- out
 		}()
@@ -2258,6 +2298,13 @@ func (s *Service) searchWithScoringSplit(ctx context.Context, opts SearchOptions
 	// accumulated for the shared "raw" search cache, written once BOTH sources
 	// settle.
 	go func() {
+		defer func() {
+			if _, joined := ctx.Value(joinedIndexerSourceKey{}).(joinedIndexerSource); joined {
+				sourceWorkers.Wait()
+			}
+			close(usenetOut)
+			close(debridOut)
+		}()
 		errCount := 0
 		incompleteSearch := false
 		var aggregated []models.NZBResult
@@ -2271,8 +2318,8 @@ func (s *Service) searchWithScoringSplit(ctx context.Context, opts SearchOptions
 				// tolerate the close and the sole consumer aborts on this context.
 				// Let the in-flight source goroutines finish or abort on this
 				// context; the cache is deliberately not written.
-				close(usenetOut)
-				close(debridOut)
+				// Both bounded outcomes fit resultsCh after cancellation.
+				// Keep public completion withheld until actual source Read/Close ends.
 				return
 			case out := <-resultsCh:
 				pending--
@@ -2307,8 +2354,6 @@ func (s *Service) searchWithScoringSplit(ctx context.Context, opts SearchOptions
 		} else {
 			log.Printf("[indexer] skipping raw search cache for query=%q because one or more providers failed", opts.Query)
 		}
-		close(usenetOut)
-		close(debridOut)
 
 		log.Printf("[search-stats] SearchSplit #%d complete: %d results in %v (totals: search=%d, splitSearch=%d, usenetAPICalls=%d)",
 			callNum, len(aggregated), time.Since(searchStart),
@@ -2849,8 +2894,12 @@ func (s *Service) fetchUsenetResultsAllQueries(ctx context.Context, settings con
 	}
 
 	resultsChan := make(chan searchResult, len(validQueries))
+	var actualWorkers sync.WaitGroup
+	defer actualWorkers.Wait()
 	for _, query := range validQueries {
+		actualWorkers.Add(1)
 		go func(q string) {
+			defer actualWorkers.Done()
 			queryOpts := mappedQueryOptions(opts, q)
 			results, err := s.fetchUsenetResults(ctx, settings, queryOpts)
 			resultsChan <- searchResult{results: results, err: err}
@@ -3886,8 +3935,12 @@ func (s *Service) searchDailyUsenet(ctx context.Context, settings config.Setting
 		err     error
 	}
 	resultsChan := make(chan indexerResult, len(enabled))
+	var actualWorkers sync.WaitGroup
+	defer actualWorkers.Wait()
 	for _, idx := range enabled {
+		actualWorkers.Add(1)
 		go func(ix config.IndexerConfig) {
+			defer actualWorkers.Done()
 			preferenceKey := dailyUsenetPreferenceKey(ix, opts, parsed)
 			ordered := prioritizeDailyUsenetCandidate(candidates, s.preferredDailyUsenetCandidate(preferenceKey))
 			ordered, requiredCount := reserveDailyTitleQueries(ordered, opts, parsed)
@@ -4028,12 +4081,18 @@ func (s *Service) searchUsenetWithFilter(ctx context.Context, settings config.Se
 	}
 
 	resultsChan := make(chan searchResult, len(validQueries))
+	var queryWorkers sync.WaitGroup
+	if _, joined := ctx.Value(joinedIndexerSourceKey{}).(joinedIndexerSource); joined {
+		defer queryWorkers.Wait()
+	}
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
 	// Launch all searches in parallel
 	for idx, query := range validQueries {
+		queryWorkers.Add(1)
 		go func(priority int, q string) {
+			defer queryWorkers.Done()
 			queryOpts := mappedQueryOptions(opts, q)
 
 			if priority > 0 {
@@ -4227,8 +4286,12 @@ func (s *Service) fetchUsenetResults(ctx context.Context, settings config.Settin
 	}
 
 	resultsChan := make(chan indexerResult, len(enabled))
+	var actualWorkers sync.WaitGroup
+	defer actualWorkers.Wait()
 	for _, idx := range enabled {
+		actualWorkers.Add(1)
 		go func(ix config.IndexerConfig) {
+			defer actualWorkers.Done()
 			results, err := s.searchTorznab(ctx, ix, opts)
 			resultsChan <- indexerResult{results: results, err: err}
 		}(idx)

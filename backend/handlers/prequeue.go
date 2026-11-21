@@ -81,6 +81,8 @@ type prequeuePlaybackService interface {
 type PrequeueHandler struct {
 	vodBoundary           *vodBoundary
 	vodCurrentWorker      *vodOwnerContext
+	workerLife            *prequeueWorkerLifetimes
+	currentWork           *prequeueWorkerLifetime
 	kidsVODBindings       *kidsVODResources
 	sourceAvailability    sourceAvailabilityService
 	store                 *playback.PrequeueStore
@@ -109,6 +111,95 @@ type PrequeueHandler struct {
 	localFallbackWait     time.Duration
 	users                 prequeueOwnershipService
 	demoMode              bool
+}
+
+// These objects own actual work completion only. Entry IDs and lifetime DATA
+// never grant a profile, session, source, or provider permission.
+var prequeueLifecycleInit sync.Mutex
+
+type prequeueWorkerLifetimes struct {
+	mu      sync.Mutex
+	closed  bool
+	active  map[*prequeueWorkerLifetime]struct{}
+	workers sync.WaitGroup
+}
+type prequeueWorkerLifetime struct {
+	life   *prequeueWorkerLifetimes
+	id     string
+	ctx    context.Context
+	cancel context.CancelFunc
+	done   chan struct{}
+	once   sync.Once
+}
+
+func (h *PrequeueHandler) workerLifetimes() *prequeueWorkerLifetimes {
+	prequeueLifecycleInit.Lock()
+	defer prequeueLifecycleInit.Unlock()
+	if h.workerLife == nil {
+		h.workerLife = &prequeueWorkerLifetimes{active: make(map[*prequeueWorkerLifetime]struct{})}
+	}
+	return h.workerLife
+}
+func (h *PrequeueHandler) beginPrequeueWork(parent context.Context, id string) (*prequeueWorkerLifetime, error) {
+	if parent == nil || parent.Err() != nil || id == "" {
+		return nil, context.Canceled
+	}
+	life := h.workerLifetimes()
+	life.mu.Lock()
+	defer life.mu.Unlock()
+	if life.closed || len(life.active) >= 512 {
+		return nil, errors.New("prequeue worker unavailable")
+	}
+	for current := range life.active {
+		if current.id == id {
+			return nil, errors.New("prequeue worker still active")
+		}
+	}
+	ctx, cancel := context.WithCancel(parent)
+	work := &prequeueWorkerLifetime{life: life, id: id, ctx: ctx, cancel: cancel, done: make(chan struct{})}
+	life.active[work] = struct{}{}
+	life.workers.Add(1)
+	return work, nil
+}
+func (w *prequeueWorkerLifetime) finish() {
+	w.once.Do(func() {
+		w.cancel()
+		w.life.mu.Lock()
+		delete(w.life.active, w)
+		w.life.mu.Unlock()
+		close(w.done)
+		w.life.workers.Done()
+	})
+}
+func (h *PrequeueHandler) cancelAndWaitPrequeueWork(id string, except *prequeueWorkerLifetime) {
+	life := h.workerLifetimes()
+	life.mu.Lock()
+	var held []*prequeueWorkerLifetime
+	for work := range life.active {
+		if work.id == id && work != except {
+			work.cancel()
+			held = append(held, work)
+		}
+	}
+	life.mu.Unlock()
+	for _, work := range held {
+		<-work.done
+	}
+}
+
+// Shutdown closes admission before signalling and joining actual producers.
+func (h *PrequeueHandler) Shutdown() {
+	if h == nil {
+		return
+	}
+	life := h.workerLifetimes()
+	life.mu.Lock()
+	life.closed = true
+	for work := range life.active {
+		work.cancel()
+	}
+	life.mu.Unlock()
+	life.workers.Wait()
 }
 
 func (h *PrequeueHandler) canAccessUser(r *http.Request, userID string) bool {
@@ -940,6 +1031,16 @@ func (h *PrequeueHandler) RunWorkerSync(ctx context.Context, titleID, titleName,
 
 // RunWorkerSyncScoped runs the prequeue worker synchronously for an explicit settings scope.
 func (h *PrequeueHandler) RunWorkerSyncScoped(ctx context.Context, titleID, titleName, imdbID, mediaType string, year int, userID, clientID, settingsScopeKey string, targetEpisode *models.EpisodeReference) (string, error) {
+	// Reserve setup too: shutdown owns original identity/native queries as well
+	// as the later actual source worker. This key supplies no permission.
+	key := sha256.Sum256([]byte(titleID + "\x00" + userID + "\x00" + clientID + "\x00" + settingsScopeKey))
+	work, workErr := h.beginPrequeueWork(ctx, fmt.Sprintf("setup:%x", key))
+	if workErr != nil {
+		return "", workErr
+	}
+	defer work.finish()
+	ctx = work.ctx
+
 	owner, vodErr := h.vodBoundary.backgroundOwner(ctx, userID, normalizeClientID(clientID))
 	if vodErr != nil {
 		return "", vodErr
@@ -955,11 +1056,18 @@ func (h *PrequeueHandler) RunWorkerSyncScoped(ctx context.Context, titleID, titl
 		return entry.ID, fmt.Errorf("%w: %s (status=%s)", err, entry.ID, entry.Status)
 	}
 
-	if !h.vodBoundary.bindWorker(entry.ID, owner) {
+	if !h.vodBoundary.bindWorkerContext(ctx, work.ctx, entry.ID, owner) {
 		return entry.ID, errVODOwner
 	}
+	// The same real setup operation now owns this exact published entry.
+	work.life.mu.Lock()
+	work.id = entry.ID
+	work.life.mu.Unlock()
 	// Run worker synchronously (blocking)
-	h.runPrequeueWorker(entry.ID, titleID, titleName, imdbID, mediaType, year, userID, clientID, nil, targetEpisode, 0, true, prequeueWorkerScheduledPrewarm)
+	h.runPrequeueWorkerJob(work, entry.ID, titleID, titleName, imdbID, mediaType, year, userID, clientID, nil, targetEpisode, 0, true, prequeueWorkerScheduledPrewarm)
+	if ctx.Err() != nil {
+		return entry.ID, ctx.Err()
+	}
 
 	if h.vodBoundary != nil && owner.recheck(ctx, vodDemand) != nil {
 		return entry.ID, errVODOwner
@@ -1279,12 +1387,39 @@ func (h *PrequeueHandler) Prequeue(w http.ResponseWriter, r *http.Request) {
 		h.prewarmSvc.AdoptEntry(entry.ID)
 	}
 
-	if !h.vodBoundary.bindWorker(entry.ID, owner) {
+	work, workErr := h.beginPrequeueWork(context.Background(), entry.ID)
+	if workErr != nil {
+		h.store.Delete(entry.ID)
+		http.Error(w, "prequeue worker unavailable", http.StatusServiceUnavailable)
+		return
+	}
+	setup, stopSetup := prequeueSetupContext(r.Context(), work)
+	bound := h.vodBoundary.bindWorkerContext(setup, work.ctx, entry.ID, owner, r)
+	stopSetup()
+	if !bound {
+		work.finish()
 		vodDeny(w, kidsvod.CodeContextChanged)
 		return
 	}
-	// Start background worker with all the info needed for search
-	go h.runPrequeueWorker(entry.ID, req.TitleID, titleName, req.ImdbID, mediaType, req.Year, req.UserID, clientID, throughput, targetEpisode, req.StartOffset, req.SkipHLS, prequeueWorkerInteractive, prequeueLocalScope{accountID: auth.GetAccountID(r), master: auth.IsMaster(r), tmdbID: req.TmdbID, tvdbID: req.TvdbID, automaticLibrarySelection: req.AutomaticLibrarySelection})
+	finishOutput, outputErr := owner.originalHTTPOutput(w, r)
+	if outputErr != nil || work.ctx.Err() != nil {
+		// Stage the failure before any physical Flush can imply a successful 200.
+		http.Error(w, "prequeue worker unavailable", http.StatusServiceUnavailable)
+		if finishOutput != nil {
+			finishOutput()
+		}
+		h.vodBoundary.discardBoundWorker(entry.ID)
+		work.finish()
+		return
+	}
+	defer finishOutput()
+	// The actual worker links its admitted cancellation to the transferred owner.
+	// HTTP setup cancellation cannot retire that same successfully handed-off core.
+	localScope := prequeueLocalScope{accountID: auth.GetAccountID(r), master: auth.IsMaster(r), tmdbID: req.TmdbID, tvdbID: req.TvdbID, automaticLibrarySelection: req.AutomaticLibrarySelection}
+	go func() {
+		defer work.finish()
+		h.runPrequeueWorkerJob(work, entry.ID, req.TitleID, titleName, req.ImdbID, mediaType, req.Year, req.UserID, clientID, throughput, targetEpisode, req.StartOffset, req.SkipHLS, prequeueWorkerInteractive, localScope)
+	}()
 
 	// Return response
 	resp := playback.PrequeueResponse{
@@ -1434,6 +1569,7 @@ func (h *PrequeueHandler) RemoveManualPrequeue(w http.ResponseWriter, r *http.Re
 	if !h.vodBoundary.recheckHTTP(w, r, owner, vodCleanup) {
 		return
 	}
+	h.cancelAndWaitPrequeueWork(entry.ID, nil)
 	h.store.Delete(entry.ID)
 	w.WriteHeader(http.StatusNoContent)
 }
@@ -1581,7 +1717,7 @@ func (h *PrequeueHandler) AdoptMigration(w http.ResponseWriter, r *http.Request)
 		http.Error(w, "prequeue not found or expired", http.StatusNotFound)
 		return
 	}
-	h.refreshAdoptedMigrationMetadata(prequeueID, req.StreamPath, normalizeClientID(r.Header.Get("X-Client-ID")), owner)
+	h.refreshAdoptedMigrationMetadataContext(r.Context(), prequeueID, req.StreamPath, normalizeClientID(r.Header.Get("X-Client-ID")), owner)
 	h.latencyTracker.NotePrequeueReady(prequeueID)
 	if h.prewarmSvc != nil {
 		h.prewarmSvc.UpdateFromPrequeue(prequeueID)
@@ -1615,11 +1751,19 @@ type adoptedMigrationMetadata struct {
 }
 
 func (h *PrequeueHandler) refreshAdoptedMigrationMetadata(prequeueID, streamPath, clientID string, owners ...*vodOwnerContext) {
+	// Isolated legacy tests retain this signature; HTTP passes its real context.
+	parent := context.Background()
+	if len(owners) > 0 && owners[0] != nil {
+		parent = owners[0].ctx
+	}
+	h.refreshAdoptedMigrationMetadataContext(parent, prequeueID, streamPath, clientID, owners...)
+}
+func (h *PrequeueHandler) refreshAdoptedMigrationMetadataContext(parent context.Context, prequeueID, streamPath, clientID string, owners ...*vodOwnerContext) {
 	var owner *vodOwnerContext
 	if len(owners) > 0 {
 		owner = owners[0]
 	}
-	if h.vodBoundary != nil && (owner == nil || owner.recheck(context.Background(), vodAdopt) != nil) {
+	if h.vodBoundary != nil && (owner == nil || owner.recheck(parent, vodAdopt) != nil) {
 		return
 	}
 	if h == nil || h.store == nil {
@@ -1645,7 +1789,7 @@ func (h *PrequeueHandler) refreshAdoptedMigrationMetadata(prequeueID, streamPath
 		return
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
+	ctx, cancel := context.WithTimeout(parent, 45*time.Second)
 	defer cancel()
 
 	if owner != nil {
@@ -1846,8 +1990,40 @@ func resolveFirstReadySourceForWorker(configured bool, mode prequeueWorkerMode) 
 // runPrequeueWorker runs the prequeue background task. Interactive prequeues
 // honor Resolve First Ready Source; scheduled pre-warm workers always wait for
 // the complete globally ranked candidate set before resolving.
+// This only links actual setup cancellation; it does not alter the framed
+// request or provide authority for the eventual original Handoff.
+func prequeueSetupContext(parent context.Context, work *prequeueWorkerLifetime) (context.Context, func()) {
+	ctx, cancel := context.WithCancel(parent)
+	stop := familyMediaAfterFunc(work.ctx, cancel)
+	if work.ctx.Err() != nil {
+		cancel()
+	}
+	return ctx, func() { stop(); cancel() }
+}
+
 func (h *PrequeueHandler) runPrequeueWorker(prequeueID, titleID, titleName, imdbID, mediaType string, year int, userID, clientID string, throughput *models.AdaptiveThroughputContext, targetEpisode *models.EpisodeReference, startOffset float64, skipHLS bool, workerMode prequeueWorkerMode, localScopes ...prequeueLocalScope) {
-	workerOwner, ownerErr := h.vodWorker(prequeueID, userID, clientID)
+	h.runPrequeueWorkerContext(context.Background(), prequeueID, titleID, titleName, imdbID, mediaType, year, userID, clientID, throughput, targetEpisode, startOffset, skipHLS, workerMode, localScopes...)
+}
+func (h *PrequeueHandler) runPrequeueWorkerContext(parent context.Context, prequeueID, titleID, titleName, imdbID, mediaType string, year int, userID, clientID string, throughput *models.AdaptiveThroughputContext, targetEpisode *models.EpisodeReference, startOffset float64, skipHLS bool, workerMode prequeueWorkerMode, localScopes ...prequeueLocalScope) {
+	work, err := h.beginPrequeueWork(parent, prequeueID)
+	if err != nil {
+		h.vodBoundary.discardBoundWorker(prequeueID)
+		return
+	}
+	defer work.finish()
+	h.runPrequeueWorkerJob(work, prequeueID, titleID, titleName, imdbID, mediaType, year, userID, clientID, throughput, targetEpisode, startOffset, skipHLS, workerMode, localScopes...)
+}
+func (h *PrequeueHandler) runPrequeueWorkerJob(work *prequeueWorkerLifetime, prequeueID, titleID, titleName, imdbID, mediaType string, year int, userID, clientID string, throughput *models.AdaptiveThroughputContext, targetEpisode *models.EpisodeReference, startOffset float64, skipHLS bool, workerMode prequeueWorkerMode, localScopes ...prequeueLocalScope) {
+	defer h.vodBoundary.discardBoundWorker(prequeueID)
+	copy := *h
+	copy.currentWork = work
+	h = &copy
+	h.cancelAndWaitPrequeueWork(prequeueID, work)
+	if work.ctx.Err() != nil {
+		return
+	}
+
+	workerOwner, ownerErr := h.vodWorkerForContext(work.ctx, prequeueID, userID, clientID)
 	if ownerErr != nil {
 		h.rejectVODWorker(prequeueID, userID)
 		return
@@ -1879,7 +2055,7 @@ func (h *PrequeueHandler) runPrequeueWorker(prequeueID, titleID, titleName, imdb
 	if h.sourceAvailability != nil {
 		observe := h.sourceAvailability.ObservePlaybackStart(userID, clientID, titleID, mediaType)
 		defer func() {
-			if workerOwner != nil && workerOwner.recheck(context.Background(), vodDemand) != nil {
+			if workerOwner != nil && workerOwner.recheck(work.ctx, vodDemand) != nil {
 				observe(false)
 				return
 			}
@@ -1892,10 +2068,31 @@ func (h *PrequeueHandler) runPrequeueWorker(prequeueID, titleID, titleName, imdb
 		}()
 	}
 	// Create cancellable context
-	vodCtx, stopVOD := vodWorkerContext(context.Background(), workerOwner)
+	vodCtx, stopVOD := vodWorkerContext(work.ctx, workerOwner)
 	defer stopVOD()
 	ctx, cancel := context.WithTimeout(vodCtx, 15*time.Minute)
 	defer cancel()
+	if workerOwner != nil {
+		watchCtx := ctx
+		watched := make(chan struct{})
+		go func() {
+			defer close(watched)
+			tick := time.NewTicker(250 * time.Millisecond)
+			defer tick.Stop()
+			for {
+				select {
+				case <-watchCtx.Done():
+					return
+				case <-tick.C:
+					if workerOwner.recheck(watchCtx, vodDemand) != nil {
+						cancel()
+						return
+					}
+				}
+			}
+		}()
+		defer func() { cancel(); <-watched }()
+	}
 
 	// Store cancel func for potential cancellation
 	if !h.setVODCancel(prequeueID, workerOwner, cancel) {
@@ -2223,7 +2420,7 @@ func (h *PrequeueHandler) runPrequeueWorker(prequeueID, titleID, titleName, imdb
 				// combined cross-source ranking in this mode.
 				feedCtx, cancelFeed := context.WithCancel(ctx)
 				feedState = newPrequeueFeedState()
-				usenetCh, debridCh := h.indexerSvc.SearchWithScoringSplit(feedCtx, searchOpts)
+				usenetCh, debridCh := h.indexerSvc.SearchWithScoringSplitJoined(feedCtx, searchOpts)
 				streamCandidates := newStreamCandidateSource()
 				candidates = streamCandidates
 				go h.prequeueSearchFeeder(feedCtx, streamCandidates, usenetCh, debridCh, feedState, prequeueFeederConfig{
@@ -2232,13 +2429,21 @@ func (h *PrequeueHandler) runPrequeueWorker(prequeueID, titleID, titleName, imdb
 					targetEpisode: targetEpisode,
 					workerStart:   workerStart,
 				})
+				var sourceFinish sync.Once
 				finishSearch = func() {
-					cancelFeed()
-					streamCandidates.Stop()
-					select {
-					case <-feedState.done:
-					case <-ctx.Done():
-					}
+					sourceFinish.Do(func() {
+						cancelFeed()
+						streamCandidates.Stop()
+						<-feedState.done
+						// The preparation consumers may leave on ctx.Done before
+						// the actual joined HTTP sources close. Drain the SAME real
+						// Joined API outputs after those consumers end; that concrete
+						// producer closes them only after its actual source WG/Close.
+						for range usenetCh {
+						}
+						for range debridCh {
+						}
+					})
 				}
 			} else {
 				// Default/original behavior: wait for every enabled source, combine and
@@ -2262,6 +2467,8 @@ func (h *PrequeueHandler) runPrequeueWorker(prequeueID, titleID, titleName, imdb
 				log.Printf("[prequeue] TIMING: combined scored search complete, %d passed candidate(s) selected from %d total result(s), badStreams=%d (elapsed: %v)",
 					len(allResults), totalResults, badStreamCount, time.Since(workerStart))
 			}
+
+			defer finishSearch()
 
 			// Update status to resolving. Numeric progress from here on is owned by the
 			// race (in-flight candidate window); the feeder only advances the stage.
@@ -3003,7 +3210,10 @@ func racePrequeueResolutionsWithJoinTimeout(ctx context.Context, src prequeueCan
 	// This lets a later-ready service reach the scheduler instead of sitting
 	// behind an already queued candidate from the first service.
 	incoming := make(chan streamedCandidate)
+	incomingDone := make(chan struct{})
+	defer func() { cancelRace(); <-incomingDone }()
 	go func() {
+		defer close(incomingDone)
 		defer close(incoming)
 		for {
 			idx, cand, ok := src.Next(raceCtx)
@@ -3043,10 +3253,11 @@ func racePrequeueResolutionsWithJoinTimeout(ctx context.Context, src prequeueCan
 	activeByService := map[models.ContentServiceType]int{}
 	cancelAndJoin := func(reason string) {
 		cancelRace()
-		if waitForPrequeueResolutionWorkers(&wg, joinTimeout) {
-			return
+		// A timeout may explain slow cleanup, but never proves source end.
+		if !waitForPrequeueResolutionWorkers(&wg, joinTimeout) {
+			log.Printf("[prequeue] Actual cancelled candidate workers joined after %s (%s)", joinTimeout, reason)
+			wg.Wait()
 		}
-		log.Printf("[prequeue] Timed out after %s waiting for cancelled candidate workers (%s); detaching %d worker(s)", joinTimeout, reason, len(activeSet))
 	}
 
 	// Settle state: the first validated candidate that cannot immediately win
@@ -3282,6 +3493,8 @@ func waitForPrequeueResolutionWorkers(wg *sync.WaitGroup, timeout time.Duration)
 	case <-done:
 		return true
 	case <-time.After(timeout):
+		// Retain and join the original waiter too; no detached cleanup goroutine.
+		<-done
 		return false
 	}
 }
@@ -3763,7 +3976,7 @@ func combinedPrequeueSearchOptions(opts indexer.SearchOptions) indexer.SearchOpt
 }
 
 func (h *PrequeueHandler) searchCombinedPrequeueCandidates(ctx context.Context, opts indexer.SearchOptions, targetEpisode *models.EpisodeReference) ([]models.NZBResult, int, int, error) {
-	scoredResults, err := h.indexerSvc.SearchWithScoring(ctx, combinedPrequeueSearchOptions(opts))
+	scoredResults, err := h.indexerSvc.SearchWithScoringJoined(ctx, combinedPrequeueSearchOptions(opts))
 	if err != nil {
 		return nil, 0, 0, err
 	}
@@ -4213,7 +4426,7 @@ func (h *PrequeueHandler) waitForPlaybackQueue(ctx context.Context, prequeueID s
 
 // failPrequeue marks a prequeue as failed
 func (h *PrequeueHandler) failPrequeue(prequeueID, errMsg string) {
-	if h.vodCurrentWorker != nil && h.vodCurrentWorker.recheck(context.Background(), vodDemand) != nil {
+	if h.vodCurrentWorker != nil && h.vodCurrentWorker.recheck(h.vodWorkerCheckContext(h.vodCurrentWorker), vodDemand) != nil {
 		h.rejectVODWorker(prequeueID, h.vodCurrentWorker.profile.ID, h.vodCurrentWorker)
 		return
 	}
