@@ -278,6 +278,9 @@ func Register(
 
 	// Protected routes - require authentication
 	protected := api.PathPrefix("").Subrouter()
+	if shareHandler != nil {
+		protected.Use(shareHandler.BoundedCreateEntry)
+	}
 	protected.Use(AccountAuthMiddleware(sessionsSvc, accountsSvc, options.pgPins))
 	if options.pgPins != nil {
 		protected.Use(profileaccess.CurrentMiddleware(options.pgPins.Owns))
