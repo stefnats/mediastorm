@@ -47,6 +47,35 @@ func ccLifeGolden(t *testing.T, positive bool) []byte {
 	return data
 }
 
+// The automatic detector samples one completed segment. Its sustained positive
+// fixture is separate from the sparse and negative independent decoder controls.
+func ccLifeLiveGolden(t *testing.T) []byte {
+	t.Helper()
+	name := os.Getenv("MEDIASTORM_CC_LIVE_GOLDEN")
+	if name == "" {
+		t.Fatal("MEDIASTORM_CC_LIVE_GOLDEN is required for the actual sustained Live canaries")
+	}
+	file, err := os.Open(name)
+	if err != nil {
+		t.Fatal("actual sustained synthetic fixture unavailable", err)
+	}
+	info, err := file.Stat()
+	if err != nil || !info.Mode().IsRegular() || info.Size() <= 0 || info.Size() > maxFallbackWindowBytes {
+		_ = file.Close()
+		t.Fatal("sustained synthetic fixture is not a bounded regular file", err)
+	}
+	data, readErr := io.ReadAll(io.LimitReader(file, info.Size()+1))
+	closeErr := file.Close()
+	if readErr != nil || closeErr != nil || int64(len(data)) != info.Size() {
+		t.Fatal("actual sustained synthetic fixture changed or could not be read", readErr, closeErr)
+	}
+	sum := sha256.Sum256(data)
+	if hex.EncodeToString(sum[:]) != "c1c34ad200be4fbf14c6f003c3064373bdfbef332335c2b15e6687d9e401ff65" {
+		t.Fatal("sustained synthetic fixture differs from the accepted original")
+	}
+	return data
+}
+
 func ccLifeDecoded(t *testing.T, data []byte) bool {
 	t.Helper()
 	text := strings.TrimPrefix(string(data), "\xef\xbb\xbf")
@@ -121,7 +150,7 @@ type ccLifeFixture struct {
 
 func ccLifeCreate(t *testing.T, target string, captions bool, original context.Context, tuning LiveTuningSettings) *ccLifeFixture {
 	t.Helper()
-	data := ccLifeGolden(t, true)
+	data := ccLifeLiveGolden(t)
 	source, server := liveLifeHTTPServer(t, data, false)
 	if original == nil {
 		original = t.Context()
@@ -163,6 +192,14 @@ func ccLifeCreate(t *testing.T, target string, captions bool, original context.C
 
 func ccLifeDetector(t *testing.T, f *ccLifeFixture) {
 	t.Helper()
+	defer func() {
+		if t.Failed() {
+			f.session.mu.RLock()
+			hasCaptions, done := f.session.HasClosedCaptions, f.session.CCDetectionDone
+			f.session.mu.RUnlock()
+			t.Logf("actual original detector at failure: hasCaptions=%t detectionDone=%t", hasCaptions, done)
+		}
+	}()
 	ordinaryLifeWait(t, "actual original detector did not produce a positive caption observation", func() bool {
 		f.session.mu.RLock()
 		defer f.session.mu.RUnlock()
