@@ -105,18 +105,31 @@ func masterOnlySportsMutation(handler http.HandlerFunc) http.Handler {
 type RegisterOption func(*registerOptions)
 
 type registerOptions struct {
-	recordingProgress *handlers.RecordingProgressHandler
-	parentLocalFiles  *handlers.ParentLocalFileHandler
-	pgPins            *profileunlock.PGProfilePins
-	unlocks           *profileunlock.Service
-	security          SecuritySettingsFunc
-	recovery          *handlers.ProfileRecoveryHandler
+	recordingProgress  *handlers.RecordingProgressHandler
+	parentLocalFiles   *handlers.ParentLocalFileHandler
+	familyInstallation *handlers.FamilyMediaInstallation
+	familySelected     bool
+	familyBasePath     string
+	pgPins             *profileunlock.PGProfilePins
+	unlocks            *profileunlock.Service
+	security           SecuritySettingsFunc
+	recovery           *handlers.ProfileRecoveryHandler
 }
 
 // WithParentLocalFiles selects the isolated raw-local parent exception. Main
 // does not install this option until the separate all-route closure is ready.
 func WithParentLocalFiles(handler *handlers.ParentLocalFileHandler) RegisterOption {
 	return func(options *registerOptions) { options.parentLocalFiles = handler }
+}
+
+// WithFamilyMediaInstallation selects the concrete original known-source and
+// parent installation. Selection is not authorization and cannot renew owners.
+func WithFamilyMediaInstallation(installed *handlers.FamilyMediaInstallation, basePath string) RegisterOption {
+	return func(o *registerOptions) {
+		o.familySelected = true
+		o.familyInstallation = installed
+		o.familyBasePath = basePath
+	}
 }
 
 // WithProfileUnlocks enables server-issued profile unlock tokens and, when the
@@ -281,6 +294,13 @@ func Register(
 
 	// Protected routes - require authentication
 	protected := api.PathPrefix("").Subrouter()
+	family := options.familyInstallation
+	if options.familySelected {
+		if options.parentLocalFiles != nil || !family.ReadyForRegisteredFamily(usersHandler, options.pgPins, localMediaHandler) {
+			family = nil
+		}
+		protected.Use(family.ManagedKnownSourceEntry(options.familyBasePath))
+	}
 	if shareHandler != nil {
 		protected.Use(shareHandler.BoundedCreateEntry)
 	}
@@ -369,14 +389,26 @@ func Register(
 	// Profile ownership middleware for user routes
 	profileProtected := protected.PathPrefix("/users").Subrouter()
 	profileProtected.Use(ProfileOwnershipMiddleware(usersSvc, options.pgPins))
-	profileProtected.HandleFunc("/{userID}/kids/local-file-approvals", options.parentLocalFiles.Approve).Methods(http.MethodPost)
-	profileProtected.HandleFunc("/{userID}/library/items/{itemID}/approved-file", options.parentLocalFiles.Stream).Methods(http.MethodGet, http.MethodHead)
-	profileProtected.HandleFunc("/{userID}/library/items/{itemID}/approved-file", options.parentLocalFiles.Revoke).Methods(http.MethodDelete)
-	profileProtected.HandleFunc("/{userID}/library/items/{itemID}/approved-hls", options.parentLocalFiles.StartHLS).Methods(http.MethodPost)
-	profileProtected.HandleFunc("/{userID}/library/items/{itemID}/approved-hls/{hlsID}/{segment}", options.parentLocalFiles.ServeHLS).Methods(http.MethodGet, http.MethodHead)
-	profileProtected.HandleFunc("/{userID}/library/items/{itemID}/approved-hls/{hlsID}", options.parentLocalFiles.StopHLS).Methods(http.MethodDelete)
-	if localMediaHandler != nil && options.parentLocalFiles != nil {
-		localMediaHandler.SetParentLocalFiles(options.parentLocalFiles)
+	if options.familySelected {
+		profileProtected.HandleFunc("/{userID}/kids/local-file-approvals", family.ServeParentApproval).Methods(http.MethodPost)
+		profileProtected.HandleFunc("/{userID}/library/items/{itemID}/approved-file", family.ServeParentRaw).Methods(http.MethodGet, http.MethodHead)
+		profileProtected.HandleFunc("/{userID}/library/items/{itemID}/approved-file", family.ServeParentRevoke).Methods(http.MethodDelete)
+		profileProtected.HandleFunc("/{userID}/library/items/{itemID}/approved-hls", family.ServeParentHLSStart).Methods(http.MethodPost)
+		profileProtected.HandleFunc("/{userID}/library/items/{itemID}/approved-hls/{hlsID}/{segment}", family.ServeParentHLSAsset).Methods(http.MethodGet, http.MethodHead)
+		profileProtected.HandleFunc("/{userID}/library/items/{itemID}/approved-hls/{hlsID}", family.ServeParentHLSStop).Methods(http.MethodDelete)
+		protected.HandleFunc("/library/items/{itemID}/raw-local", family.ServeLocalRaw).Methods(http.MethodGet, http.MethodHead, http.MethodOptions)
+		protected.HandleFunc("/library/items/{itemID}/raw-jellyfin", family.ServeJellyfinRaw).Methods(http.MethodGet, http.MethodHead, http.MethodOptions)
+		family.InstallRegisteredParent(localMediaHandler)
+	} else {
+		profileProtected.HandleFunc("/{userID}/kids/local-file-approvals", options.parentLocalFiles.Approve).Methods(http.MethodPost)
+		profileProtected.HandleFunc("/{userID}/library/items/{itemID}/approved-file", options.parentLocalFiles.Stream).Methods(http.MethodGet, http.MethodHead)
+		profileProtected.HandleFunc("/{userID}/library/items/{itemID}/approved-file", options.parentLocalFiles.Revoke).Methods(http.MethodDelete)
+		profileProtected.HandleFunc("/{userID}/library/items/{itemID}/approved-hls", options.parentLocalFiles.StartHLS).Methods(http.MethodPost)
+		profileProtected.HandleFunc("/{userID}/library/items/{itemID}/approved-hls/{hlsID}/{segment}", options.parentLocalFiles.ServeHLS).Methods(http.MethodGet, http.MethodHead)
+		profileProtected.HandleFunc("/{userID}/library/items/{itemID}/approved-hls/{hlsID}", options.parentLocalFiles.StopHLS).Methods(http.MethodDelete)
+		if localMediaHandler != nil && options.parentLocalFiles != nil {
+			localMediaHandler.SetParentLocalFiles(options.parentLocalFiles)
+		}
 	}
 	recoveryHandler := options.recovery
 	if recoveryHandler == nil {

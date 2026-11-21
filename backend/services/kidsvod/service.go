@@ -66,6 +66,10 @@ type Service struct {
 	fileReaders       map[*ParentFileReader]*parentFileApproval
 	fileProcesses     map[*ParentFileProcessLease]*parentFileApproval
 	fileOutputReaders int
+	parentFileRoot    context.Context
+	parentFilesClosed bool
+	parentFilesClose  sync.Once
+	parentFilesDone   chan struct{}
 }
 
 func New(deps Dependencies) (*Service, error) {

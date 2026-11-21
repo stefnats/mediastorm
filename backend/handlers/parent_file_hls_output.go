@@ -234,6 +234,7 @@ func (h *ParentLocalFileHandler) StartHLS(w http.ResponseWriter, r *http.Request
 			session.close()
 		}
 	}()
+	defer h.flushParentOnReturn(w, r)
 	video, audio, err := session.probe(setup)
 	if err != nil || h.current(bound, profile) != nil || session.start(setup, video, audio) != nil {
 		h.hlsError(w, 409)
@@ -262,7 +263,7 @@ func (h *ParentLocalFileHandler) StartHLS(w http.ResponseWriter, r *http.Request
 	}
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("Cache-Control", "private, no-store")
-	err = json.NewEncoder(w).Encode(struct {
+	err = h.writeParentSuccess(w, r, struct {
 		ID      string    `json:"sessionId"`
 		URL     string    `json:"playlistUrl"`
 		Expires time.Time `json:"expiresAt"`
@@ -390,6 +391,7 @@ func (h *ParentLocalFileHandler) ServeHLS(w http.ResponseWriter, r *http.Request
 			<-interrupt
 		}
 	}()
+	defer h.flushParentOnReturn(w, r)
 	check := func() bool {
 		return ctx.Err() == nil && h.current(r.WithContext(ctx), session.profile) == nil && session.lease.CheckRequest(r.WithContext(ctx), session.profile, session.item) == nil && session.check(ctx) == nil
 	}

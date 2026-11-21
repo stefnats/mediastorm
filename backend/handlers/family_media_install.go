@@ -38,6 +38,7 @@ type FamilyMediaInstallation struct {
 	once                sync.Once
 	done                chan struct{}
 	originalParentFiles *ParentLocalFileHandler
+	originalBoundary    *FamilyMediaBoundary
 }
 
 func InstallFamilyMedia(deps FamilyMediaDependencies) (*FamilyMediaInstallation, error) {
@@ -63,6 +64,7 @@ func InstallFamilyMedia(deps FamilyMediaDependencies) (*FamilyMediaInstallation,
 	installed := &FamilyMediaInstallation{Boundary: boundary, ParentFiles: files, deps: deps, done: make(chan struct{})}
 	installed.self = installed
 	installed.originalParentFiles = files
+	installed.originalBoundary = boundary
 	return installed, nil
 }
 
@@ -90,6 +92,9 @@ func (h *UsersHandler) PrepareFamilyMediaConsumers(original context.Context, sto
 	installed.jellyfinRaw, err = newFamilyJellyfinRawHandlerForInstallation(installed, manager, remote)
 	if err != nil || installed.original.Err() != nil {
 		return nil, profileunlock.ErrFamilyMediaUnavailable
+	}
+	if err = installed.originalParentFiles.bindOriginalLifetime(installed.original); err != nil {
+		return nil, err
 	}
 	installed.selected = true
 	keep = true
@@ -148,6 +153,7 @@ func (i *FamilyMediaInstallation) Close() {
 		if remote != nil {
 			remote.signalClose()
 		}
+		i.originalParentFiles.signalClose()
 		var joined sync.WaitGroup
 		if local != nil {
 			joined.Add(1)
@@ -158,7 +164,7 @@ func (i *FamilyMediaInstallation) Close() {
 			go func() { defer joined.Done(); remote.Close() }()
 		}
 		joined.Wait()
-		i.originalParentFiles.CloseHLS()
+		i.originalParentFiles.Close()
 		close(i.done)
 	})
 	<-i.done

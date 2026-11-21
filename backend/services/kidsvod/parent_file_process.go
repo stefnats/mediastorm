@@ -124,14 +124,14 @@ func (s *Service) PrepareParentFileProcessRequest(r *http.Request, profile, item
 		overhead = 64 << 20
 	}
 	reservation := size + overhead
-	life, cancel := context.WithDeadline(context.Background(), entry.intent.expires)
+	life, cancel := context.WithDeadline(entry.ctx, entry.intent.expires)
 	l := &ParentFileProcessLease{service: s, entry: entry, ctx: life, cancel: cancel, reservation: reservation, ready: make(chan struct{}), done: make(chan struct{}), setupDone: make(chan struct{})}
 	l.self = l
 	s.mu.Lock()
 	if s.fileProcesses == nil {
 		s.fileProcesses = map[*ParentFileProcessLease]*parentFileApproval{}
 	}
-	if s.fileGrants[id] != entry || entry.ctx.Err() != nil || len(s.leases)+len(s.fileReaders)+len(s.fileProcesses)+s.fileOutputReaders >= MaxLeases || r.Context().Err() != nil {
+	if !s.parentFilesAvailableLocked() || s.fileGrants[id] != entry || entry.ctx.Err() != nil || len(s.leases)+len(s.fileReaders)+len(s.fileProcesses)+s.fileOutputReaders >= MaxLeases || r.Context().Err() != nil {
 		s.mu.Unlock()
 		cancel()
 		return nil, ErrParentFileProcessBusy
@@ -209,7 +209,7 @@ func (l *ParentFileProcessLease) Check(ctx context.Context) error {
 	file := l.file
 	l.mu.Unlock()
 	l.service.mu.Lock()
-	current := l.service.fileProcesses[l] == l.entry && l.service.fileGrants[l.entry.id] == l.entry
+	current := l.service.parentFilesAvailableLocked() && l.service.fileProcesses[l] == l.entry && l.service.fileGrants[l.entry.id] == l.entry
 	l.service.mu.Unlock()
 	if closed || !current || l.entry.intent.permit == nil || l.service.checkFile(ctx, l.entry.intent) != nil || l.ctx.Err() != nil {
 		return ErrParentFileChanged
@@ -232,6 +232,11 @@ func (l *ParentFileProcessLease) CheckRequest(r *http.Request, profile, item str
 }
 func (l *ParentFileProcessLease) Handoff(r *http.Request) error {
 	if l == nil || l.self != l || r == nil || l.CheckRequest(r, l.entry.intent.profile, l.entry.intent.item) != nil {
+		return ErrParentFileChanged
+	}
+	l.service.mu.Lock()
+	defer l.service.mu.Unlock()
+	if !l.service.parentFilesAvailableLocked() || l.service.fileProcesses[l] != l.entry {
 		return ErrParentFileChanged
 	}
 	l.mu.Lock()
@@ -261,7 +266,7 @@ func (l *ParentFileProcessLease) ReserveOutput(r *http.Request, profile, item st
 	}
 	s := l.service
 	s.mu.Lock()
-	if s.fileProcesses[l] != l.entry || l.ctx.Err() != nil || len(s.leases)+len(s.fileReaders)+len(s.fileProcesses)+s.fileOutputReaders >= MaxLeases {
+	if !s.parentFilesAvailableLocked() || s.fileProcesses[l] != l.entry || l.ctx.Err() != nil || len(s.leases)+len(s.fileReaders)+len(s.fileProcesses)+s.fileOutputReaders >= MaxLeases {
 		s.mu.Unlock()
 		return nil, ErrParentFileProcessBusy
 	}
@@ -276,6 +281,11 @@ func (l *ParentFileProcessLease) ReserveOutput(r *http.Request, profile, item st
 // separate global reservation until successful original-root cleanup.
 func (l *ParentFileProcessLease) BindOutputRetirement(cancel context.CancelFunc, done <-chan struct{}) error {
 	if l == nil || l.self != l || cancel == nil || done == nil {
+		return ErrParentFileChanged
+	}
+	l.service.mu.Lock()
+	defer l.service.mu.Unlock()
+	if !l.service.parentFilesAvailableLocked() || l.service.fileProcesses[l] != l.entry {
 		return ErrParentFileChanged
 	}
 	l.mu.Lock()
@@ -298,12 +308,23 @@ func (l *ParentFileProcessLease) Run(ctx context.Context, binary string, args []
 	command, cancel := context.WithCancel(ctx)
 	stop := parentProcessAfterFunc(l.ctx, cancel)
 	defer func() { cancel(); stop() }()
+	l.service.mu.Lock()
+	if !l.service.parentFilesAvailableLocked() || l.service.fileProcesses[l] != l.entry {
+		l.service.mu.Unlock()
+		return ErrParentFileChanged
+	}
 	l.mu.Lock()
 	if l.closed || l.runDone != nil || l.file == nil || command.Err() != nil {
+		l.service.mu.Unlock()
 		l.mu.Unlock()
 		return ErrParentFileChanged
 	}
+	done := make(chan struct{})
+	l.runDone = done
+	l.service.mu.Unlock()
 	if _, err := l.file.Seek(0, io.SeekStart); err != nil {
+		l.runDone = nil
+		close(done)
 		l.mu.Unlock()
 		return ErrParentFileChanged
 	}
@@ -317,8 +338,6 @@ func (l *ParentFileProcessLease) Run(ctx context.Context, binary string, args []
 	cmd.Env = []string{"PATH=/usr/bin:/bin", "LANG=C", "LC_ALL=C", "TMPDIR=."}
 	cmd.WaitDelay = time.Second
 	cmd.Stdout, cmd.Stderr = stdout, stderr
-	done := make(chan struct{})
-	l.runDone = done
 	if err := cmd.Start(); err != nil {
 		l.runDone = nil
 		close(done)

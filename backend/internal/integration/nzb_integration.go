@@ -42,6 +42,9 @@ type NzbSystem struct {
 	runtimeMu                  sync.Mutex
 	active, activating, closed bool
 	sources                    map[*nzbStreamWork]struct{}
+	originalNamespace          *OriginalNZBNamespace
+	originalNamespaceObserved  func()
+	originalMetadataObserved   func()
 	sourceWork                 sync.WaitGroup
 	closeOnce                  sync.Once
 	closeErr                   error
@@ -291,7 +294,19 @@ func (ns *NzbSystem) Close() error {
 		if ns.cancel != nil {
 			ns.cancel()
 		}
+		namespace := ns.originalNamespace
+		originalWork := make([]*nzbStreamWork, 0, len(ns.sources))
+		for work := range ns.sources {
+			originalWork = append(originalWork, work)
+		}
 		ns.runtimeMu.Unlock()
+		for _, work := range originalWork {
+			work.cancel()
+		}
+		if namespace != nil {
+			namespace.signal()
+			ns.closeErr = errors.Join(ns.closeErr, namespace.closeAndJoin())
+		}
 		ns.sourceWork.Wait()
 		if ns.service != nil {
 			ns.closeErr = errors.Join(ns.closeErr, ns.service.Close())

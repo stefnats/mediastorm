@@ -22,6 +22,120 @@ const parentFileCheckBudget = 5 * time.Second
 const parentFilePreparationLifetime = 30 * time.Second
 const maxParentFileAccountPreparations = 8
 
+// BindParentFileRuntime binds lifetime only, never file/profile authority.
+// Managed composition calls it once before any actual parent source admission.
+func (s *Service) BindParentFileRuntime(original context.Context) error {
+	if s == nil || original == nil || original.Err() != nil {
+		return ErrParentFileChanged
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.parentFilesClosed || s.parentFileRoot != nil || len(s.filePreparing)+len(s.fileGrants)+len(s.fileReaders)+len(s.fileProcesses) != 0 {
+		return ErrParentFileChanged
+	}
+	s.parentFileRoot = original
+	return nil
+}
+func (s *Service) parentFilesAvailableLocked() bool {
+	return !s.parentFilesClosed && (s.parentFileRoot == nil || s.parentFileRoot.Err() == nil)
+}
+
+// SignalParentFilesClose gates every parent admission before signalling ALL
+// original actors. No callback or signal below waits for physical retirement.
+func (s *Service) SignalParentFilesClose() {
+	if s == nil {
+		return
+	}
+	s.mu.Lock()
+	s.parentFilesClosed = true
+	pending := make([]*ParentFileIntent, 0, len(s.filePreparing))
+	for i := range s.filePreparing {
+		pending = append(pending, i)
+	}
+	entries := make([]*parentFileApproval, 0, len(s.fileGrants))
+	for _, a := range s.fileGrants {
+		entries = append(entries, a)
+	}
+	readers := make([]*ParentFileReader, 0, len(s.fileReaders))
+	for r := range s.fileReaders {
+		readers = append(readers, r)
+	}
+	processes := make([]*ParentFileProcessLease, 0, len(s.fileProcesses))
+	for l := range s.fileProcesses {
+		processes = append(processes, l)
+	}
+	s.mu.Unlock()
+	for _, i := range pending {
+		i.mu.Lock()
+		cancel := i.preparationCancel
+		i.mu.Unlock()
+		if cancel != nil {
+			cancel()
+		}
+	}
+	for _, a := range entries {
+		a.cancel()
+	}
+	for _, r := range readers {
+		r.cancel()
+	}
+	for _, l := range processes {
+		l.Cancel()
+	}
+	for _, l := range processes {
+		l.mu.Lock()
+		cancel := l.outputCancel
+		l.mu.Unlock()
+		if cancel != nil {
+			cancel()
+		}
+	}
+}
+
+// CloseParentFiles is external to admitted HTTP/Check/worker stacks. Existing
+// source/ref capacity is refunded only by each actual original Close operation.
+func (s *Service) CloseParentFiles() {
+	if s == nil {
+		return
+	}
+	s.parentFilesClose.Do(func() {
+		s.SignalParentFilesClose()
+		s.mu.Lock()
+		s.parentFilesDone = make(chan struct{})
+		pending := make([]*ParentFileIntent, 0, len(s.filePreparing))
+		for i := range s.filePreparing {
+			pending = append(pending, i)
+		}
+		entries := make([]*parentFileApproval, 0, len(s.fileGrants))
+		for _, a := range s.fileGrants {
+			entries = append(entries, a)
+		}
+		readers := make([]*ParentFileReader, 0, len(s.fileReaders))
+		for r := range s.fileReaders {
+			readers = append(readers, r)
+		}
+		processes := make([]*ParentFileProcessLease, 0, len(s.fileProcesses))
+		for l := range s.fileProcesses {
+			processes = append(processes, l)
+		}
+		s.mu.Unlock()
+		for _, i := range pending {
+			i.Close()
+		}
+		for _, a := range entries {
+			a.close()
+		}
+		for _, r := range readers {
+			_ = r.Close()
+		}
+		for _, l := range processes {
+			_ = l.Close()
+		}
+		close(s.parentFilesDone)
+	})
+	// sync.Once joins concurrent callers; no service mutex spans retirement.
+}
+
 type FileReadAtCloser interface {
 	io.ReaderAt
 	io.Closer
@@ -143,6 +257,10 @@ func (s *Service) fileAuthority(ctx context.Context, a actor, profile string) (S
 		return Subject{}, "", time.Time{}, 0, ErrParentFileChanged
 	}
 	s.mu.Lock()
+	if !s.parentFilesAvailableLocked() {
+		s.mu.Unlock()
+		return Subject{}, "", time.Time{}, 0, ErrParentFileChanged
+	}
 	epoch := s.profileEpochLocked(profile)
 	s.mu.Unlock()
 	session, err := s.deps.Sessions.CurrentSession(ctx, a.token)
@@ -161,7 +279,7 @@ func (s *Service) fileAuthority(ctx context.Context, a actor, profile string) (S
 	raw, _ := json.Marshal([]any{session, p, policy, epoch})
 	sum := sha256.Sum256(raw)
 	s.mu.Lock()
-	unchanged := s.epochs[profile] == epoch
+	unchanged := s.parentFilesAvailableLocked() && s.epochs[profile] == epoch
 	s.mu.Unlock()
 	if !unchanged || ctx.Err() != nil || !session.ExpiresAt.After(s.deps.Clock.Now()) {
 		return Subject{}, "", time.Time{}, 0, ErrParentFileChanged
@@ -204,7 +322,7 @@ func (s *Service) PrepareParentFileRequest(r *http.Request, profile, item string
 			accountCount++
 		}
 	}
-	if len(s.grants)+len(s.fileGrants)+len(s.filePreparing) >= MaxGrants || accountCount >= maxParentFileAccountPreparations || prepCtx.Err() != nil {
+	if !s.parentFilesAvailableLocked() || len(s.grants)+len(s.fileGrants)+len(s.filePreparing) >= MaxGrants || accountCount >= maxParentFileAccountPreparations || prepCtx.Err() != nil {
 		s.mu.Unlock()
 		return nil, ErrParentFileChanged
 	}
@@ -329,7 +447,7 @@ func (s *Service) ApproveParentFile(r *http.Request, i *ParentFileIntent, permit
 	if s.fileGrants == nil {
 		s.fileGrants = map[string]*parentFileApproval{}
 	}
-	if s.epochs[i.profile] != i.epoch || len(s.grants)+len(s.fileGrants)+len(s.filePreparing) > MaxGrants || !i.expires.After(s.deps.Clock.Now()) || r.Context().Err() != nil {
+	if !s.parentFilesAvailableLocked() || s.epochs[i.profile] != i.epoch || len(s.grants)+len(s.fileGrants)+len(s.filePreparing) > MaxGrants || !i.expires.After(s.deps.Clock.Now()) || r.Context().Err() != nil {
 		s.mu.Unlock()
 		return "", time.Time{}, ErrParentFileChanged
 	}
@@ -341,7 +459,11 @@ func (s *Service) ApproveParentFile(r *http.Request, i *ParentFileIntent, permit
 	if i.preparationTimer != nil {
 		i.preparationTimer.Stop()
 	}
-	ctx, cancel := context.WithCancel(context.Background())
+	root := s.parentFileRoot
+	if root == nil {
+		root = context.Background()
+	} // Isolated legacy construction only.
+	ctx, cancel := context.WithDeadline(root, i.expires)
 	entry := &parentFileApproval{service: s, intent: i, id: id, ctx: ctx, cancel: cancel}
 	s.fileGrants[id] = entry
 	i.transferred = true
@@ -545,7 +667,7 @@ func (s *Service) acquireParentFileReader(r *http.Request, entry *parentFileAppr
 	l := &ParentFileReader{service: s, entry: entry, ctx: ctx, cancel: cancel, ready: make(chan struct{}), requestDone: make(chan struct{}), grantDone: make(chan struct{})}
 	s.mu.Lock()
 	s.pruneLocked()
-	if s.fileGrants[entry.id] != entry || entry.ctx.Err() != nil || len(s.leases)+len(s.fileReaders)+len(s.fileProcesses)+s.fileOutputReaders >= MaxLeases || r.Context().Err() != nil {
+	if !s.parentFilesAvailableLocked() || s.fileGrants[entry.id] != entry || entry.ctx.Err() != nil || len(s.leases)+len(s.fileReaders)+len(s.fileProcesses)+s.fileOutputReaders >= MaxLeases || r.Context().Err() != nil {
 		s.mu.Unlock()
 		cancel()
 		return nil, ErrParentFileChanged

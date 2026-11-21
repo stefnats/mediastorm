@@ -112,6 +112,14 @@ func (h *ParentLocalFileHandler) ConfigureHLS(ctx context.Context, options Paren
 	if runtime.GOOS != "linux" || h == nil || h.core == nil || ctx == nil || ctx.Err() != nil || current == nil || !validParentHLSOptions(options) {
 		return errParentFileHLS
 	}
+	if h.httpRuntime != nil {
+		work, finish, err := h.httpRuntime.begin(ctx, true)
+		if err != nil {
+			return errParentFileHLS
+		}
+		defer finish()
+		ctx = work
+	}
 	now, err := current(ctx)
 	if err != nil || now != options {
 		return errParentFileHLS
@@ -146,12 +154,27 @@ func (h *ParentLocalFileHandler) ConfigureHLS(ctx context.Context, options Paren
 		parent.Close()
 		return errParentFileHLS
 	}
-	life, cancel := context.WithCancel(context.Background())
+	original := context.Background()
+	if h.httpRuntime != nil {
+		original = h.httpRuntime.ctx
+	}
+	life, cancel := context.WithCancel(original)
 	m := &parentFileHLSManager{handler: h, options: options, current: current, ctx: life, cancel: cancel, parent: parent, root: root, name: name, info: info, nodes: nodes, sessions: map[string]*parentFileHLSSession{}}
+	if h.httpRuntime != nil {
+		h.httpRuntime.mu.Lock()
+		if h.httpRuntime.closed || h.httpRuntime.ctx.Err() != nil || ctx.Err() != nil {
+			h.httpRuntime.mu.Unlock()
+			m.close()
+			return errParentFileHLS
+		}
+	}
 	h.hlsMu.Lock()
 	old := h.hls
 	h.hls = m
 	h.hlsMu.Unlock()
+	if h.httpRuntime != nil {
+		h.httpRuntime.mu.Unlock()
+	}
 	if old != nil {
 		old.close()
 	}
@@ -199,11 +222,24 @@ func (m *parentFileHLSManager) check(ctx context.Context) error {
 	}
 	return nil
 }
+func (m *parentFileHLSManager) signalClose() {
+	m.cancel()
+	m.mu.Lock()
+	m.closed = true
+	sessions := make([]*parentFileHLSSession, 0, len(m.sessions))
+	for _, s := range m.sessions {
+		sessions = append(sessions, s)
+	}
+	m.mu.Unlock()
+	for _, s := range sessions {
+		s.cancel()
+		s.lease.Cancel()
+	}
+}
 func (m *parentFileHLSManager) close() {
 	m.once.Do(func() {
-		m.cancel()
+		m.signalClose()
 		m.mu.Lock()
-		m.closed = true
 		var sessions []*parentFileHLSSession
 		for _, session := range m.sessions {
 			sessions = append(sessions, session)

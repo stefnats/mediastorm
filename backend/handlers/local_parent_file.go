@@ -27,13 +27,14 @@ import (
 // ParentLocalFileHandler is an explicitly configured raw-local-only vertical.
 // Main does not install it yet; unsupported media routes are a separate closure.
 type ParentLocalFileHandler struct {
-	store  *datastore.DataStore
-	pins   *profileunlock.PGProfilePins
-	parent *parentauth.Guard
-	local  *localmedia.Service
-	core   *kidsvod.Service
-	hlsMu  sync.Mutex
-	hls    *parentFileHLSManager
+	store       *datastore.DataStore
+	pins        *profileunlock.PGProfilePins
+	parent      *parentauth.Guard
+	local       *localmedia.Service
+	core        *kidsvod.Service
+	httpRuntime *parentFileHTTPRuntime
+	hlsMu       sync.Mutex
+	hls         *parentFileHLSManager
 }
 type parentFileProfiles struct{ store *datastore.DataStore }
 
@@ -54,7 +55,7 @@ func NewParentLocalFileHandler(store *datastore.DataStore, pins *profileunlock.P
 }
 func (h *ParentLocalFileHandler) available(w http.ResponseWriter) bool {
 	w.Header().Set("Cache-Control", "private, no-store")
-	if h == nil || h.store == nil || h.pins == nil || h.parent == nil || h.local == nil || h.core == nil {
+	if h == nil || h.store == nil || h.pins == nil || h.parent == nil || h.local == nil || h.core == nil || !h.managedAvailable() {
 		apierror.Write(w, 503, "kids_local_file_unavailable", "Parent-approved local files are unavailable.")
 		return false
 	}
@@ -141,6 +142,7 @@ func (h *ParentLocalFileHandler) Approve(w http.ResponseWriter, r *http.Request)
 			return
 		}
 		apierror.Write(w, 403, parentauth.RequiredCode, "Confirm the account password to approve this local file.", map[string]string{"parentIntent": token})
+		h.flushParentOutput(w, r)
 		return
 	}
 	intent, attachment, err := h.pins.ClaimParentLocalFile(r, profile, body, values[0])
@@ -150,6 +152,7 @@ func (h *ParentLocalFileHandler) Approve(w http.ResponseWriter, r *http.Request)
 	}
 	defer intent.Close()
 	defer attachment.Close()
+	defer h.flushParentOnReturn(w, r)
 	file, ok := attachment.(*kidsvod.ParentFileIntent)
 	if !ok {
 		h.deny(w, r)
@@ -192,7 +195,7 @@ func (h *ParentLocalFileHandler) Approve(w http.ResponseWriter, r *http.Request)
 		return
 	}
 	w.Header().Set("Content-Type", "application/json")
-	err = json.NewEncoder(w).Encode(struct {
+	err = h.writeParentSuccess(w, r, struct {
 		ApprovalID string    `json:"approvalId"`
 		ExpiresAt  time.Time `json:"expiresAt"`
 		StreamURL  string    `json:"streamUrl"`
@@ -200,6 +203,33 @@ func (h *ParentLocalFileHandler) Approve(w http.ResponseWriter, r *http.Request)
 	}{id, expires, parentFileURL(profile, item, id), "parent-file-exception"})
 	published = err == nil && bound.Context().Err() == nil
 }
+
+// Exact success framing completes on the wire before original source/worker
+// cleanup may begin. Generic denials retain their existing bounded envelope.
+func (h *ParentLocalFileHandler) writeParentSuccess(w http.ResponseWriter, r *http.Request, view any) error {
+	if h.httpRuntime == nil {
+		return json.NewEncoder(w).Encode(view)
+	}
+	raw, err := json.Marshal(view)
+	if err != nil || len(raw) >= 4096 {
+		clear(raw)
+		apierror.Write(w, 503, "kids_local_file_unavailable", "Parent-approved local files are unavailable.")
+		return kidsvod.ErrParentFileChanged
+	}
+	raw = append(raw, '\n')
+	defer clear(raw)
+	if r.Context().Err() != nil || !h.managedAvailable() {
+		panic(http.ErrAbortHandler)
+	}
+	w.Header().Set("Content-Length", strconv.Itoa(len(raw)))
+	n, err := w.Write(raw)
+	if err != nil || n != len(raw) {
+		panic(http.ErrAbortHandler)
+	}
+	h.flushParentOutput(w, r)
+	return nil
+}
+
 func parentFileURL(profile, item, id string) string {
 	return "/api/users/" + url.PathEscape(profile) + "/library/items/" + url.PathEscape(item) + "/approved-file?approvalId=" + url.QueryEscape(id)
 }
@@ -351,6 +381,7 @@ func (h *ParentLocalFileHandler) Stream(w http.ResponseWriter, r *http.Request) 
 		}
 	}()
 	defer func() { stopWatch(); <-watchDone }()
+	defer h.flushParentOnReturn(w, r)
 	if !check(r.Context()) {
 		h.deny(w, r)
 		return
@@ -361,6 +392,7 @@ func (h *ParentLocalFileHandler) Stream(w http.ResponseWriter, r *http.Request) 
 			return
 		}
 		w.Header().Set("Content-Range", fmt.Sprintf("bytes */%d", reader.Size()))
+		w.Header().Set("Content-Length", "0")
 		w.WriteHeader(http.StatusRequestedRangeNotSatisfiable)
 		return
 	}
