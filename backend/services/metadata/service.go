@@ -30,7 +30,9 @@ import (
 )
 
 type Service struct {
-	releaseWarm releaseWarmer // background warm-up of uncached movie release windows
+	episodeDates    *episodeDateCache
+	episodeLanguage string
+	releaseWarm     releaseWarmer // background warm-up of uncached movie release windows
 
 	client  *tvdbClient
 	tmdb    *tmdbClient
@@ -208,6 +210,7 @@ func NewService(tvdbAPIKey, tmdbAPIKey, language, cacheDir string, ttlHours int,
 		progressTasks:    make(map[string]*ProgressTask),
 		cacheDir:         cacheDir,
 	}
+	svc.episodeDates = newEpisodeDateCache(svc.client, ttlHours)
 	svc.releaseWarm.enabled = true
 	return svc
 }
@@ -230,6 +233,8 @@ func (s *Service) WithLanguage(language string) *Service {
 	}
 
 	local := &Service{
+		episodeDates:        s.episodeDates,
+		episodeLanguage:     normalizeTVDBLanguage(language),
 		client:              newTVDBClient(tvdbAPIKey, language, &http.Client{}, s.ttlHours),
 		tmdb:                newTMDBClient(tmdbAPIKey, language, &http.Client{}, s.cache),
 		ai:                  s.ai,
@@ -1015,6 +1020,9 @@ func (s *Service) warmRatingsForCachedItems(ctx context.Context) {
 // This allows hot reloading when settings change
 func (s *Service) UpdateAPIKeys(tvdbAPIKey, tmdbAPIKey, language string, aiConfigs ...AIConfig) {
 	s.client = newTVDBClient(tvdbAPIKey, language, &http.Client{}, s.ttlHours)
+	if s.episodeDates != nil {
+		s.episodeDates.reset(s.client)
+	}
 	s.tmdb = newTMDBClient(tmdbAPIKey, language, &http.Client{}, s.cache)
 	if len(aiConfigs) > 0 {
 		s.ai = newAIClient(aiConfigs[0], &http.Client{}, s.cache)
@@ -4794,7 +4802,7 @@ func (s *Service) SeriesDetails(ctx context.Context, req models.SeriesDetailsQue
 	// Determine the active episode ordering. availableOrderings is empty when the
 	// series has only one ordering. activeSeasonType is the requested ordering
 	// when valid, otherwise the auto-detected official/primary ordering.
-	availableOrderings := s.filterOrderingsWithEpisodes(tvdbID, availableSeriesOrderings(extended.Seasons))
+	availableOrderings := s.filterOrderingsWithEpisodesContext(ctx, tvdbID, availableSeriesOrderings(extended.Seasons), s.episodeCatalogueLanguage())
 	primarySeasonTypeForReq := detectPrimarySeasonType(extended.Seasons)
 	if primarySeasonTypeForReq == "" {
 		primarySeasonTypeForReq = "official"
@@ -4859,10 +4867,15 @@ func (s *Service) SeriesDetails(ctx context.Context, req models.SeriesDetailsQue
 		seasonTransChan <- seasonTrans
 	}()
 
-	// Fetch localized episodes in background (numbered under the active ordering)
+	// The original method owns this actual child even when a successful
+	// provider-mismatch fallback returns before receiving its ordinary result.
+	localizedContext, cancelLocalized := context.WithCancel(ctx)
+	localizedDone := make(chan struct{})
+	defer func() { cancelLocalized(); <-localizedDone }()
 	go func() {
+		defer close(localizedDone)
 		englishEpisodes := make(map[int64]tvdbEpisode)
-		if localized, err := s.cachedSeriesEpisodesBySeasonType(tvdbID, activeSeasonType, s.client.language); err == nil {
+		if localized, err := s.cachedSeriesEpisodesBySeasonTypeContext(localizedContext, tvdbID, activeSeasonType, s.episodeCatalogueLanguage()); err == nil {
 			for _, ep := range localized {
 				englishEpisodes[ep.ID] = ep
 			}
@@ -5762,17 +5775,22 @@ func (s *Service) SeriesDetailsLite(ctx context.Context, req models.SeriesDetail
 	extended := extResult.data
 
 	// Determine the active episode ordering (see SeriesDetails for details).
-	availableOrderings := s.filterOrderingsWithEpisodes(tvdbID, availableSeriesOrderings(extended.Seasons))
+	availableOrderings := s.filterOrderingsWithEpisodesContext(ctx, tvdbID, availableSeriesOrderings(extended.Seasons), s.episodeCatalogueLanguage())
 	primarySeasonTypeForReq := detectPrimarySeasonType(extended.Seasons)
 	if primarySeasonTypeForReq == "" {
 		primarySeasonTypeForReq = "official"
 	}
 	activeSeasonType := resolveSeasonType(req.SeasonType, primarySeasonTypeForReq, availableOrderings)
 
-	// Now that we have extended data, fetch localized episodes in background
+	// Own the localized child through its actual response/Close end on every
+	// later return, including a successful mismatch fallback before reception.
+	localizedContext, cancelLocalized := context.WithCancel(ctx)
+	localizedDone := make(chan struct{})
+	defer func() { cancelLocalized(); <-localizedDone }()
 	go func() {
+		defer close(localizedDone)
 		localizedEps := make(map[int64]tvdbEpisode)
-		if localized, err := s.cachedSeriesEpisodesBySeasonType(tvdbID, activeSeasonType, s.client.language); err == nil {
+		if localized, err := s.cachedSeriesEpisodesBySeasonTypeContext(localizedContext, tvdbID, activeSeasonType, s.episodeCatalogueLanguage()); err == nil {
 			for _, ep := range localized {
 				localizedEps[ep.ID] = ep
 			}
@@ -12516,4 +12534,93 @@ func applyDateBasedSeriesClassification(title *models.Title) (bool, string) {
 		}
 	}
 	return false, ""
+}
+
+// cachedSeriesEpisodesBySeasonTypeContext is the ordinary localized metadata
+// producer. A legacy disk hit stays ordinary metadata and supplies no new date
+// observation. Only a complete original HTTP fetch may populate the private lane.
+func (s *Service) cachedSeriesEpisodesBySeasonTypeContext(ctx context.Context, tvdbID int64, seasonType, lang string) ([]tvdbEpisode, error) {
+	if ctx == nil || ctx.Err() != nil {
+		return nil, errEpisodeDateCatalogueUnavailable
+	}
+	if s.episodeDates == nil {
+		return s.cachedSeriesEpisodesBySeasonType(tvdbID, seasonType, lang)
+	}
+	original, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+	seasonType = strings.ToLower(strings.TrimSpace(seasonType))
+	if seasonType == "" {
+		seasonType = "official"
+	}
+	lang = normalizeTVDBLanguage(lang)
+	if seasonType == "official" {
+		if rows, ok := s.episodeDates.cachedRows(original, tvdbID, lang); ok {
+			if original.Err() != nil {
+				return nil, original.Err()
+			}
+			return rows, nil
+		}
+	}
+	cacheID := cacheKey("tvdb", "series", "episodes", "by-season-type", "v1", fmt.Sprintf("%d", tvdbID), seasonType, lang)
+	var cached []tvdbEpisode
+	if s.cache != nil {
+		if ok, _ := s.cache.get(cacheID, &cached); ok {
+			if original.Err() != nil {
+				return nil, original.Err()
+			}
+			return cached, nil
+		}
+	}
+	work, err := s.episodeDates.begin(original)
+	if err != nil {
+		return nil, err
+	}
+	defer work.finish()
+	rows, observation, err := work.client.completeEpisodeCatalogue(work, tvdbID, seasonType, lang)
+	if err != nil {
+		return nil, err
+	}
+	if work.ctx.Err() != nil {
+		return nil, work.ctx.Err()
+	}
+	if s.cache != nil {
+		_ = s.cache.set(cacheID, rows)
+	}
+	if work.ctx.Err() != nil {
+		return nil, work.ctx.Err()
+	}
+	s.episodeDates.publish(work, observation)
+	if work.ctx.Err() != nil {
+		return nil, work.ctx.Err()
+	}
+	return rows, nil
+}
+
+// filterOrderingsWithEpisodesContext validates only a bounded metadata switcher.
+// It supplies no file/source authority. A single fixed original budget covers
+// the entire sequential list; a provider cannot multiply it with more types.
+func (s *Service) filterOrderingsWithEpisodesContext(ctx context.Context, tvdbID int64, orderings []models.SeriesOrdering, language string) []models.SeriesOrdering {
+	if ctx == nil || ctx.Err() != nil || len(orderings) <= 1 || len(orderings) > 32 {
+		return nil
+	}
+	if s.episodeDates == nil {
+		return s.filterOrderingsWithEpisodes(tvdbID, orderings)
+	}
+	original, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+	hasEpisodes := make(map[string]bool, len(orderings))
+	for _, ordering := range orderings {
+		if original.Err() != nil {
+			return nil
+		}
+		rows, err := s.cachedSeriesEpisodesBySeasonTypeContext(original, tvdbID, ordering.Type, language)
+		if original.Err() != nil {
+			return nil
+		}
+		hasEpisodes[ordering.Type] = err == nil && len(rows) > 0
+	}
+	if original.Err() != nil {
+		return nil
+	}
+	return filterOrderingsByEpisodes(orderings, func(kind string) bool { return hasEpisodes[kind] })
 }
