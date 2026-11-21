@@ -52,15 +52,26 @@ func requestPending(t *testing.T, ch <-chan struct{}, label string) {
 }
 func requestYenc(payload []byte) string {
 	var encoded strings.Builder
+	column := 0
 	for _, part := range payload {
 		b := part + 42
-		if b == 0 || b == 9 || b == 10 || b == 13 || b == 32 || b == 46 || b == 61 {
+		escaped := b == 0 || b == 9 || b == 10 || b == 13 || b == 32 || b == 46 || b == 61
+		width := 1
+		if escaped {
+			width = 2
+		}
+		if column+width > 128 {
+			encoded.WriteString("\r\n")
+			column = 0
+		}
+		if escaped {
 			encoded.WriteByte('=')
 			b += 64
 		}
 		encoded.WriteByte(b)
+		column += width
 	}
-	return fmt.Sprintf("=ybegin line=1048576 size=%d name=synthetic.bin\r\n%s\r\n=yend size=%d crc32=%08x\r\n.\r\n", len(payload), encoded.String(), len(payload), crc32.ChecksumIEEE(payload))
+	return fmt.Sprintf("=ybegin line=128 size=%d name=synthetic.bin\r\n%s\r\n=yend size=%d crc32=%08x\r\n.\r\n", len(payload), encoded.String(), len(payload), crc32.ChecksumIEEE(payload))
 }
 
 type requestHeldPool struct {
@@ -569,8 +580,20 @@ func TestMetadataRequestSourceLifetime(t *testing.T) {
 				}
 			case "aes-reopened-inner-readers", "rclone-header-and-reopen-readers":
 				out := make([]byte, 32)
-				if _, e := io.ReadFull(file, out); e != nil {
-					t.Fatal(e)
+				readDone := make(chan struct{})
+				var readErr error
+				// Register actual cancellation/gate release/read+source joins before go.
+				// A broken encoded fixture must fail its witness instead of holding EOF forever.
+				t.Cleanup(func() {
+					cancel()
+					f.releaseAll()
+					requestWait(t, readDone, "original encrypted Read cleanup")
+					requestJoin(t, file)
+				})
+				go func() { defer close(readDone); _, readErr = io.ReadFull(file, out) }()
+				requestWait(t, readDone, "genuine encrypted header/reopen Read")
+				if readErr != nil {
+					t.Fatal(readErr)
 				}
 				offset := 0
 				if name == "rclone-header-and-reopen-readers" {
