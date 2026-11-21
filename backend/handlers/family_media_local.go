@@ -15,6 +15,7 @@ import (
 
 	"github.com/gorilla/mux"
 	"novastream/internal/datastore"
+	"novastream/services/localmedia"
 	"novastream/services/profileunlock"
 )
 
@@ -27,6 +28,13 @@ type familyLocalRawOpener interface {
 type familyLocalRawHandler struct {
 	installation *FamilyMediaInstallation
 	opener       familyLocalRawOpener
+	mu           sync.Mutex
+	life         context.Context
+	cancel       context.CancelFunc
+	active       sync.WaitGroup
+	closed       bool
+	once         sync.Once
+	done         chan struct{}
 }
 
 func familyLocalRawDeny(w http.ResponseWriter, err error) {
@@ -37,15 +45,92 @@ func familyLocalRawDeny(w http.ResponseWriter, err error) {
 }
 
 func newFamilyLocalRawHandler(deps FamilyMediaDependencies) (*familyLocalRawHandler, error) {
-	opener, ok := any(deps.Local).(familyLocalRawOpener)
-	if !ok || deps.Store == nil || deps.Pins == nil || !deps.Pins.FamilyMediaReady(deps.Store) || !opener.FamilyLocalSourceReady(deps.Store) {
-		return nil, profileunlock.ErrFamilyMediaUnavailable
-	}
-	installation, err := InstallFamilyMedia(deps)
+	installed, err := InstallFamilyMedia(deps)
 	if err != nil {
 		return nil, err
 	}
-	return &familyLocalRawHandler{installation: installation, opener: opener}, nil
+	return newFamilyLocalRawHandlerForInstallation(installed, deps.Local)
+}
+func newFamilyLocalRawHandlerForInstallation(installed *FamilyMediaInstallation, local *localmedia.Service) (*familyLocalRawHandler, error) {
+	if !installed.valid() || local == nil || installed.deps.Local != local {
+		return nil, profileunlock.ErrFamilyMediaUnavailable
+	}
+	opener, ok := any(local).(familyLocalRawOpener)
+	if !ok || !opener.FamilyLocalSourceReady(installed.deps.Store) {
+		return nil, profileunlock.ErrFamilyMediaUnavailable
+	}
+	original := installed.original
+	if original == nil {
+		original = context.Background()
+	} // Isolated legacy constructor only.
+	life, cancel := context.WithCancel(original)
+	return &familyLocalRawHandler{installation: installed, opener: opener, life: life, cancel: cancel, done: make(chan struct{})}, nil
+}
+func (h *familyLocalRawHandler) begin(caller context.Context) (context.Context, func(), error) {
+	if h == nil || caller == nil || caller.Err() != nil {
+		return nil, nil, profileunlock.ErrFamilyMediaUnavailable
+	}
+	h.mu.Lock()
+	if h.closed || h.life == nil || h.life.Err() != nil {
+		h.mu.Unlock()
+		return nil, nil, profileunlock.ErrFamilyMediaUnavailable
+	}
+	h.active.Add(1)
+	h.mu.Unlock()
+	ctx, cancel := context.WithCancel(caller)
+	stop := familyMediaAfterFunc(h.life, cancel)
+	var once sync.Once
+	finish := func() { once.Do(func() { stop(); cancel(); h.active.Done() }) }
+	return ctx, finish, nil
+}
+func (h *familyLocalRawHandler) signalClose() {
+	if h == nil {
+		return
+	}
+	h.mu.Lock()
+	h.closed = true
+	if h.cancel != nil {
+		h.cancel()
+	}
+	h.mu.Unlock()
+}
+func (h *familyLocalRawHandler) Close() {
+	if h == nil || h.done == nil {
+		return
+	}
+	h.once.Do(func() { h.signalClose(); h.active.Wait(); close(h.done) })
+	<-h.done
+}
+func (h *familyLocalRawHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	if r == nil {
+		familyLocalRawDeny(w, profileunlock.ErrFamilyMediaUnavailable)
+		return
+	}
+	ctx, finish, err := h.begin(r.Context())
+	if err != nil {
+		familyLocalRawDeny(w, err)
+		return
+	}
+	defer finish()
+	// Existing isolated fixtures keep their original response semantics.
+	if h.installation.original == nil {
+		h.serveHTTP(w, r.WithContext(ctx))
+		return
+	}
+	output, stop, err := familyKnownRawOutput(w, ctx)
+	if err != nil {
+		familyLocalRawDeny(w, err)
+		return
+	}
+	defer stop()
+	completed := false
+	defer func() {
+		if completed && output.FlushError() != nil {
+			panic(http.ErrAbortHandler)
+		}
+	}()
+	h.serveHTTP(output, r.WithContext(ctx))
+	completed = true
 }
 
 func familyLocalRawItem(r *http.Request) (string, error) {
@@ -218,7 +303,7 @@ func (h *familyLocalRawHandler) open(r *familyMediaRuntime, setup context.Contex
 	return file, nil
 }
 
-func (h *familyLocalRawHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+func (h *familyLocalRawHandler) serveHTTP(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Cache-Control", "private, no-store")
 	w.Header().Set("Allow", "GET, HEAD, OPTIONS")
 	if r.Method == http.MethodOptions {
@@ -243,6 +328,14 @@ func (h *familyLocalRawHandler) ServeHTTP(w http.ResponseWriter, r *http.Request
 		return
 	}
 	defer q.Close()
+	h.serveCaptured(w, r, q, item)
+	// A normal handled response, including a denial, must leave the actual
+	// transport while the original writer/source cleanup still remains owned.
+	if err := http.NewResponseController(w).Flush(); err != nil {
+		panic(http.ErrAbortHandler)
+	}
+}
+func (h *familyLocalRawHandler) serveCaptured(w http.ResponseWriter, r *http.Request, q *FamilyMediaRequest, item string) {
 	runtime, err := q.adoptRuntime(r)
 	if err != nil {
 		familyLocalRawDeny(w, err)
@@ -279,8 +372,12 @@ func (h *familyLocalRawHandler) ServeHTTP(w http.ResponseWriter, r *http.Request
 	}
 	if rangeErr != nil {
 		writer.Header().Set("Content-Range", "bytes */"+strconv.FormatInt(info.Size, 10))
+		writer.Header().Set("Content-Length", "0")
 		writer.WriteHeader(http.StatusRequestedRangeNotSatisfiable)
 		if familyLocalRawCurrent(consumer, file) != nil {
+			panic(http.ErrAbortHandler)
+		}
+		if err := http.NewResponseController(writer).Flush(); err != nil || familyLocalRawCurrent(consumer, file) != nil {
 			panic(http.ErrAbortHandler)
 		}
 		return
@@ -292,7 +389,7 @@ func (h *familyLocalRawHandler) ServeHTTP(w http.ResponseWriter, r *http.Request
 			familyLocalRawDeny(w, err)
 			return
 		}
-		defer body.Close()
+
 	}
 	if familyLocalRawCurrent(consumer, file) != nil {
 		familyLocalRawDeny(w, profileunlock.ErrFamilyMediaChanged)
@@ -323,6 +420,9 @@ func (h *familyLocalRawHandler) ServeHTTP(w http.ResponseWriter, r *http.Request
 		panic(http.ErrAbortHandler)
 	}
 	if body != nil && familyLocalRawCopy(consumer, file, writer, body, length) != nil {
+		panic(http.ErrAbortHandler)
+	}
+	if err := http.NewResponseController(writer).Flush(); err != nil || familyLocalRawCurrent(consumer, file) != nil {
 		panic(http.ErrAbortHandler)
 	}
 }
