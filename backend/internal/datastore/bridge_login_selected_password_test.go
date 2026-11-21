@@ -248,8 +248,20 @@ func TestBridgeSelectedPasswordOriginalRejectedReceipts(t *testing.T) {
 			case "rejected-household":
 				f.exec(t, `INSERT INTO users(id,account_id,name)VALUES('unmatched-member','other','Unmatched')`)
 			case "rejected-account-aba":
+				var original models.Account
+				var originalAccountRow, originalProfileRow string
+				if err := f.ds.pool.QueryRow(t.Context(), `SELECT a.id,a.username,a.password_hash,a.is_master,a.max_streams,a.expires_at,a.created_at,a.updated_at,concat(a.tableoid::oid,':',a.xmin::text,':',a.ctid::text),concat(u.tableoid::oid,':',u.xmin::text,':',u.ctid::text) FROM accounts a JOIN users u ON u.account_id=a.id WHERE a.id='other' AND u.id='a-rejected'`).Scan(&original.ID, &original.Username, &original.PasswordHash, &original.IsMaster, &original.MaxStreams, &original.ExpiresAt, &original.CreatedAt, &original.UpdatedAt, &originalAccountRow, &originalProfileRow); err != nil {
+					t.Fatal("read original rejected account/profile tuple", err)
+				}
 				f.exec(t, `DELETE FROM accounts WHERE id='other'`)
-				bridgeSelectedAdd(t, f, "a-rejected", "other", "synthetic rejected password", false)
+				f.exec(t, `INSERT INTO accounts(id,username,password_hash,is_master,max_streams,expires_at,created_at,updated_at)VALUES($1,$2,$3,$4,$5,$6,$7,$8)`, original.ID, original.Username, original.PasswordHash, original.IsMaster, original.MaxStreams, original.ExpiresAt, original.CreatedAt, original.UpdatedAt)
+				var replacedAccountRow, retainedProfileRow string
+				if err := f.ds.pool.QueryRow(t.Context(), `SELECT concat(a.tableoid::oid,':',a.xmin::text,':',a.ctid::text),concat(u.tableoid::oid,':',u.xmin::text,':',u.ctid::text) FROM accounts a JOIN users u ON u.account_id=a.id WHERE a.id='other' AND u.id='a-rejected'`).Scan(&replacedAccountRow, &retainedProfileRow); err != nil {
+					t.Fatal("read replaced rejected account and retained profile", err)
+				}
+				if replacedAccountRow == originalAccountRow || retainedProfileRow != originalProfileRow {
+					t.Fatal("account ABA did not retain the original profile unchanged")
+				}
 			case "rejected-profile-aba":
 				f.exec(t, `DELETE FROM users WHERE id='a-rejected'`)
 				f.exec(t, `INSERT INTO users(id,account_id,name)VALUES('a-rejected','other','Shared')`)
