@@ -2,10 +2,12 @@ package integration
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
+	"os"
 	"regexp"
 	"strconv"
 	"strings"
@@ -223,6 +225,17 @@ var queuePathRegex = regexp.MustCompile(`^queue/(\d+)/`)
 
 // Stream implements streaming.Provider for both queue paths and storage paths
 func (ns *NzbSystem) Stream(ctx context.Context, req streaming.Request) (*streaming.Response, error) {
+	// The concrete request source must exist before metadata/queue IO begins.
+	if ctx == nil {
+		return nil, nzbfilesystem.ErrRequestSourceRetired
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if ns == nil || ns.nzbFs == nil {
+		return nil, nzbfilesystem.ErrSourceCleanupUnsupported
+	}
+
 	// Check if this is a queue path
 	matches := queuePathRegex.FindStringSubmatch(req.Path)
 	if len(matches) >= 2 {
@@ -242,12 +255,24 @@ func (ns *NzbSystem) Stream(ctx context.Context, req streaming.Request) (*stream
 func (ns *NzbSystem) streamQueuePath(ctx context.Context, req streaming.Request, queueID int64) (*streaming.Response, error) {
 
 	// Get queue item from database
-	queueItem, err := ns.database.Repository.GetQueueItem(queueID)
+	if ns.database == nil || ns.database.Repository == nil {
+		return nil, streaming.ErrNotFound
+	}
+	queueItem, err := ns.database.Repository.GetQueueItemContext(ctx, queueID)
+	if ctx.Err() != nil {
+		return nil, ctx.Err()
+	}
 	if err != nil {
 		slog.Error("failed to get queue item", "queue_id", queueID, "error", err)
 		return nil, streaming.ErrNotFound
 	}
 
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if queueItem == nil {
+		return nil, streaming.ErrNotFound
+	}
 	// Check if queue item is completed
 	if queueItem.Status != database.QueueStatusCompleted {
 		// Queue item not ready yet - return 503 so frontend retries
@@ -268,86 +293,7 @@ func (ns *NzbSystem) streamQueuePath(ctx context.Context, req streaming.Request,
 
 	actualPath := strings.TrimPrefix(*queueItem.StoragePath, "/")
 
-	// For HEAD requests, just return file info without body
-	if req.Method == http.MethodHead {
-		fileInfo, err := ns.fs.Stat(actualPath)
-		if err != nil {
-			slog.Error("file not found for completed queue item", "queue_id", queueID, "path", actualPath, "error", err)
-			return nil, streaming.ErrNotFound
-		}
-
-		return &streaming.Response{
-			Status:        http.StatusOK,
-			ContentLength: fileInfo.Size(),
-			Headers: http.Header{
-				"Accept-Ranges":  []string{"bytes"},
-				"Content-Type":   []string{"video/mp4"}, // Default, could be detected
-				"Content-Length": []string{strconv.FormatInt(fileInfo.Size(), 10)},
-				"Last-Modified":  []string{fileInfo.ModTime().UTC().Format(http.TimeFormat)},
-			},
-			Body: io.NopCloser(strings.NewReader("")),
-		}, nil
-	}
-
-	// For GET requests, open and stream the file with request context
-	// This ensures usenet readers are cancelled when the client disconnects
-	file, err := ns.nzbFs.OpenWithContext(ctx, actualPath)
-	if err != nil {
-		slog.Error("failed to open file for completed queue item", "queue_id", queueID, "path", actualPath, "error", err)
-		return nil, streaming.ErrNotFound
-	}
-
-	fileInfo, err := file.Stat()
-	if err != nil {
-		file.Close()
-		return nil, fmt.Errorf("failed to stat file: %w", err)
-	}
-
-	// Handle range requests
-	contentLength := fileInfo.Size()
-	status := http.StatusOK
-	headers := http.Header{
-		"Accept-Ranges": []string{"bytes"},
-		"Content-Type":  []string{"video/mp4"},
-		// URLSession needs a validator to preserve partial downloads on pause.
-		"Last-Modified": []string{fileInfo.ModTime().UTC().Format(http.TimeFormat)},
-	}
-
-	if req.RangeHeader != "" && matchesStreamIfRange(req.IfRange, fileInfo.ModTime()) {
-		// Parse range header (simplified - only handles single range)
-		rangeSpec := strings.TrimPrefix(req.RangeHeader, "bytes=")
-		parts := strings.Split(rangeSpec, "-")
-		if len(parts) == 2 {
-			start, _ := strconv.ParseInt(parts[0], 10, 64)
-			end := contentLength - 1
-			if parts[1] != "" {
-				end, _ = strconv.ParseInt(parts[1], 10, 64)
-			}
-
-			// Seek to start position
-			if seeker, ok := file.(io.Seeker); ok {
-				if _, err := seeker.Seek(start, io.SeekStart); err != nil {
-					file.Close()
-					return nil, fmt.Errorf("seek failed: %w", err)
-				}
-
-				rangeLength := end - start + 1
-				status = http.StatusPartialContent
-				headers.Set("Content-Range", fmt.Sprintf("bytes %d-%d/%d", start, end, contentLength))
-				headers.Set("Content-Length", strconv.FormatInt(rangeLength, 10))
-				contentLength = rangeLength
-			}
-		}
-	} else {
-		headers.Set("Content-Length", strconv.FormatInt(contentLength, 10))
-	}
-
-	return &streaming.Response{
-		Status:        status,
-		ContentLength: contentLength,
-		Headers:       headers,
-		Body:          file,
-	}, nil
+	return ns.streamContextFile(ctx, req, actualPath)
 }
 
 // streamStoragePath handles streaming for storage paths (completed items)
@@ -359,84 +305,98 @@ func (ns *NzbSystem) streamStoragePath(ctx context.Context, req streaming.Reques
 		return nil, streaming.ErrNotFound
 	}
 
-	// For HEAD requests, just return file info without body
+	return ns.streamContextFile(ctx, req, actualPath)
+}
+
+// streamContextFile retains the exact concrete bounded RequestSource. Returning
+// the real file keeps F2 cleanup identity; every failed open/stat/seek path joins
+// before returning, and successful Response.Close joins that same source.
+func (ns *NzbSystem) streamContextFile(ctx context.Context, req streaming.Request, actualPath string) (response *streaming.Response, err error) {
+	if ctx == nil {
+		return nil, nzbfilesystem.ErrRequestSourceRetired
+	}
+	if err = ctx.Err(); err != nil {
+		return nil, err
+	}
+	if ns == nil || ns.nzbFs == nil {
+		return nil, nzbfilesystem.ErrSourceCleanupUnsupported
+	}
 	if req.Method == http.MethodHead {
-		fileInfo, err := ns.fs.Stat(actualPath)
-		if err != nil {
-			slog.Debug("file not found for storage path", "path", actualPath, "error", err)
+		info, e := ns.nzbFs.StatWithContext(ctx, actualPath)
+		if e != nil {
+			if ctx.Err() != nil {
+				return nil, ctx.Err()
+			}
+			if errors.Is(e, os.ErrNotExist) {
+				return nil, streaming.ErrNotFound
+			}
+			return nil, e
+		}
+		if e = ctx.Err(); e != nil {
+			return nil, e
+		}
+		if info == nil || info.IsDir() {
 			return nil, streaming.ErrNotFound
 		}
-
-		return &streaming.Response{
-			Status:        http.StatusOK,
-			ContentLength: fileInfo.Size(),
-			Headers: http.Header{
-				"Accept-Ranges":  []string{"bytes"},
-				"Content-Type":   []string{"video/mp4"}, // Default, could be detected
-				"Content-Length": []string{strconv.FormatInt(fileInfo.Size(), 10)},
-				"Last-Modified":  []string{fileInfo.ModTime().UTC().Format(http.TimeFormat)},
-			},
-			Body: io.NopCloser(strings.NewReader("")),
-		}, nil
+		return &streaming.Response{Status: http.StatusOK, ContentLength: info.Size(), Headers: http.Header{"Accept-Ranges": []string{"bytes"}, "Content-Type": []string{"video/mp4"}, "Content-Length": []string{strconv.FormatInt(info.Size(), 10)}, "Last-Modified": []string{info.ModTime().UTC().Format(http.TimeFormat)}}, Body: io.NopCloser(strings.NewReader(""))}, nil
 	}
-
-	// For GET requests, open and stream the file with request context
-	// This ensures usenet readers are cancelled when the client disconnects
-	file, err := ns.nzbFs.OpenWithContext(ctx, actualPath)
-	if err != nil {
-		slog.Debug("failed to open file for storage path", "path", actualPath, "error", err)
+	file, e := ns.nzbFs.OpenFileWithContext(ctx, actualPath, os.O_RDONLY, 0)
+	if e != nil {
+		if ctx.Err() != nil {
+			return nil, ctx.Err()
+		}
+		if errors.Is(e, os.ErrNotExist) {
+			return nil, streaming.ErrNotFound
+		}
+		return nil, e
+	}
+	published := false
+	defer func() {
+		if !published {
+			if closeErr := file.Close(); err == nil {
+				err = closeErr
+			}
+		}
+		if err != nil {
+			response = nil
+		}
+	}()
+	if err = ctx.Err(); err != nil {
+		return nil, err
+	}
+	info, e := file.Stat()
+	if e != nil {
+		return nil, e
+	}
+	if info == nil || info.IsDir() {
 		return nil, streaming.ErrNotFound
 	}
-
-	fileInfo, err := file.Stat()
-	if err != nil {
-		file.Close()
-		return nil, fmt.Errorf("failed to stat file: %w", err)
-	}
-
-	// Handle range requests
-	contentLength := fileInfo.Size()
+	length := info.Size()
 	status := http.StatusOK
-	headers := http.Header{
-		"Accept-Ranges": []string{"bytes"},
-		"Content-Type":  []string{"video/mp4"},
-		// URLSession needs a validator to preserve partial downloads on pause.
-		"Last-Modified": []string{fileInfo.ModTime().UTC().Format(http.TimeFormat)},
-	}
-
-	if req.RangeHeader != "" && matchesStreamIfRange(req.IfRange, fileInfo.ModTime()) {
-		// Parse range header (simplified - only handles single range)
-		rangeSpec := strings.TrimPrefix(req.RangeHeader, "bytes=")
-		parts := strings.Split(rangeSpec, "-")
+	headers := http.Header{"Accept-Ranges": []string{"bytes"}, "Content-Type": []string{"video/mp4"}, "Last-Modified": []string{info.ModTime().UTC().Format(http.TimeFormat)}}
+	if req.RangeHeader != "" && matchesStreamIfRange(req.IfRange, info.ModTime()) {
+		parts := strings.Split(strings.TrimPrefix(req.RangeHeader, "bytes="), "-")
 		if len(parts) == 2 {
 			start, _ := strconv.ParseInt(parts[0], 10, 64)
-			end := contentLength - 1
+			end := length - 1
 			if parts[1] != "" {
 				end, _ = strconv.ParseInt(parts[1], 10, 64)
 			}
-
-			// Seek to start position
-			if seeker, ok := file.(io.Seeker); ok {
-				if _, err := seeker.Seek(start, io.SeekStart); err != nil {
-					file.Close()
-					return nil, fmt.Errorf("seek failed: %w", err)
-				}
-
-				rangeLength := end - start + 1
-				status = http.StatusPartialContent
-				headers.Set("Content-Range", fmt.Sprintf("bytes %d-%d/%d", start, end, contentLength))
-				headers.Set("Content-Length", strconv.FormatInt(rangeLength, 10))
-				contentLength = rangeLength
+			if _, e = file.Seek(start, io.SeekStart); e != nil {
+				return nil, fmt.Errorf("seek failed: %w", e)
 			}
+			status = http.StatusPartialContent
+			headers.Set("Content-Range", fmt.Sprintf("bytes %d-%d/%d", start, end, length))
+			length = end - start + 1
+			headers.Set("Content-Length", strconv.FormatInt(length, 10))
 		}
 	} else {
-		headers.Set("Content-Length", strconv.FormatInt(contentLength, 10))
+		headers.Set("Content-Length", strconv.FormatInt(length, 10))
 	}
-
-	return &streaming.Response{
-		Status:        status,
-		ContentLength: contentLength,
-		Headers:       headers,
-		Body:          file,
-	}, nil
+	if err = ctx.Err(); err != nil {
+		return nil, err
+	}
+	response = &streaming.Response{Status: status, ContentLength: length, Headers: headers, Body: file}
+	published = true
+	return response, nil
 }
