@@ -42,6 +42,8 @@ type bridgeSessionState struct {
 	self                         *BridgeLoginSessionReceipt
 	issuer                       *BridgeLoginSessionIssuer
 	credential                   *bridgeCredentialState
+	selected                     *bridgeSelectedPasswordState
+	selectedStop                 func()
 	request                      *http.Request
 	ctx                          context.Context
 	cancel                       context.CancelFunc
@@ -88,7 +90,11 @@ func (r *BridgeLoginSessionReceipt) valid() bool {
 
 // Commit uses only the original verified evidence and its actual request. The
 // observation is genuine config DATA; only this method creates the real TX.
-func (i *BridgeLoginSessionIssuer) Commit(request *http.Request, proof *BridgeLoginCredentialProof, observation *config.BridgeLoginPolicyObservation) (receipt *BridgeLoginSessionReceipt, err error) {
+func (i *BridgeLoginSessionIssuer) Commit(request *http.Request, proof *BridgeLoginCredentialProof, observation *config.BridgeLoginPolicyObservation) (*BridgeLoginSessionReceipt, error) {
+	return i.commitBridgeLoginSession(request, proof, observation, nil)
+}
+
+func (i *BridgeLoginSessionIssuer) commitBridgeLoginSession(request *http.Request, proof *BridgeLoginCredentialProof, observation *config.BridgeLoginPolicyObservation, selected *bridgeSelectedPasswordState) (receipt *BridgeLoginSessionReceipt, err error) {
 	if !i.valid() || !proof.valid() || proof.state.store != i.store || !proof.state.matchesRequest(request) || observation == nil {
 		return nil, ErrBridgeSessionChanged
 	}
@@ -96,6 +102,14 @@ func (i *BridgeLoginSessionIssuer) Commit(request *http.Request, proof *BridgeLo
 	ctx, finish, err := original.begin(request.Context())
 	if err != nil {
 		return nil, err
+	}
+	if selected != nil {
+		// The original credential pending operation protects selection audit before
+		// any claim/read. No second pending operation or registry is introduced.
+		if err = selected.claim(i, request, observation); err != nil {
+			finish()
+			return nil, err
+		}
 	}
 	original.mu.Lock()
 	if original.closed || original.phase != bridgeCredentialVerified || original.proof != proof || !original.matchesRequest(request) || ctx.Err() != nil || !original.expiry.After(time.Now()) {
@@ -106,11 +120,18 @@ func (i *BridgeLoginSessionIssuer) Commit(request *http.Request, proof *BridgeLo
 	original.phase = bridgeCredentialMinting
 	original.mu.Unlock()
 	life, cancel := context.WithCancel(ctx)
-	receipt = &BridgeLoginSessionReceipt{state: &bridgeSessionState{issuer: i, credential: original, request: request, ctx: life, cancel: cancel, requested: make(chan struct{}), done: make(chan struct{}), callbackDone: make(chan struct{}), finishOriginal: finish}}
+	if selected != nil {
+		cancel()
+		life, cancel = context.WithDeadline(ctx, selected.expiry)
+	}
+	receipt = &BridgeLoginSessionReceipt{state: &bridgeSessionState{issuer: i, credential: original, selected: selected, request: request, ctx: life, cancel: cancel, requested: make(chan struct{}), done: make(chan struct{}), callbackDone: make(chan struct{}), finishOriginal: finish}}
 	st := receipt.state
 	st.self = receipt
 	st.io.Add(1)
 	st.stop = context.AfterFunc(ctx, func() { st.signal(); close(st.callbackDone) })
+	if selected != nil {
+		st.selectedStop = familyMediaAfterFunc(selected.ctx, st.signal)
+	}
 	// A cleanup owner exists before any original connection/hold is acquired.
 	go st.cleanup()
 	defer func() {
@@ -144,6 +165,11 @@ func (i *BridgeLoginSessionIssuer) Commit(request *http.Request, proof *BridgeLo
 	}
 	if !bridgeSessionPolicyAllows(values, original.snapshot.pinHash != "", original.kind) {
 		return nil, ErrBridgeSessionChanged
+	}
+	if st.selected != nil {
+		if err = st.selected.auditOriginalTransaction(st.progress.ctx, st.progress.tx); err != nil {
+			return nil, err
+		}
 	}
 	raw := make([]byte, 32)
 	if _, err = rand.Read(raw); err != nil {
@@ -190,6 +216,9 @@ func bridgeSessionPolicyAllows(value config.BridgeLoginPolicyValues, hasPIN bool
 	return kind == bridgeCredentialCombined || value.AllowPinLogin && kind == bridgeCredentialPIN
 }
 func (s *bridgeSessionState) current() error {
+	if s.selected != nil && s.selected.current() != nil {
+		return ErrBridgeSessionChanged
+	}
 	if s.ctx.Err() != nil || s.progress == nil || s.progress.ctx.Err() != nil || !s.issuer.valid() || !s.credential.matchesRequest(s.request) || !s.credential.expiry.After(time.Now()) {
 		return ErrBridgeSessionChanged
 	}
@@ -235,9 +264,17 @@ func (i *BridgeLoginSessionIssuer) Release(request *http.Request, receipt *Bridg
 		}
 	}()
 	bounded, cancel := context.WithCancel(ctx)
+	if st.selected != nil {
+		cancel()
+		bounded, cancel = context.WithDeadline(ctx, st.selected.expiry)
+	}
 	stop := familyMediaAfterFunc(st.ctx, cancel)
 	stopProgress := familyMediaAfterFunc(st.progress.ctx, cancel)
-	defer func() { cancel(); stopProgress(); stop() }()
+	stopSelected := func() {}
+	if st.selected != nil {
+		stopSelected = familyMediaAfterFunc(st.selected.ctx, cancel)
+	}
+	defer func() { cancel(); stopSelected(); stopProgress(); stop() }()
 	if err = st.current(); err != nil {
 		return session, err
 	}
@@ -258,6 +295,11 @@ func (i *BridgeLoginSessionIssuer) Release(request *http.Request, receipt *Bridg
 	err = scanBridgeSession(tx.QueryRow(bounded, `SELECT token,CASE WHEN octet_length(account_id)<=256 THEN account_id ELSE NULL END,is_master,expires_at,created_at,CASE WHEN octet_length(COALESCE(user_agent,''))<=4112 THEN COALESCE(user_agent,'') ELSE NULL END,CASE WHEN octet_length(COALESCE(ip_address,''))<=256 THEN COALESCE(ip_address,'') ELSE NULL END,CASE WHEN octet_length(COALESCE(scope,''))<=32 THEN COALESCE(scope,'') ELSE NULL END,CASE WHEN octet_length(COALESCE(scope_resource,''))<=256 THEN COALESCE(scope_resource,'') ELSE NULL END,CASE WHEN octet_length(COALESCE(client_id,''))<=256 THEN COALESCE(client_id,'') ELSE NULL END,concat(tableoid::oid,':',xmin::text,':',ctid::text) FROM sessions WHERE token=$1 FOR UPDATE`, st.session.Token), &current, &rowVersion)
 	if err != nil || !sameBridgeSession(current, st.session) || rowVersion != st.rowVersion || !current.ExpiresAt.After(time.Now()) {
 		return session, ErrBridgeSessionChanged
+	}
+	if st.selected != nil {
+		if err = st.selected.auditOriginalTransaction(bounded, tx); err != nil {
+			return session, err
+		}
 	}
 	if err = st.current(); err != nil {
 		return session, err
@@ -348,6 +390,9 @@ func (s *bridgeSessionState) cleanup() {
 		close(s.callbackDone)
 	}
 	<-s.callbackDone
+	if s.selectedStop != nil {
+		s.selectedStop()
+	}
 	s.session = models.Session{}
 	s.rowVersion = ""
 	s.finishOriginal()

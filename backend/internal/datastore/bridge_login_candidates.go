@@ -9,6 +9,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 	"novastream/config"
 )
 
@@ -149,6 +150,11 @@ func (i *BridgeLoginSessionIssuer) readBridgeLoginCandidateRows(ctx context.Cont
 	if err != nil {
 		return nil, ErrBridgeLoginCandidatesUnavailable
 	}
+	return decodeBridgeLoginCandidateRows(ctx, rows)
+}
+
+// Both original pool reads and retained mint transactions use these same bounds.
+func decodeBridgeLoginCandidateRows(ctx context.Context, rows pgx.Rows) ([]bridgeLoginCandidateRow, error) {
 	defer rows.Close()
 	var out []bridgeLoginCandidateRow
 	total := 0
