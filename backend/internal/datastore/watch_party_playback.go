@@ -495,6 +495,82 @@ func partyGuestSame(a, b partyGuestSnapshot) bool {
 func partyPlaybackSame(a, b partyPlaybackSnapshot) bool {
 	return a.session == b.session && sameParentMutationRow(a.sessionRow, b.sessionRow) && sameParentMutationRow(a.actorRow, b.actorRow) && partyGuestSame(a.guest, b.guest) && a.binding == b.binding && a.source == b.source && a.household == b.household && a.global == b.global && a.expires.Equal(b.expires)
 }
+
+// The lane is a bounded work budget, never source permission. Its single
+// actual retained check leaves the second existing SQL slot for public/control
+// work. Waiting owns the original source operation but no connection or locks.
+type partyPlaybackCheckLane struct {
+	count   int
+	active  bool
+	changed chan struct{}
+}
+
+func (o *WatchPartyPlaybackOwner) acquireCheckLane(ctx context.Context) (func(), error) {
+	a := o.runtime
+	if ctx == nil || ctx.Err() != nil || o.ctx.Err() != nil {
+		return nil, ErrWatchRoomChanged
+	}
+	account := o.original.AccountID
+	a.mu.Lock()
+	if a.closed || a.ctx.Err() != nil {
+		a.mu.Unlock()
+		return nil, ErrWatchRoomUnavailable
+	}
+	if a.partyCheckLanes == nil {
+		a.partyCheckLanes = make(map[string]*partyPlaybackCheckLane)
+	}
+	lane := a.partyCheckLanes[account]
+	if a.partyCheckCount >= 128 || lane != nil && lane.count >= 16 {
+		a.mu.Unlock()
+		return nil, ErrWatchRoomBusy
+	}
+	if lane == nil {
+		lane = &partyPlaybackCheckLane{changed: make(chan struct{})}
+		a.partyCheckLanes[account] = lane
+	}
+	lane.count++
+	a.partyCheckCount++
+	a.mu.Unlock()
+	var once sync.Once
+	refund := func(active bool) {
+		once.Do(func() {
+			a.mu.Lock()
+			if active {
+				lane.active = false
+			}
+			lane.count--
+			a.partyCheckCount--
+			close(lane.changed)
+			lane.changed = make(chan struct{})
+			if lane.count == 0 {
+				delete(a.partyCheckLanes, account)
+			}
+			a.mu.Unlock()
+		})
+	}
+	for {
+		a.mu.Lock()
+		if a.closed || a.ctx.Err() != nil || ctx.Err() != nil || o.ctx.Err() != nil {
+			a.mu.Unlock()
+			refund(false)
+			return nil, ErrWatchRoomChanged
+		}
+		if !lane.active {
+			lane.active = true
+			a.mu.Unlock()
+			return func() { refund(true) }, nil
+		}
+		changed := lane.changed
+		a.mu.Unlock()
+		select {
+		case <-changed:
+		case <-ctx.Done():
+		case <-o.ctx.Done():
+		case <-a.ctx.Done():
+		}
+	}
+}
+
 func (o *WatchPartyPlaybackOwner) check(caller context.Context) (err error) {
 	if caller == nil || caller.Err() != nil || !o.enter() {
 		return ErrWatchRoomChanged
@@ -504,6 +580,11 @@ func (o *WatchPartyPlaybackOwner) check(caller context.Context) (err error) {
 	defer cancel()
 	stop := familyMediaAfterFunc(o.ctx, cancel)
 	defer stop()
+	release, e := o.acquireCheckLane(ctx)
+	if e != nil {
+		return e
+	}
+	defer release()
 	op, e := o.runtime.beginPartyWork(ctx, o.original.AccountID, o.policy)
 	if e != nil {
 		return e
