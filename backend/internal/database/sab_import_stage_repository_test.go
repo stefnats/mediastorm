@@ -21,8 +21,8 @@ func stageDatabase(t *testing.T) (*DB, string) {
 	}
 	t.Cleanup(func() { db.Close() })
 	var version int
-	if e := db.Connection().QueryRow("SELECT max(version_id) FROM goose_db_version WHERE is_applied=1").Scan(&version); e != nil || version != 4 {
-		t.Fatal("embedded migration004 not automatically loaded")
+	if e := db.Connection().QueryRow("SELECT max(version_id) FROM goose_db_version WHERE is_applied=1").Scan(&version); e != nil || version != 5 {
+		t.Fatal("embedded migration005 not automatically loaded")
 	}
 	return db, name
 }
