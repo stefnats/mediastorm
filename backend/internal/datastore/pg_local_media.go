@@ -337,8 +337,15 @@ func (r *pgLocalMediaRepo) UpsertItem(ctx context.Context, item *models.LocalMed
 
 func (r *pgLocalMediaRepo) DeleteItemsNotSeenInScan(ctx context.Context, libraryID, scanID string) error {
 	_, err := r.pool.Exec(ctx, `
-		DELETE FROM local_media_items
-		WHERE library_id = $1 AND last_seen_scan_id IS DISTINCT FROM $2`, libraryID, scanID)
+		DELETE FROM local_media_items i
+		WHERE i.library_id = $1 AND i.last_seen_scan_id IS DISTINCT FROM $2
+		  AND NOT EXISTS (
+		    SELECT 1 FROM sab_library_publication_files f
+		    JOIN sab_library_publications p ON p.operation_id=f.operation_id
+		    WHERE p.state='registered' AND p.target_library_id=i.library_id
+		      AND f.item_id=i.id AND f.relative_path=i.relative_path
+		      AND f.size_bytes=i.size_bytes
+		  )`, libraryID, scanID)
 	if err != nil {
 		return fmt.Errorf("delete local media items not seen in scan: %w", err)
 	}

@@ -1539,7 +1539,7 @@ func (s *Service) discoverAndMatch(ctx context.Context, library models.LocalMedi
 		if info, err := os.Stat(root); err != nil || !info.IsDir() {
 			return models.LocalMediaScanSummary{}, fmt.Errorf("library root unavailable: %s", root)
 		}
-		found, err := collectVideoFiles(root)
+		found, err := collectVideoFilesWithPublicationExclusion(root, s.publicationScanNamespace(ctx, library.ID, root))
 		if err != nil {
 			return models.LocalMediaScanSummary{}, err
 		}
@@ -2393,12 +2393,19 @@ func applyFolderExternalIDs(detected *detectedTitle, filePath string) {
 }
 
 func collectVideoFiles(root string) ([]scanFileCandidate, error) {
+	return collectVideoFilesWithPublicationExclusion(root, false)
+}
+
+func collectVideoFilesWithPublicationExclusion(root string, excludeOwnedPublication bool) ([]scanFileCandidate, error) {
 	var files []scanFileCandidate
 	err := filepath.WalkDir(root, func(path string, d os.DirEntry, err error) error {
 		if err != nil {
 			return nil
 		}
 		if d.IsDir() {
+			if excludeOwnedPublication && path == filepath.Join(root, ".mediastorm-publications") {
+				return filepath.SkipDir
+			}
 			return nil
 		}
 		if isVideoFile(path) {
