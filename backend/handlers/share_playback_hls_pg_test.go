@@ -6,6 +6,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -23,6 +24,7 @@ import (
 
 	"github.com/gorilla/mux"
 	"novastream/internal/datastore"
+	"novastream/internal/settingscommit"
 	"novastream/services/streaming"
 )
 
@@ -370,13 +372,13 @@ func shareHLSTestSeekPreheaderRetirement(t *testing.T, f *sharePlaybackHTTPFixtu
 
 func TestSharePlaybackActualHLSOwnership(t *testing.T) {
 	media := managedHLSMedia(t)
-	for _, name := range []string{"initial-worker", "request-finished-owner-lives", "fresh-segment-request", "cross-binding-segment-denied", "current-source-revokes-worker", "current-household-revokes-worker", "native-policy-retires-worker", "seek-original-owner", "restart-original-owner", "audio-extract-original-owner", "old-child-joined-before-renewal", "stop-joins-exact-child", "runtime-close-joins-worker", "no-background-context-escape"} {
+	for _, name := range []string{"initial-worker", "request-finished-owner-lives", "fresh-segment-request", "cross-binding-segment-denied", "current-source-revokes-worker", "current-household-revokes-worker", "native-policy-retires-worker", "busy-native-policy-retires-worker", "seek-original-owner", "restart-original-owner", "audio-extract-original-owner", "old-child-joined-before-renewal", "stop-joins-exact-child", "runtime-close-joins-worker", "no-background-context-escape"} {
 		t.Run(name, func(t *testing.T) {
 			if name == "no-background-context-escape" {
 				shareHLSTestNestedCanary(t, media)
 				return
 			}
-			held := name == "current-source-revokes-worker" || name == "current-household-revokes-worker" || name == "native-policy-retires-worker" || name == "old-child-joined-before-renewal" || name == "stop-joins-exact-child" || name == "runtime-close-joins-worker"
+			held := name == "current-source-revokes-worker" || name == "current-household-revokes-worker" || name == "native-policy-retires-worker" || name == "busy-native-policy-retires-worker" || name == "old-child-joined-before-renewal" || name == "stop-joins-exact-child" || name == "runtime-close-joins-worker"
 			payload := media
 			if name == "audio-extract-original-owner" {
 				payload = shareHLSTestSubtitleMedia(t)
@@ -465,7 +467,7 @@ func TestSharePlaybackActualHLSOwnership(t *testing.T) {
 				if len(after) != len(bodies) || owner.guard.ctx.Err() != nil {
 					t.Fatal("denied recipient changed the original source")
 				}
-			case "current-source-revokes-worker", "current-household-revokes-worker", "native-policy-retires-worker":
+			case "current-source-revokes-worker", "current-household-revokes-worker", "native-policy-retires-worker", "busy-native-policy-retires-worker":
 				switch name {
 				case "current-source-revokes-worker":
 					if _, e := f.store.Pool().Exec(t.Context(), `UPDATE users SET allow_share_links=false WHERE id=$1`, f.profileID); e != nil {
@@ -480,8 +482,32 @@ func TestSharePlaybackActualHLSOwnership(t *testing.T) {
 					if e != nil {
 						t.Fatal(e)
 					}
-					if e = f.manager.Save(settings); e != nil {
+					before, e := os.ReadFile(f.manager.ConfigPath())
+					if e != nil {
 						t.Fatal(e)
+					}
+					var hold *settingscommit.ProgressFileHold
+					if name == "busy-native-policy-retires-worker" {
+						hold, e = f.coordinator.TryProgressFileHold(t.Context())
+						if e != nil {
+							t.Fatal(e)
+						}
+						defer hold.Close()
+					}
+					e = f.manager.Save(settings)
+					if e != nil && !errors.Is(e, settingscommit.ErrBusy) {
+						t.Fatal(e)
+					}
+					if hold != nil && !errors.Is(e, settingscommit.ErrBusy) {
+						t.Fatal("actual shared native hold did not refuse the write", e)
+					}
+					if errors.Is(e, settingscommit.ErrBusy) {
+						// Even a refused Save retires policy observations. It must
+						// neither mutate the original file nor await media cleanup.
+						after, readErr := os.ReadFile(f.manager.ConfigPath())
+						if readErr != nil || !bytes.Equal(before, after) {
+							t.Fatal("refused settings attempt changed the actual file", readErr)
+						}
 					}
 				}
 				shareHLSTestWait(t, bodies[1].closeEntered, "actual source cancellation")
