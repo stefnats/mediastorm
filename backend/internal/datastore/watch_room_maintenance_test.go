@@ -388,7 +388,7 @@ func TestNativeRoomMaintenanceLifetime(t *testing.T) {
 			}
 			started = true
 			go func() { defer close(done); _, _, ended, deleted, batchErr = a.maintenanceBatch("") }()
-			nativeSQLWait(t, f, "watch_rooms")
+			nativeSQLWait(t, f, "watch_rooms", holder.Conn().PgConn().PID())
 			if kind == "close-during-held-transaction" {
 				closed = make(chan struct{})
 				go func() { defer close(closed); a.Close() }()
