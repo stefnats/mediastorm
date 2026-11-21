@@ -157,12 +157,20 @@ func quickConnectResult(req quickConnectRequest) dto.QuickConnectResult {
 	}
 }
 
-func (s *Server) handleQuickConnectEnabled(w http.ResponseWriter, _ *http.Request) {
+func (s *Server) handleQuickConnectEnabled(w http.ResponseWriter, r *http.Request) {
+	if s.managedQuickConnectRequired() {
+		s.handleManagedQuickConnectEnabled(w, r)
+		return
+	}
 	writeJSON(w, http.StatusOK, s.settings().QuickConnect)
 }
 
 // handleQuickConnectInitiate starts a request for the calling device.
 func (s *Server) handleQuickConnectInitiate(w http.ResponseWriter, r *http.Request) {
+	if s.managedQuickConnectRequired() {
+		s.handleManagedQuickConnectInitiate(w, r)
+		return
+	}
 	if !s.settings().QuickConnect {
 		writeError(w, http.StatusUnauthorized, "Quick connect is disabled")
 		return
@@ -182,6 +190,10 @@ func (s *Server) handleQuickConnectInitiate(w http.ResponseWriter, r *http.Reque
 
 // handleQuickConnectConnect is the device's status poll.
 func (s *Server) handleQuickConnectConnect(w http.ResponseWriter, r *http.Request) {
+	if s.managedQuickConnectRequired() {
+		s.handleManagedQuickConnectConnect(w, r)
+		return
+	}
 	if !s.settings().QuickConnect {
 		writeError(w, http.StatusUnauthorized, "Quick connect is disabled")
 		return
@@ -230,6 +242,10 @@ func (s *Server) handleQuickConnectAuthorize(w http.ResponseWriter, r *http.Requ
 
 // handleAuthenticateWithQuickConnect exchanges an approved secret for a token.
 func (s *Server) handleAuthenticateWithQuickConnect(w http.ResponseWriter, r *http.Request) {
+	if s.managedQuickConnectRequired() {
+		s.handleManagedAuthenticateWithQuickConnect(w, r)
+		return
+	}
 	var body struct {
 		Secret string `json:"Secret"`
 	}
