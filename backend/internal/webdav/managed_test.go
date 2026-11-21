@@ -21,6 +21,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"runtime"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -675,6 +676,22 @@ func (w *managedTestPreCaptureWriter) SetReadDeadline(at time.Time) error {
 func (w *managedTestPreCaptureWriter) SetWriteDeadline(at time.Time) error {
 	return w.connection.SetWriteDeadline(at)
 }
+
+// Observe genuine current-source PG acquisition, not successful-wait counters.
+// Stack snapshots are bounded DATA and never exposed in diagnostics or auth.
+func managedTestCurrentPGWaiters(buffer []byte) (int, bool) {
+	n := runtime.Stack(buffer, true)
+	if n == len(buffer) {
+		return 0, false
+	}
+	count := 0
+	for _, stack := range bytes.Split(buffer[:n], []byte("\n\n")) {
+		if bytes.Contains(stack, []byte("novastream/internal/datastore.(*deploymentWebDAVState).readCurrent")) && bytes.Contains(stack, []byte("github.com/jackc/pgx/v5/pgxpool.(*Pool).Acquire")) && bytes.Contains(stack, []byte("novastream/internal/webdav.(*ManagedHandler).ServeHTTP")) {
+			count++
+		}
+	}
+	return count, true
+}
 func managedTestEarlyAdmission(t *testing.T, f *managedTestFixture) {
 	t.Helper()
 	// The concrete coordinator has a distinct native-hold capacity8. Exercise
@@ -717,7 +734,7 @@ func managedTestEarlyAdmission(t *testing.T, f *managedTestFixture) {
 			managedTestAwait(t, closeDone, "early runtime Close")
 		}
 	})
-	beforeWait, beforeCancelled := f.store.Pool().Stat().WaitCount(), f.store.Pool().Stat().CanceledAcquireCount()
+	beforeCancelled := f.store.Pool().Stat().CanceledAcquireCount()
 	for n := 0; n < 8; n++ {
 		ctx, cancel := context.WithCancel(t.Context())
 		cancels = append(cancels, cancel)
@@ -728,12 +745,21 @@ func managedTestEarlyAdmission(t *testing.T, f *managedTestFixture) {
 		go func() { defer close(done); f.handler.ServeHTTP(httptest.NewRecorder(), r) }()
 	}
 	until := time.Now().Add(4 * time.Second)
-	for f.store.Pool().Stat().WaitCount() < beforeWait+8 {
+	stackBuffer := make([]byte, 2<<20)
+	for {
+		pending, complete := managedTestCurrentPGWaiters(stackBuffer)
+		if !complete {
+			t.Fatal("actual goroutine snapshot exceeded bounded observer")
+		}
+		if pending == 8 {
+			break
+		}
 		if time.Now().After(until) {
-			t.Fatal("eight actual native/PG admission waits missing")
+			t.Fatal("eight actual native/PG Acquire stacks missing", pending)
 		}
 		time.Sleep(time.Millisecond)
 	}
+	clear(stackBuffer)
 	mapped := managedTestRequest("PROPFIND", "/webdav/")
 	mapped.RemoteAddr = "[::ffff:127.0.0.1]:26000"
 	mapped.Header.Set("X-Forwarded-For", "203.0.113.99")
