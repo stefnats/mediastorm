@@ -499,6 +499,14 @@ func (h *VideoHandler) newShareAncillaryJob(r *http.Request, kind string) (*shar
 	}
 	var dir string
 	if base != "" {
+		// The ordinary thumbnail producer creates its base lazily. This owned
+		// producer must establish that same configured directory before its
+		// private output, while its original admission remains reserved.
+		if err = os.MkdirAll(base, 0700); err != nil {
+			cancel()
+			g.Close()
+			return nil, err
+		}
 		dir, err = os.MkdirTemp(base, "share-"+id+"-")
 		if err != nil {
 			cancel()

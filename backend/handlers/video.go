@@ -2999,7 +2999,17 @@ func (h *VideoHandler) buildTransmuxPlan(meta *ffprobeOutput, inputSpecifier str
 
 	plan.audio = determineAudioPlan(meta, forceAAC)
 	plan.movflags = computeMovflags(plan.audio)
-	plan.args = buildArgsWithProbe(inputSpecifier, plan.videoMap, plan.audio, plan.movflags, plan.videoCodec, plan.hasDolbyVision, plan.dolbyVisionProfile)
+	var textSubtitles []int
+	for _, stream := range meta.Streams {
+		if stream.CodecType != "subtitle" || stream.Index < 0 {
+			continue
+		}
+		switch strings.ToLower(strings.TrimSpace(stream.CodecName)) {
+		case "subrip", "ass", "ssa", "mov_text":
+			textSubtitles = append(textSubtitles, stream.Index)
+		}
+	}
+	plan.args = buildArgsWithProbe(inputSpecifier, plan.videoMap, plan.audio, plan.movflags, plan.videoCodec, plan.hasDolbyVision, plan.dolbyVisionProfile, textSubtitles)
 	plan.duration = parseFloat(meta.Format.Duration)
 	return plan
 }
@@ -3149,7 +3159,7 @@ func determineAudioPlanWithLanguage(meta *ffprobeOutput, forceAAC bool, preferre
 	return audioPlan{mode: audioPlanTranscode, stream: firstAudio, reason: fmt.Sprintf("audio codec %s requires transcoding", codec)}
 }
 
-func buildArgsWithProbe(inputURL, videoMap string, plan audioPlan, movflags string, videoCodec string, hasDV bool, dvProfile string) []string {
+func buildArgsWithProbe(inputURL, videoMap string, plan audioPlan, movflags string, videoCodec string, hasDV bool, dvProfile string, textSubtitles []int) []string {
 	args := []string{"-nostdin", "-loglevel", "error", "-i", inputURL}
 
 	if strings.TrimSpace(videoMap) == "" {
@@ -3162,9 +3172,12 @@ func buildArgsWithProbe(inputURL, videoMap string, plan audioPlan, movflags stri
 		args = append(args, "-map", "0:a")
 	}
 
-	// Map text-based subtitle streams that can be converted to mov_text
-	// Skip bitmap-based subtitles (pgs, dvdsub, etc.) as they can't be embedded in MP4
-	args = append(args, "-map", "0:s:m:codec_name:subrip?", "-map", "0:s:m:codec_name:ass?", "-map", "0:s:m:codec_name:ssa?", "-map", "0:s:m:codec_name:mov_text?", "-dn", "-c:v", "copy")
+	// Codec names are probe fields, not input stream metadata selectors.
+	// Map the actual supported text indices; bitmap streams remain excluded.
+	for _, index := range textSubtitles {
+		args = append(args, "-map", fmt.Sprintf("0:%d", index))
+	}
+	args = append(args, "-dn", "-c:v", "copy")
 
 	if shouldTagHevcAsHvc1(videoCodec) {
 		if hasDV {

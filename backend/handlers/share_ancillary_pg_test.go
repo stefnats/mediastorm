@@ -270,7 +270,7 @@ func TestShareAncillaryOriginalSource(t *testing.T) {
 			case "native-policy-retires-actual-worker", "current-household-retires-actual-worker", "held-provider-close-before-refund", "actual-shutdown-joins-all-jobs":
 				shareHLSTestPoll(t, "actual ancillary input", func() bool { b, _ := p.state(); return len(b) >= 2 })
 				bodies, _ := p.state()
-				shareHLSTestWait(t, bodies[1].closeEntered, "actual held provider Close")
+				shareHLSTestWait(t, bodies[1].reading, "actual held provider Read")
 				done := make(chan struct{})
 				started := false
 				t.Cleanup(func() {
@@ -288,6 +288,7 @@ func TestShareAncillaryOriginalSource(t *testing.T) {
 				} else {
 					shareAncillaryTestRevoke(t, f, name == "native-policy-retires-actual-worker")
 				}
+				shareHLSTestWait(t, bodies[1].closeEntered, "actual held provider Close")
 				shareHLSTestPending(t, j.done, "actual original output retirement")
 				if _, e := os.Stat(j.dir); e != nil {
 					t.Fatal("output removed before held source")
@@ -341,12 +342,24 @@ type shareAncillaryBlockingWriter struct {
 	once             sync.Once
 	deadlineMu       sync.Mutex
 	deadline         time.Time
+	status           atomic.Int32
+	prefix           []byte
 }
 
 func (w *shareAncillaryBlockingWriter) Header() http.Header { return w.header }
-func (w *shareAncillaryBlockingWriter) WriteHeader(int)     {}
+func (w *shareAncillaryBlockingWriter) WriteHeader(status int) {
+	w.status.CompareAndSwap(0, int32(status))
+}
 func (w *shareAncillaryBlockingWriter) Write(p []byte) (int, error) {
-	w.once.Do(func() { close(w.entered) })
+	w.status.CompareAndSwap(0, http.StatusOK)
+	w.once.Do(func() {
+		limit := len(p)
+		if limit > 1024 {
+			limit = 1024
+		}
+		w.prefix = append([]byte(nil), p[:limit]...)
+		close(w.entered)
+	})
 	<-w.release
 	return len(p), nil
 }
@@ -388,7 +401,7 @@ func shareAncillaryTestHeldHTTP(t *testing.T, f *sharePlaybackHTTPFixture, j *sh
 	})
 	r := mux.SetURLVars(httptest.NewRequest("GET", "http://synthetic.test/api/video/subtitles/"+j.id+"/subtitles.vtt", nil), map[string]string{"sessionID": j.id, "file": "subtitles.vtt"})
 	incomingDeadline := time.Now().Add(20 * time.Second)
-	incomingCtx, incomingCancel := context.WithDeadline(t.Context(), incomingDeadline)
+	incomingCtx, incomingCancel := context.WithDeadline(r.Context(), incomingDeadline)
 	defer incomingCancel()
 	r = r.WithContext(incomingCtx)
 	checked, release, e := f.pins.Authenticate(r, f.token, "")
@@ -402,6 +415,9 @@ func shareAncillaryTestHeldHTTP(t *testing.T, f *sharePlaybackHTTPFixture, j *sh
 		f.video.ManagedSharePlaybackEntry(http.HandlerFunc(f.video.ServeExtractedSubtitles)).ServeHTTP(writer, checked)
 	}()
 	shareHLSTestWait(t, writer.entered, "actual HTTP file write")
+	if writer.status.Load() != http.StatusOK || !bytes.HasPrefix(writer.prefix, []byte("WEBVTT")) {
+		t.Fatalf("held writer observed an error response instead of the actual subtitle: status=%d prefix=%q", writer.status.Load(), writer.prefix)
+	}
 	writer.deadlineMu.Lock()
 	actualDeadline := writer.deadline
 	writer.deadlineMu.Unlock()
@@ -512,6 +528,30 @@ func shareAncillaryTestAudioMedia(t *testing.T) []byte {
 	return data
 }
 
+// A failed original public canary remains fatal. This separate fresh genuine
+// request records only bounded synthetic-process diagnostics for Root's RCA.
+func shareAncillaryTestTransmuxDiagnostic(t *testing.T, f *sharePlaybackHTTPFixture, path string) {
+	t.Helper()
+	stage := "metadata"
+	var diagnosticErr error
+	var diagnosticStderr string
+	var output bytes.Buffer
+	diagnostic := shareInvokeHTTP(t, f, path, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		meta, err := f.video.ancillaryMetadata(r.Context(), f.resource)
+		if err != nil {
+			diagnosticErr = err
+			return
+		}
+		stage = "actual planned child"
+		plan := f.video.buildTransmuxPlan(meta, "pipe:0", true, "")
+		diagnosticStderr, diagnosticErr = f.video.runShareSourceCommand(r.Context(), f.resource, f.video.ffmpegPath, plan.args, &shareLimitedWriter{destination: &output, remaining: 16 << 20}, nil)
+	}))
+	if len(diagnosticStderr) > 4096 {
+		diagnosticStderr = diagnosticStderr[:4096]
+	}
+	t.Logf("actual failed-public-canary diagnostic: stage=%s response=%d outputBytes=%d error=%v stderr=%q", stage, diagnostic.Code, output.Len(), diagnosticErr, diagnosticStderr)
+}
+
 func TestShareAncillarySynchronousPipelines(t *testing.T) {
 	data := shareHLSTestSubtitleMedia(t)
 	for _, name := range []string{"transmux-actual-output-probes", "transmux-original-selected-audio", "transmux-http-write-failure-joins", "transmux-cancel-joins-stdin-and-stderr", "transmux-no-direct-or-webdav-open", "transmux-confined-nested-payload", "crop-actual-letterbox-samples", "crop-actual-no-letterbox", "crop-current-metadata-not-cache", "crop-cancel-joins-both-samples", "crop-unknown-duration-unavailable", "crop-original-context-each-sample", "crop-no-new-source-after-retirement"} {
@@ -569,12 +609,13 @@ func TestShareAncillarySynchronousPipelines(t *testing.T) {
 				}()
 				shareHLSTestPoll(t, "actual second body", func() bool { b, _ := p.state(); return len(b) >= 2 })
 				b, _ := p.state()
-				shareHLSTestWait(t, b[1].closeEntered, "actual sync provider close")
+				shareHLSTestWait(t, b[1].reading, "actual sync provider Read")
 				if name == "crop-no-new-source-after-retirement" {
 					shareAncillaryTestRevoke(t, f, false)
 				} else {
 					cancel()
 				}
+				shareHLSTestWait(t, b[1].closeEntered, "actual sync provider close")
 				shareHLSTestPending(t, done, "original raw source join")
 				p.release()
 				shareHLSTestWait(t, done, "cancelled actual handler")
@@ -602,6 +643,9 @@ func TestShareAncillarySynchronousPipelines(t *testing.T) {
 				return
 			}
 			if w.Code != 200 {
+				if name == "transmux-actual-output-probes" || name == "transmux-original-selected-audio" || name == "transmux-no-direct-or-webdav-open" {
+					shareAncillaryTestTransmuxDiagnostic(t, f, path)
+				}
 				t.Fatalf("actual %s output %d %s", name, w.Code, w.Body.String())
 			}
 			if name == "transmux-no-direct-or-webdav-open" {
@@ -665,6 +709,17 @@ func TestShareAncillarySynchronousPipelines(t *testing.T) {
 				meta := shareAncillaryTestProbeOutput(t, w.Body.Bytes())
 				if selectPrimaryVideoStream(meta) == nil {
 					t.Fatal("actual mux omitted video")
+				}
+				if name == "transmux-actual-output-probes" {
+					textSubtitles := 0
+					for _, stream := range meta.Streams {
+						if stream.CodecType == "subtitle" && stream.CodecName == "mov_text" {
+							textSubtitles++
+						}
+					}
+					if textSubtitles != 1 {
+						t.Fatal("actual SRT input was not retained as one mov_text track", textSubtitles)
+					}
 				}
 				if name == "transmux-original-selected-audio" {
 					audio := 0
@@ -894,8 +949,19 @@ func TestShareAncillaryPublishedJobs(t *testing.T) {
 			case "thumbnail-worker-queue-cancel-joins", "credits-original-retirement-between-phases":
 				shareHLSTestPoll(t, "actual queued source child", func() bool { b, _ := p.state(); return len(b) >= 2 })
 				b, _ := p.state()
-				shareHLSTestWait(t, b[1].closeEntered, "held producer input close")
+				if name == "thumbnail-worker-queue-cancel-joins" {
+					// A bounded frame may finish before the copier asks for EOF.
+					// Observe the real input Read, then retain its held Close.
+					shareHLSTestPoll(t, "actual thumbnail input Read", func() bool {
+						b[1].mu.Lock()
+						defer b[1].mu.Unlock()
+						return b[1].data.Len() < len(payload)
+					})
+				} else {
+					shareHLSTestWait(t, b[1].reading, "actual held producer Read")
+				}
 				shareAncillaryTestRevoke(t, f, false)
+				shareHLSTestWait(t, b[1].closeEntered, "held producer input close")
 				shareHLSTestPending(t, j.done, "actual queued producer cleanup")
 				p.release()
 				shareHLSTestWait(t, j.done, "actual queue/phase retirement")
