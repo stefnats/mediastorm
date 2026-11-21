@@ -199,12 +199,27 @@ func (nfs *NzbFilesystem) OpenFileWithContext(ctx context.Context, name string, 
 	file.(*requestFile).ownsSource = true
 	return file, nil
 }
-func (nfs *NzbFilesystem) StatWithContext(ctx context.Context, name string) (fs.FileInfo, error) {
+func (nfs *NzbFilesystem) StatWithContext(ctx context.Context, name string) (info fs.FileInfo, err error) {
 	file, err := nfs.OpenFileWithContext(ctx, name, os.O_RDONLY, 0)
 	if err != nil {
 		return nil, err
 	}
-	defer file.Close()
+	defer func() {
+		closeErr := file.Close()
+		if err == nil {
+			if closeErr != nil {
+				err = closeErr
+			} else if ctx.Err() != nil {
+				err = ctx.Err()
+			}
+		}
+		if err != nil {
+			info = nil
+		}
+	}()
+	if err = ctx.Err(); err != nil {
+		return nil, err
+	}
 	return file.Stat()
 }
 func (nfs *NzbFilesystem) RemoveAllWithContext(ctx context.Context, name string) error {
