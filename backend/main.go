@@ -2598,13 +2598,14 @@ func main() {
 	// Stop background cache manager
 	metadataService.StopBackgroundCacheManager()
 	metadataService.StopBackgroundTopTenWorker()
-	prewarmService.Stop()
 
 	// Stop scheduler service
 	log.Println("🧹 Stopping scheduler service...")
 	if err := schedulerService.Stop(shutdownCtx); err != nil {
 		log.Printf("Scheduler shutdown error: %v", err)
 	}
+	prewarmService.Stop()
+	prequeueHandler.Shutdown()
 	// Stop new progress admission and join actual source/Core/transport work
 	// before the recordings service or deferred original settings store closes.
 	if recordingProgressHandler != nil {

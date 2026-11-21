@@ -59,6 +59,7 @@ type vodBoundary struct {
 	mu            sync.Mutex
 	workers       map[string]*vodOwnerContext
 	active        map[string]*vodOwnerContext
+	bindings      map[string]*vodWorkerBinding
 	// Optional server-only original PG owner. Dormant legacy ports remain
 	// unchanged; the uninstalled family factory requires this capture path.
 	original func(*http.Request, string) (vodOriginalOwner, error)
@@ -90,6 +91,7 @@ type vodOwnerContext struct {
 	superseded      *atomic.Bool
 	workerCurrent   func() bool
 	original        vodOriginalOwner
+	originalRef     *vodOriginalReference
 }
 
 func (o vodOwnerContext) String() string               { return "private VOD owner context" }
@@ -425,11 +427,64 @@ func (w *vodDiscardWriter) Header() http.Header       { return w.header }
 func (*vodDiscardWriter) WriteHeader(int)             {}
 func (*vodDiscardWriter) Write(p []byte) (int, error) { return len(p), nil }
 
+// References retain only the SAME already-authorized original core. There is
+// no public mint/adopt API, and a copied reference cannot add an owner.
+type vodOriginalLifetime struct {
+	mu         sync.Mutex
+	core       vodOriginalOwner
+	references int
+}
+type vodOriginalReference struct {
+	lifetime *vodOriginalLifetime
+	once     sync.Once
+}
+
+func (r *vodOriginalReference) close() {
+	if r == nil || r.lifetime == nil {
+		return
+	}
+	r.once.Do(func() {
+		life := r.lifetime
+		life.mu.Lock()
+		life.references--
+		last := life.references == 0
+		life.mu.Unlock()
+		if last {
+			life.core.Close()
+		}
+	})
+}
+
+// The exact HTTP participant owns its real buffered flush. Cancellation stays
+// armed through that flush and is joined before intentional setup release.
+func (o *vodOwnerContext) originalHTTPOutput(w http.ResponseWriter, r *http.Request) (func(), error) {
+	if o == nil || o.originalRef == nil {
+		return func() {}, nil
+	}
+	if r == nil || o.original == nil || o.original.Check(r.Context()) != nil {
+		return nil, errVODOwner
+	}
+	transport := http.NewResponseController(w)
+	deadline := o.expires
+	if at, ok := r.Context().Deadline(); ok && at.Before(deadline) {
+		deadline = at
+	}
+	if err := transport.SetWriteDeadline(deadline); err != nil {
+		return nil, err
+	}
+	interrupt := func() { _ = transport.SetReadDeadline(time.Now()); _ = transport.SetWriteDeadline(time.Now()) }
+	stopCaller := familyMediaAfterFunc(r.Context(), interrupt)
+	stopOwner := familyMediaAfterFunc(o.ctx, interrupt)
+	return func() { _ = transport.Flush(); stopOwner(); stopCaller() }, nil
+}
+
 func (o *vodOwnerContext) release() {
 	if o != nil && o.cancel != nil {
 		o.cancel()
 	}
-	if o != nil && o.original != nil {
+	if o != nil && o.originalRef != nil {
+		o.originalRef.close()
+	} else if o != nil && o.original != nil {
 		o.original.Close()
 	}
 }

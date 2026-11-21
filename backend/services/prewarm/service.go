@@ -169,10 +169,15 @@ func ParseShelfSelections(taskConfig map[string]string) ([]ShelfSelection, error
 
 // Service manages pre-warming of configured home-shelf items.
 type Service struct {
-	mu      sync.RWMutex
-	entries map[string]*WarmEntry // key: "titleID:userID:settingsScopeKey"
-	path    string                // persistence file path
-	store   *datastore.DataStore  // PostgreSQL backing store (nil = JSON file mode)
+	lifeMu           sync.Mutex
+	stopped, started bool
+	active           map[*prewarmOperation]struct{}
+	workerScopes     map[string]chan struct{}
+	operations       sync.WaitGroup
+	mu               sync.RWMutex
+	entries          map[string]*WarmEntry // key: "titleID:userID:settingsScopeKey"
+	path             string                // persistence file path
+	store            *datastore.DataStore  // PostgreSQL backing store (nil = JSON file mode)
 
 	// Ad-hoc entries adopted from user prequeue requests (key: prequeueID, value: adoption time)
 	adhocMu      sync.RWMutex
@@ -193,6 +198,41 @@ type Service struct {
 
 	ctx    context.Context
 	cancel context.CancelFunc
+}
+
+type prewarmOperation struct {
+	service *Service
+	ctx     context.Context
+	cancel  context.CancelFunc
+	once    sync.Once
+}
+
+func (s *Service) beginOperation(parent context.Context) (*prewarmOperation, error) {
+	if parent == nil || parent.Err() != nil {
+		return nil, context.Canceled
+	}
+	s.lifeMu.Lock()
+	defer s.lifeMu.Unlock()
+	if s.stopped || len(s.active) >= 512 {
+		return nil, errors.New("prewarm service stopped or busy")
+	}
+	if s.active == nil {
+		s.active = make(map[*prewarmOperation]struct{})
+	}
+	ctx, cancel := context.WithCancel(parent)
+	op := &prewarmOperation{service: s, ctx: ctx, cancel: cancel}
+	s.active[op] = struct{}{}
+	s.operations.Add(1)
+	return op, nil
+}
+func (o *prewarmOperation) finish() {
+	o.once.Do(func() {
+		o.cancel()
+		o.service.lifeMu.Lock()
+		delete(o.service.active, o)
+		o.service.lifeMu.Unlock()
+		o.service.operations.Done()
+	})
 }
 
 func hasReusablePreparation(entry *playback.PrequeueEntry) bool {
@@ -317,13 +357,40 @@ func (s *Service) runWorker(ctx context.Context, titleID, titleName, imdbID, med
 	}
 	workerCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
+	scope := entryKey(titleID, userID, settingsScopeKey)
+	for {
+		s.lifeMu.Lock()
+		if s.stopped || workerCtx.Err() != nil {
+			s.lifeMu.Unlock()
+			return "", context.Canceled
+		}
+		if s.workerScopes == nil {
+			s.workerScopes = make(map[string]chan struct{})
+		}
+		previous := s.workerScopes[scope]
+		if previous == nil {
+			current := make(chan struct{})
+			s.workerScopes[scope] = current
+			s.lifeMu.Unlock()
+			defer func() { s.lifeMu.Lock(); delete(s.workerScopes, scope); close(current); s.lifeMu.Unlock() }()
+			break
+		}
+		s.lifeMu.Unlock()
+		select {
+		case <-previous:
+		case <-workerCtx.Done():
+			return "", workerCtx.Err()
+		}
+	}
 
 	type workerResult struct {
 		prequeueID string
 		err        error
 	}
 	resultCh := make(chan workerResult, 1)
+	workerDone := make(chan struct{})
 	go func() {
+		defer close(workerDone)
 		var result workerResult
 		if s.scopedWorkerFn != nil {
 			result.prequeueID, result.err = s.scopedWorkerFn(workerCtx, titleID, titleName, imdbID, mediaType, year, userID, clientID, settingsScopeKey, targetEpisode)
@@ -333,28 +400,32 @@ func (s *Service) runWorker(ctx context.Context, titleID, titleName, imdbID, med
 		resultCh <- result
 	}()
 
+	var result workerResult
 	select {
-	case result := <-resultCh:
-		return result.prequeueID, result.err
+	case result = <-resultCh:
 	case <-workerCtx.Done():
-		// A resolver can become wedged after selecting a candidate if one of its
-		// cleanup goroutines never returns. Do not let that one item keep the
-		// scheduler's taskRunning flag set forever. Recover a concurrently-ready
-		// entry if possible; otherwise cancel and remove the abandoned work.
+		// Signal the actual producer first. A deadline is not a physical end.
 		if s.prequeueStore != nil {
 			if entry, ok := s.prequeueStore.GetByTitleUserScope(titleID, userID, settingsScopeKey); ok {
-				if prequeueReadyForWarmReuse(entry) && playback.EpisodeReferencesMatch(targetEpisode, entry.TargetEpisode) {
-					return entry.ID, nil
-				}
 				s.prequeueStore.CancelWork(entry.ID)
-				s.prequeueStore.Delete(entry.ID)
 			}
 		}
-		if errors.Is(workerCtx.Err(), context.DeadlineExceeded) {
-			return "", fmt.Errorf("prequeue worker timed out after %s: %w", timeout, workerCtx.Err())
-		}
-		return "", fmt.Errorf("prequeue worker canceled: %w", workerCtx.Err())
+		result = <-resultCh
 	}
+	<-workerDone
+	if workerCtx.Err() == nil {
+		return result.prequeueID, result.err
+	}
+	// Delete/retry only after the original worker has actually returned.
+	if s.prequeueStore != nil {
+		if entry, ok := s.prequeueStore.GetByTitleUserScope(titleID, userID, settingsScopeKey); ok {
+			s.prequeueStore.Delete(entry.ID)
+		}
+	}
+	if errors.Is(workerCtx.Err(), context.DeadlineExceeded) {
+		return "", fmt.Errorf("prequeue worker timed out after %s: %w", timeout, workerCtx.Err())
+	}
+	return "", fmt.Errorf("prequeue worker canceled: %w", workerCtx.Err())
 }
 
 func (s *Service) warmContinueWatchingScope(
@@ -420,6 +491,11 @@ func (s *Service) warmContinueWatchingScope(
 		playback.EpisodeReferencesMatch(targetEpisode, pqEntry.TargetEpisode) {
 		expiresAt := s.prequeueExpiry(pqEntry.CreatedAt, pqEntry, targetEpisode, state.Year, mediaType)
 		s.setPrequeueExpiry(pqEntry.ID, expiresAt)
+		s.lifeMu.Lock()
+		if s.stopped || ctx.Err() != nil {
+			s.lifeMu.Unlock()
+			return context.Canceled
+		}
 		s.mu.Lock()
 		s.entries[key] = &WarmEntry{
 			TitleID:          state.SeriesID,
@@ -437,6 +513,7 @@ func (s *Service) warmContinueWatchingScope(
 			ExpiresAt:        expiresAt,
 		}
 		s.mu.Unlock()
+		s.lifeMu.Unlock()
 		log.Printf("[prewarm] Adopted existing prequeue entry %s for %q scope=%s (skipping resolve)", pqEntry.ID, state.SeriesTitle, settingsScopeKey)
 		result.Skipped++
 		return nil
@@ -448,6 +525,11 @@ func (s *Service) warmContinueWatchingScope(
 			playback.EpisodeReferencesMatch(targetEpisode, pqEntry.TargetEpisode) {
 			expiresAt := s.prequeueExpiry(shared.LastResolve, pqEntry, targetEpisode, state.Year, mediaType)
 			s.setPrequeueExpiry(pqEntry.ID, expiresAt)
+			s.lifeMu.Lock()
+			if s.stopped || ctx.Err() != nil {
+				s.lifeMu.Unlock()
+				return context.Canceled
+			}
 			s.mu.Lock()
 			s.entries[key] = &WarmEntry{
 				TitleID:          state.SeriesID,
@@ -465,6 +547,7 @@ func (s *Service) warmContinueWatchingScope(
 				ExpiresAt:        expiresAt,
 			}
 			s.mu.Unlock()
+			s.lifeMu.Unlock()
 			log.Printf("[prewarm] Reused shared warm entry %s for %q user %s scope=%s (source user=%s)",
 				pqEntry.ID, state.SeriesTitle, user.Name, settingsScopeKey, shared.UserID)
 			result.Skipped++
@@ -492,6 +575,9 @@ func (s *Service) warmContinueWatchingScope(
 	(*resolveCount)++
 
 	prequeueID, err := s.runWorker(ctx, state.SeriesID, state.SeriesTitle, imdbID, mediaType, state.Year, user.ID, clientID, settingsScopeKey, targetEpisode)
+	if ctx.Err() != nil {
+		return ctx.Err()
+	}
 	if errors.Is(err, playback.ErrPrequeueInProgress) {
 		// A client-initiated prequeue for this title is mid-resolve. Leave it
 		// running and record nothing, so the next cycle adopts it once ready.
@@ -542,9 +628,17 @@ func (s *Service) warmContinueWatchingScope(
 		}
 	}
 
+	s.lifeMu.Lock()
+	if s.stopped || ctx.Err() != nil {
+		s.lifeMu.Unlock()
+		return context.Canceled
+	}
 	s.mu.Lock()
 	s.entries[key] = warmEntry
-	if err := s.saveLocked(); err != nil {
+	s.mu.Unlock()
+	s.lifeMu.Unlock()
+	s.mu.Lock()
+	if err := s.saveLockedContext(ctx); err != nil {
 		log.Printf("[prewarm] Warning: failed to persist after warming %q: %v", state.SeriesTitle, err)
 	}
 	s.mu.Unlock()
@@ -727,34 +821,47 @@ func (s *Service) RestorePrequeueEntries() {
 
 // Start begins the background URL refresh ticker
 func (s *Service) Start(ctx context.Context) {
-	s.ctx, s.cancel = context.WithCancel(ctx)
-
+	op, err := s.beginOperation(ctx)
+	if err != nil {
+		return
+	}
+	s.lifeMu.Lock()
+	if s.started || s.stopped {
+		s.lifeMu.Unlock()
+		op.finish()
+		return
+	}
+	s.started = true
+	s.ctx, s.cancel = op.ctx, op.cancel
+	s.lifeMu.Unlock()
 	refreshInterval := s.getRefreshInterval()
-
 	go func() {
+		defer op.finish()
 		ticker := time.NewTicker(refreshInterval)
 		defer ticker.Stop()
-
 		for {
 			select {
-			case <-s.ctx.Done():
+			case <-op.ctx.Done():
 				return
 			case <-ticker.C:
-				if err := s.RefreshURLs(s.ctx); err != nil {
+				if err := s.RefreshURLs(op.ctx); err != nil {
 					log.Printf("[prewarm] URL refresh error: %v", err)
 				}
 			}
 		}
 	}()
-
 	log.Printf("[prewarm] Background URL refresh started (interval: %v)", refreshInterval)
 }
 
-// Stop stops the background refresh
+// Stop closes admission and joins real refresh, cycle and worker operations.
 func (s *Service) Stop() {
-	if s.cancel != nil {
-		s.cancel()
+	s.lifeMu.Lock()
+	s.stopped = true
+	for op := range s.active {
+		op.cancel()
 	}
+	s.lifeMu.Unlock()
+	s.operations.Wait()
 }
 
 // RunOnce performs a legacy-compatible prewarm cycle.
@@ -764,6 +871,12 @@ func (s *Service) RunOnce(ctx context.Context) (SyncResult, error) {
 
 // RunOnceWithConfig performs a prewarm cycle for the configured home shelves.
 func (s *Service) RunOnceWithConfig(ctx context.Context, taskConfig map[string]string) (SyncResult, error) {
+	op, err := s.beginOperation(ctx)
+	if err != nil {
+		return SyncResult{}, err
+	}
+	defer op.finish()
+	ctx = op.ctx
 	if s.historySvc == nil || s.usersSvc == nil || (s.workerFn == nil && s.scopedWorkerFn == nil) {
 		return SyncResult{}, fmt.Errorf("prewarm service not fully configured")
 	}
@@ -892,7 +1005,7 @@ func (s *Service) RunOnceWithConfig(ctx context.Context, taskConfig map[string]s
 
 	// Persist any adopted entries in bulk
 	s.mu.Lock()
-	if err := s.saveLocked(); err != nil {
+	if err := s.saveLockedContext(ctx); err != nil {
 		log.Printf("[prewarm] Warning: failed to persist after adoption pass: %v", err)
 	}
 	s.mu.Unlock()
@@ -906,7 +1019,7 @@ func (s *Service) RunOnceWithConfig(ctx context.Context, taskConfig map[string]s
 			result.Removed++
 		}
 	}
-	if err := s.saveLocked(); err != nil {
+	if err := s.saveLockedContext(ctx); err != nil {
 		log.Printf("[prewarm] Warning: failed to persist warm entries: %v", err)
 	}
 	s.mu.Unlock()
@@ -978,6 +1091,12 @@ func shelfItemWatchState(item ShelfItem, continueByID, continueByIMDB map[string
 
 // RefreshURLs refreshes debrid URLs for all warm entries to keep them alive
 func (s *Service) RefreshURLs(ctx context.Context) error {
+	op, err := s.beginOperation(ctx)
+	if err != nil {
+		return err
+	}
+	defer op.finish()
+	ctx = op.ctx
 	if s.debridStreaming == nil {
 		return nil
 	}
@@ -1032,9 +1151,15 @@ func (s *Service) RefreshURLs(ctx context.Context) error {
 			continue
 		}
 
+		s.lifeMu.Lock()
+		if s.stopped || ctx.Err() != nil {
+			s.lifeMu.Unlock()
+			return context.Canceled
+		}
 		s.mu.Lock()
 		entry.LastRefresh = time.Now()
 		s.mu.Unlock()
+		s.lifeMu.Unlock()
 		refreshed++
 	}
 
@@ -1161,9 +1286,16 @@ func (s *Service) load() error {
 }
 
 // saveLocked writes warm entries to disk or database atomically. Caller must hold s.mu.
-func (s *Service) saveLocked() error {
+func (s *Service) saveLocked() error { return s.saveLockedContext(context.Background()) }
+func (s *Service) saveLockedContext(ctx context.Context) error {
+	if ctx == nil {
+		return context.Canceled
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	if s.useDB() {
-		return s.syncToDB()
+		return s.syncToDBContext(ctx)
 	}
 
 	if s.path == "" {
@@ -1204,8 +1336,8 @@ func (s *Service) saveLocked() error {
 }
 
 // syncToDB writes the full in-memory prewarm state to PostgreSQL.
-func (s *Service) syncToDB() error {
-	ctx := context.Background()
+func (s *Service) syncToDB() error { return s.syncToDBContext(context.Background()) }
+func (s *Service) syncToDBContext(ctx context.Context) error {
 	repo := s.store.Prewarm()
 
 	// Upsert all in-memory entries
@@ -1427,7 +1559,7 @@ func (s *Service) reResolveExpired(ctx context.Context) int {
 
 	if reResolved > 0 {
 		s.mu.Lock()
-		if err := s.saveLocked(); err != nil {
+		if err := s.saveLockedContext(ctx); err != nil {
 			log.Printf("[prewarm] Warning: failed to persist after re-resolve: %v", err)
 		}
 		s.mu.Unlock()

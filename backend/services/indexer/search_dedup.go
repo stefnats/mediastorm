@@ -101,6 +101,15 @@ func (s *Service) searchTorznab(ctx context.Context, idx config.IndexerConfig, o
 	if results, ok := s.indexerCalls.recent(key, time.Now()); ok {
 		return cloneNZBResults(results), nil
 	}
+	if _, joined := ctx.Value(joinedIndexerSourceKey{}).(joinedIndexerSource); joined {
+		// This real caller owns the actual request and its synchronous Body.Close.
+		// Do not turn cancellation into a detached singleflight source operation.
+		results, err := s.fetchTorznab(ctx, idx, opts)
+		if err == nil && ctx.Err() == nil {
+			s.indexerCalls.remember(key, results, time.Now())
+		}
+		return results, err
+	}
 	ch := s.indexerCalls.group.DoChan(key, func() (any, error) {
 		callCtx, cancel := sharedCallContext(ctx)
 		defer cancel()

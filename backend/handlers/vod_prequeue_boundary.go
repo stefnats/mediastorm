@@ -23,31 +23,101 @@ func (h *PrequeueHandler) vodEntry(w http.ResponseWriter, r *http.Request, id st
 	owner, ok := h.vodBoundary.requestOwner(w, r, op, entry.UserID)
 	return entry, owner, ok
 }
-func (b *vodBoundary) bindWorker(id string, o *vodOwnerContext) bool {
+
+// A reservation only serializes the same private registry slot. It grants no
+// owner and cannot replace the actual original request/current checks.
+type vodWorkerBinding struct{ owner *vodOwnerContext }
+
+func (b *vodBoundary) bindWorker(id string, o *vodOwnerContext, original ...*http.Request) bool {
+	if o == nil {
+		return b == nil
+	}
+	return b.bindWorkerContext(o.ctx, o.ctx, id, o, original...)
+}
+func (b *vodBoundary) bindWorkerContext(ctx, lifetime context.Context, id string, o *vodOwnerContext, original ...*http.Request) bool {
 	if b == nil {
 		return true
 	}
-	if id == "" || o == nil || o.issuer != b || o.recheck(context.Background(), vodDemand) != nil {
+	if ctx == nil || lifetime == nil || ctx.Err() != nil || lifetime.Err() != nil || id == "" || o == nil || o.issuer != b {
 		return false
 	}
+	var retired []*vodOwnerContext
+	slot := &vodWorkerBinding{owner: o}
 	b.mu.Lock()
-	defer b.mu.Unlock()
 	for key, old := range b.workers {
 		if old.ctx.Err() != nil || !old.expires.After(b.now()) {
-			old.cancel()
+			retired = append(retired, old)
 			delete(b.workers, key)
 		}
 	}
-	if existing := b.workers[id]; existing != nil {
+	if b.bindings == nil {
+		b.bindings = make(map[string]*vodWorkerBinding)
+	}
+	existing := b.workers[id]
+	admitted := existing == nil && b.bindings[id] == nil && len(b.workers)+len(b.bindings) < 512
+	if admitted {
+		b.bindings[id] = slot
+	}
+	b.mu.Unlock()
+	// Close may wait for actual SQL/HTTP work. Never hold the registry lock.
+	for _, old := range retired {
+		old.release()
+	}
+	if !admitted {
 		return existing == o
 	}
-	if len(b.workers) >= 512 {
+	installed := false
+	var worker *vodOwnerContext
+	defer func() {
+		b.mu.Lock()
+		if b.bindings[id] == slot {
+			delete(b.bindings, id)
+		}
+		b.mu.Unlock()
+		if !installed && worker != nil {
+			worker.release()
+		}
+	}()
+	if o.recheck(ctx, vodDemand) != nil {
 		return false
 	}
 	copy := *o
-	copy.ctx, copy.cancel = context.WithDeadline(context.Background(), o.expires)
-	b.workers[id] = &copy
-	return true
+	parent := lifetime
+	if o.original != nil {
+		if o.originalRef != nil || len(original) != 1 || original[0] == nil || o.original.Handoff(original[0]) != nil {
+			return false
+		}
+		parent = o.original.Context()
+		life := &vodOriginalLifetime{core: o.original, references: 2}
+		o.originalRef = &vodOriginalReference{lifetime: life}
+		copy.originalRef = &vodOriginalReference{lifetime: life}
+	}
+	copy.ctx, copy.cancel = context.WithDeadline(parent, o.expires)
+	worker = &copy
+	if ctx.Err() != nil || lifetime.Err() != nil || copy.ctx.Err() != nil || copy.recheck(ctx, vodDemand) != nil {
+		return false
+	}
+	b.mu.Lock()
+	if b.bindings[id] == slot && b.workers[id] == nil && ctx.Err() == nil && lifetime.Err() == nil && copy.ctx.Err() == nil {
+		delete(b.bindings, id)
+		b.workers[id] = worker
+		installed = true
+	}
+	b.mu.Unlock()
+	return installed
+}
+func (b *vodBoundary) discardBoundWorker(id string) {
+	if b == nil {
+		return
+	}
+	b.mu.Lock()
+	old := b.workers[id]
+	delete(b.workers, id)
+	delete(b.bindings, id)
+	b.mu.Unlock()
+	if old != nil {
+		old.release()
+	}
 }
 func (o *vodOwnerContext) checkBackground(ctx context.Context, state vodAccountApplicability) error {
 	if state.mode != vodExplicitInactive || o.profile.ID == "" {
@@ -84,10 +154,18 @@ func (b *vodBoundary) backgroundOwner(ctx context.Context, profileID, client str
 	}
 	return o, nil
 }
+
+// Kept for isolated legacy tests. Production always supplies admitted work.
 func (h *PrequeueHandler) vodWorker(id, user, client string) (*vodOwnerContext, error) {
+	return h.vodWorkerForContext(context.Background(), id, user, client)
+}
+func (h *PrequeueHandler) vodWorkerForContext(ctx context.Context, id, user, client string) (*vodOwnerContext, error) {
 	b := h.vodBoundary
 	if b == nil {
 		return nil, nil
+	}
+	if ctx == nil || ctx.Err() != nil {
+		return nil, errVODOwner
 	}
 	entry, _, ok := h.store.SnapshotForAuthorization(id)
 	if !ok || entry.UserID != user {
@@ -99,12 +177,12 @@ func (h *PrequeueHandler) vodWorker(id, user, client string) (*vodOwnerContext, 
 	b.mu.Unlock()
 	if owner == nil {
 		var err error
-		owner, err = b.backgroundOwner(context.Background(), entry.UserID, client)
+		owner, err = b.backgroundOwner(ctx, entry.UserID, client)
 		if err != nil {
 			return nil, err
 		}
 	}
-	if owner.profile.ID != entry.UserID || owner.client != normalizeClientID(client) || owner.recheck(context.Background(), vodDemand) != nil {
+	if owner.profile.ID != entry.UserID || owner.client != normalizeClientID(client) || owner.recheck(ctx, vodDemand) != nil {
 		owner.release()
 		return nil, errVODOwner
 	}
@@ -114,17 +192,33 @@ func (h *PrequeueHandler) vodWorker(id, user, client string) (*vodOwnerContext, 
 		return ok && entry.UserID == owner.profile.ID && !entry.ReuseDisabled && !entry.MigrationAdopted
 	}
 	b.mu.Lock()
-	defer b.mu.Unlock()
-	if old := b.active[id]; old != nil {
-		old.superseded.Store(true)
-		old.release()
+	old := b.active[id]
+	admitted := ctx.Err() == nil && (old != nil || len(b.active) < 512)
+	if admitted {
+		if old != nil {
+			old.superseded.Store(true)
+		}
+		b.active[id] = owner
 	}
-	if len(b.active) >= 512 && b.active[id] == nil {
+	b.mu.Unlock()
+	if !admitted {
 		owner.release()
 		return nil, errVODOwner
 	}
-	b.active[id] = owner
+	if old != nil {
+		old.release()
+	}
 	return owner, nil
+}
+
+func (h *PrequeueHandler) vodWorkerCheckContext(owner *vodOwnerContext) context.Context {
+	if h.currentWork != nil {
+		return h.currentWork.ctx
+	}
+	if owner != nil {
+		return owner.ctx
+	}
+	return nil
 }
 func (h *PrequeueHandler) finishVODWorker(id string, owner *vodOwnerContext) {
 	if h.vodBoundary == nil || owner == nil {
@@ -139,7 +233,7 @@ func (h *PrequeueHandler) finishVODWorker(id string, owner *vodOwnerContext) {
 		delete(b.active, id)
 	}
 	b.mu.Unlock()
-	owner.cancel()
+	owner.release()
 }
 func (h *PrequeueHandler) rejectVODWorker(id, user string, owners ...*vodOwnerContext) {
 	if h.vodBoundary == nil {
@@ -178,9 +272,12 @@ func (h *PrequeueHandler) publishVODReady(id string, owner *vodOwnerContext, upd
 		return h.store.UpdateWorker(id, update)
 	}
 	b := h.vodBoundary
+	if owner == nil || owner.recheck(h.vodWorkerCheckContext(owner), vodDemand) != nil {
+		return false
+	}
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	if owner == nil || b.active[id] != owner || owner.recheck(context.Background(), vodDemand) != nil {
+	if b.active[id] != owner || h.vodWorkerCheckContext(owner).Err() != nil {
 		return false
 	}
 	return h.store.UpdateWorker(id, update)
@@ -195,9 +292,12 @@ func (h *PrequeueHandler) updateVODWorker(id string, update func(*playback.Prequ
 		return h.store.UpdateWorker(id, update)
 	}
 	b := h.vodBoundary
+	if owner.recheck(h.vodWorkerCheckContext(owner), vodDemand) != nil {
+		return false
+	}
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	if b.active[id] != owner || owner.recheck(context.Background(), vodDemand) != nil {
+	if b.active[id] != owner || h.vodWorkerCheckContext(owner).Err() != nil {
 		return false
 	}
 	return h.store.UpdateWorker(id, update)
@@ -209,9 +309,12 @@ func (h *PrequeueHandler) recordVODPreparationEvidence(id, client string, probe 
 		return
 	}
 	b := h.vodBoundary
+	if owner.recheck(h.vodWorkerCheckContext(owner), vodDemand) != nil {
+		return
+	}
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	if b.active[id] != owner || owner.recheck(context.Background(), vodDemand) != nil {
+	if b.active[id] != owner || h.vodWorkerCheckContext(owner).Err() != nil {
 		return
 	}
 	h.recordPreparationEvidence(id, client, probe, configuration)
@@ -223,9 +326,12 @@ func (h *PrequeueHandler) beginVODAttempt(id string, owner *vodOwnerContext) (pl
 		return stamp, ok
 	}
 	b := h.vodBoundary
+	if owner == nil || owner.recheck(h.vodWorkerCheckContext(owner), vodDemand) != nil {
+		return playback.AuthorizationStamp{}, false
+	}
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	if owner == nil || b.active[id] != owner || owner.recheck(context.Background(), vodDemand) != nil {
+	if b.active[id] != owner || h.vodWorkerCheckContext(owner).Err() != nil {
 		return playback.AuthorizationStamp{}, false
 	}
 	stamp, ok := h.store.BeginAuthorizationAttempt(id)
@@ -245,9 +351,12 @@ func (h *PrequeueHandler) setVODCancel(id string, owner *vodOwnerContext, cancel
 		return true
 	}
 	b := h.vodBoundary
+	if owner == nil || owner.recheck(h.vodWorkerCheckContext(owner), vodDemand) != nil {
+		return false
+	}
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	if owner == nil || b.active[id] != owner || owner.recheck(context.Background(), vodDemand) != nil {
+	if b.active[id] != owner || h.vodWorkerCheckContext(owner).Err() != nil {
 		return false
 	}
 	h.store.SetCancelFunc(id, cancel)
@@ -260,17 +369,26 @@ func (b *vodBoundary) invalidateProfile(profile string) {
 	if b == nil {
 		return
 	}
+	var retired []*vodOwnerContext
 	b.mu.Lock()
-	defer b.mu.Unlock()
 	for _, registry := range []map[string]*vodOwnerContext{b.workers, b.active} {
 		for _, owner := range registry {
 			if owner.profile.ID == profile {
 				if owner.superseded != nil {
 					owner.superseded.Store(true)
 				}
-				owner.release()
+				retired = append(retired, owner)
 			}
 		}
+	}
+	for id, slot := range b.bindings {
+		if slot.owner.profile.ID == profile {
+			delete(b.bindings, id)
+		}
+	}
+	b.mu.Unlock()
+	for _, owner := range retired {
+		owner.release()
 	}
 }
 

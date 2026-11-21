@@ -1,6 +1,7 @@
 package handlers
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -238,17 +239,41 @@ func (h *PrequeueHandler) releaseAction(w http.ResponseWriter, r *http.Request, 
 		}
 		h.latencyTracker.NotePrequeueRequested(next.ID, entry.TitleID, entry.UserID, entry.TitleName, entry.MediaType)
 		if created {
-			if !h.vodBoundary.bindWorker(next.ID, owner) {
+			work, workErr := h.beginPrequeueWork(context.Background(), next.ID)
+			if workErr != nil {
+				http.Error(w, "could not prepare an alternative", http.StatusServiceUnavailable)
+				return
+			}
+			setup, stopSetup := prequeueSetupContext(r.Context(), work)
+			bound := h.vodBoundary.bindWorkerContext(setup, work.ctx, next.ID, owner, r)
+			stopSetup()
+			if !bound {
+				work.finish()
 				vodDeny(w, kidsvod.CodeContextChanged)
 				return
 			}
-			go h.runPrequeueWorker(next.ID, entry.TitleID, entry.TitleName, "", entry.MediaType, entry.Year, entry.UserID, client, adaptiveThroughputFromRequest(r), entry.TargetEpisode, offset, req.SkipHLS, prequeueWorkerInteractive, prequeueLocalScope{accountID: auth.GetAccountID(r), master: auth.IsMaster(r), automaticLibrarySelection: entry.AutomaticLibrarySelection, excludedResult: func() *models.NZBResult {
-				if reporting {
-					return nil
+			finishOutput, outputErr := owner.originalHTTPOutput(w, r)
+			if outputErr != nil || work.ctx.Err() != nil {
+				// The saved report remains saved even when its separate retry cannot start.
+				http.Error(w, "could not prepare an alternative", http.StatusServiceUnavailable)
+				if finishOutput != nil {
+					finishOutput()
 				}
+				h.vodBoundary.discardBoundWorker(next.ID)
+				work.finish()
+				return
+			}
+			defer finishOutput()
+			throughput := adaptiveThroughputFromRequest(r)
+			local := prequeueLocalScope{accountID: auth.GetAccountID(r), master: auth.IsMaster(r), automaticLibrarySelection: entry.AutomaticLibrarySelection}
+			if !reporting {
 				result := *entry.SelectedResult
-				return &result
-			}()})
+				local.excludedResult = &result
+			}
+			go func() {
+				defer work.finish()
+				h.runPrequeueWorkerJob(work, next.ID, entry.TitleID, entry.TitleName, "", entry.MediaType, entry.Year, entry.UserID, client, throughput, entry.TargetEpisode, offset, req.SkipHLS, prequeueWorkerInteractive, local)
+			}()
 		}
 		response["replacement"] = playback.PrequeueResponse{PrequeueID: next.ID, TargetEpisode: entry.TargetEpisode, Status: playback.PrequeueStatusQueued}
 		response["resumePosition"] = offset
