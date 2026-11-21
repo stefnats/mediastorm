@@ -30,7 +30,6 @@ func (h *SABLibraryPublicationHandler) Preview(w http.ResponseWriter, r *http.Re
 	}
 	entry.ioMu.Lock()
 	if entry.ctx.Err() == nil {
-		entry.bodyDone = true
 		err = entry.controller.SetReadDeadline(entry.expiry)
 	} else {
 		err = entry.ctx.Err()
