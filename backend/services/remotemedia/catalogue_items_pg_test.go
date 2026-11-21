@@ -217,7 +217,7 @@ func TestRemoteCatalogueItemPages(t *testing.T) {
 				}
 				// Upsert keeps the earliest creation time; set the actual stored
 				// fixture timestamps explicitly so every genuine sort key differs.
-				if _, err := f.store.Pool().Exec(t.Context(), `UPDATE remote_media_items SET created_at=$1 + CASE id WHEN 'a' THEN interval '0 hour' WHEN 'b' THEN interval '1 hour' ELSE interval '2 hour' END`, at); err != nil {
+				if _, err := f.store.Pool().Exec(t.Context(), `UPDATE remote_media_items SET created_at=$1::timestamptz + CASE id WHEN 'a' THEN interval '0 hour' WHEN 'b' THEN interval '1 hour' ELSE interval '2 hour' END`, at); err != nil {
 					t.Fatal(err)
 				}
 				checks := []struct {
