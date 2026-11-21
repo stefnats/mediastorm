@@ -255,12 +255,11 @@ func (s *Service) fallbackSlot() func() {
 	}
 }
 func (s *Service) submitSABFallback(passed *database.ImportQueueItem) error {
-	work, finishSource, sourceError := s.beginSourceWork(nil, false)
+	work, finishSource, sourceError := s.beginRuntimeWork(false)
 	if sourceError != nil {
 		return ErrSABFallbackUnavailable
 	}
 	defer finishSource()
-	_ = work
 
 	engine, source, enabled := s.fallbackEngine()
 	if !enabled {
@@ -269,7 +268,7 @@ func (s *Service) submitSABFallback(passed *database.ImportQueueItem) error {
 	if passed == nil {
 		return ErrSABFallbackNotFound
 	}
-	ctx := s.ctx
+	ctx := work
 	if ctx == nil {
 		return ErrSABFallbackUnavailable
 	}
