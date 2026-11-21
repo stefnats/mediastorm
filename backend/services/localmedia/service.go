@@ -381,9 +381,12 @@ func (s *Service) ListItems(ctx context.Context, libraryID string, query models.
 			}
 			filtered = append(filtered, item)
 		}
+		removed := len(result.Items) - len(filtered)
 		result.Items = filtered
-		result.Total = len(filtered)
-		result.Offset = min(result.Offset, result.Total)
+		if removed > 0 {
+			// The repository total describes every matching row, not this page.
+			result.Total = max(0, result.Total-removed)
+		}
 	}
 	hydrateLocalMediaItemResultExternalIDs(result)
 	s.enrichEpisodeMetadata(ctx, result.Items)
