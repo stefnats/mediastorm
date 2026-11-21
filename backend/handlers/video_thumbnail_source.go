@@ -58,10 +58,14 @@ type thumbnailSourceSession struct {
 }
 
 func newThumbnailSourceBridge() *thumbnailSourceBridge {
-	transport := http.DefaultTransport.(*http.Transport).Clone()
-	transport.MaxIdleConns = 32
-	transport.MaxIdleConnsPerHost = 16
-	transport.IdleConnTimeout = 2 * time.Minute
+	transport := http.DefaultTransport
+	if standard, ok := transport.(*http.Transport); ok && standard != nil {
+		owned := standard.Clone()
+		owned.MaxIdleConns = 32
+		owned.MaxIdleConnsPerHost = 16
+		owned.IdleConnTimeout = 2 * time.Minute
+		transport = owned
+	}
 	return &thumbnailSourceBridge{
 		sessions: make(map[string]thumbnailSourceSession),
 		client: &http.Client{
