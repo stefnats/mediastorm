@@ -664,12 +664,12 @@ func TestNativeRoomIdentityContinuity(t *testing.T) {
 	}
 }
 
-func nativeSQLWait(t *testing.T, f *nativeRoomFixture, needle string) {
+func nativeSQLWait(t *testing.T, f *nativeRoomFixture, needle string, holderPID uint32) {
 	t.Helper()
 	until := time.Now().Add(5 * time.Second)
 	for time.Now().Before(until) {
 		var waiting bool
-		e := f.f.base.admin.QueryRow(t.Context(), `SELECT EXISTS(SELECT 1 FROM pg_stat_activity WHERE application_name=$1 AND wait_event_type='Lock' AND query LIKE $2 AND query LIKE '%FOR UPDATE%')`, f.f.base.schema, "%"+needle+"%").Scan(&waiting)
+		e := f.f.base.admin.QueryRow(t.Context(), `SELECT EXISTS(SELECT 1 FROM pg_stat_activity waiting WHERE waiting.application_name=$1 AND waiting.wait_event_type='Lock' AND waiting.query LIKE $2 AND $3::integer=ANY(pg_catalog.pg_blocking_pids(waiting.pid)))`, f.f.base.schema, "%"+needle+"%", holderPID).Scan(&waiting)
 		if e != nil {
 			t.Fatal(e)
 		}
@@ -743,7 +743,7 @@ func nativeHeldTransaction(t *testing.T, kind string) {
 			success = result != nil
 		}
 	}()
-	nativeSQLWait(t, f, needle)
+	nativeSQLWait(t, f, needle, holder.Conn().PgConn().PID())
 	if kind == "held-room-runtime-cancel" {
 		closeDone = make(chan struct{})
 		go func() { defer close(closeDone); f.f.authority.Close() }()

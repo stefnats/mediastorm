@@ -134,7 +134,7 @@ func (a *WatchRoomAuthority) maintenanceBatch(cursor string) (next string, visit
 	if rows.Err() != nil {
 		return "", 0, 0, 0, ErrWatchRoomUnavailable
 	}
-	if shareLockPolicyRelations(g.ctx, g.tx) != nil || shareLockRelations(g.ctx, g.tx, []string{"watch_rooms", "watch_room_provenance", "watch_room_members", "watch_room_invites", "watch_room_native_admissions", "watch_room_guest_members", "watch_room_account_invites", "watch_room_account_invite_provenance", "watch_room_guest_bindings", "watch_party_playback_bindings"}) != nil {
+	if shareLockPolicyRelations(g.ctx, g.tx) != nil || shareLockRelations(g.ctx, g.tx, []string{"watch_rooms", "watch_room_provenance", "watch_room_members", "watch_room_invites", "watch_room_native_admissions", "watch_room_guest_members", "watch_room_account_invites", "watch_room_account_invite_provenance", "watch_party_guest_bindings", "watch_party_playback_bindings"}) != nil {
 		return "", 0, 0, 0, ErrWatchRoomUnavailable
 	}
 	fence := func() error {
