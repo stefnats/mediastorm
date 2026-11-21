@@ -53,13 +53,15 @@ type ShareProfileService interface {
 
 // ShareHandler creates and consumes one-time shareable playback links.
 type ShareHandler struct {
-	store           *ShareStore
-	sessions        ShareSessionService
-	users           ShareProfileService
-	serverBasePath  string
-	libraryAccess   *libraryaccess.Service
-	managedCreation bool
-	creator         *datastore.ShareLinkCreator
+	store             *ShareStore
+	sessions          ShareSessionService
+	users             ShareProfileService
+	serverBasePath    string
+	libraryAccess     *libraryaccess.Service
+	managedCreation   bool
+	creator           *datastore.ShareLinkCreator
+	managedRedemption bool
+	redeemer          *datastore.ShareLinkRedeemer
 }
 
 // Selecting PG creation remains fail-closed even when its original managed
@@ -67,6 +69,12 @@ type ShareHandler struct {
 func (h *ShareHandler) SetManagedShareCreation(creator *datastore.ShareLinkCreator) {
 	h.managedCreation = true
 	h.creator = creator
+}
+
+// SetManagedShareRedemption never falls back to the legacy independent mint.
+func (h *ShareHandler) SetManagedShareRedemption(runtime *datastore.ShareLinkRedeemer) {
+	h.managedRedemption = true
+	h.redeemer = runtime
 }
 
 func (h *ShareHandler) SetLibraryAccessService(service *libraryaccess.Service) {
@@ -463,6 +471,11 @@ func shareTitle(params map[string]string) string {
 // stream-scoped session and redirects into the player-only web view. Already-used,
 // expired, or unknown links render a friendly 410 page.
 func (h *ShareHandler) Open(w http.ResponseWriter, r *http.Request) {
+	if h.managedRedemption {
+		h.openManagedShare(w, r)
+		return
+	}
+
 	token := strings.TrimSpace(shareTokenFromPath(r.URL.Path))
 
 	rec, ok := h.store.Consume(r.Context(), token)
@@ -494,6 +507,93 @@ func (h *ShareHandler) Open(w http.ResponseWriter, r *http.Request) {
 
 	target := h.serverBasePath + "/watch/playback.html?" + values.Encode()
 	http.Redirect(w, r, target, http.StatusSeeOther)
+}
+
+// Public redemption never fabricates an authenticated account request. Its
+// actual source delegation is consumed and minted atomically by the core.
+func (h *ShareHandler) openManagedShare(w http.ResponseWriter, incoming *http.Request) {
+	if h.redeemer == nil || h.redeemer.Context().Err() != nil {
+		writeShareJSONError(w, http.StatusServiceUnavailable, "shared playback unavailable")
+		return
+	}
+	ctx, cancel := context.WithTimeout(incoming.Context(), 30*time.Second)
+	defer cancel()
+	r := incoming.WithContext(ctx)
+	transport := http.NewResponseController(w)
+	deadline, _ := ctx.Deadline()
+	_ = transport.SetReadDeadline(deadline)
+	_ = transport.SetWriteDeadline(deadline)
+	interrupted := make(chan struct{})
+	stopIO := context.AfterFunc(ctx, func() {
+		defer close(interrupted)
+		_ = transport.SetReadDeadline(time.Now())
+		_ = transport.SetWriteDeadline(time.Now())
+	})
+	retired := make(chan struct{})
+	stopLife := context.AfterFunc(h.redeemer.Context(), func() { defer close(retired); cancel() })
+	defer func() {
+		if !stopLife() {
+			<-retired
+		}
+		if !stopIO() {
+			<-interrupted
+		}
+	}()
+	result, err := h.redeemer.Redeem(r, shareTokenFromPath(r.URL.Path))
+	if err != nil {
+		if errors.Is(err, datastore.ErrSharePlaybackRecreate) || errors.Is(err, datastore.ErrSharePlaybackChanged) || errors.Is(err, datastore.ErrSharePlaybackForbidden) {
+			renderShareUnavailable(w, h.serverBasePath)
+		} else {
+			writeShareJSONError(w, http.StatusServiceUnavailable, "shared playback unavailable")
+		}
+		_ = transport.Flush()
+		return
+	}
+	valid := func() bool {
+		return result != nil && ctx.Err() == nil && result.PublicationUntil.After(time.Now()) && h.redeemer.Context().Err() == nil
+	}
+	if !valid() {
+		writeShareJSONError(w, http.StatusServiceUnavailable, "shared playback unavailable")
+		return
+	}
+	output, cancelOutput := context.WithDeadline(ctx, result.PublicationUntil)
+	defer cancelOutput()
+	_ = transport.SetWriteDeadline(result.PublicationUntil)
+	ended := make(chan struct{})
+	stopOutput := context.AfterFunc(output, func() { defer close(ended); _ = transport.SetWriteDeadline(time.Now()) })
+	defer func() {
+		if !stopOutput() {
+			<-ended
+		}
+	}()
+	values := url.Values{}
+	for key, value := range result.Params {
+		if !shareAllowedParams[key] || shareRedirectSensitiveParams[key] || key == "userId" || key == "profileId" || len(value) > 4096 {
+			continue
+		}
+		values.Set(key, value)
+	}
+	values.Set("profileId", result.Params["profileId"])
+	values.Set("token", result.Session.Token)
+	values.Set("shareMode", "1")
+	values.Set("sharedSource", "1")
+	target := h.serverBasePath + "/watch/playback.html?" + values.Encode()
+	if len(target) > 1<<20 || output.Err() != nil || !valid() {
+		writeShareJSONError(w, http.StatusServiceUnavailable, "shared playback unavailable")
+		return
+	}
+	w.Header().Set("Cache-Control", "private, no-store")
+	w.Header().Set("Location", target)
+	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+	w.WriteHeader(http.StatusSeeOther)
+	if _, err = w.Write([]byte("Shared playback is starting.\n")); err != nil {
+		return
+	}
+	// Force the original buffered HTTP headers/body onto their actual transport
+	// before retiring signal callbacks or claiming response work completion.
+	if err = transport.Flush(); err != nil {
+		return
+	}
 }
 
 // shareTokenFromPath extracts the token from a /share/{token} path without

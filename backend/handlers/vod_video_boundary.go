@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"novastream/internal/datastore"
 	"novastream/models"
 	"novastream/services/kidsvod"
 )
@@ -25,6 +26,14 @@ type vodRawOwnerKey struct{}
 
 func (h *VideoHandler) beginVideoVOD(w http.ResponseWriter, r *http.Request, source string) (http.ResponseWriter, *http.Request, func(), bool) {
 	noop := func() {}
+	if g := shareMediaFrom(r.Context()); g != nil {
+		if g.handler != h || normalizeShareResource(source) != g.owner.Resource() || g.current(r.Context()) != nil {
+			shareMediaError(w, datastore.ErrSharePlaybackChanged)
+			return w, r, noop, false
+		}
+		return w, r, noop, true
+	}
+
 	if h.vodBoundary == nil {
 		return w, r, noop, true
 	}
@@ -133,6 +142,12 @@ func (h *VideoHandler) beginVideoVOD(w http.ResponseWriter, r *http.Request, sou
 var errVODRawStaleRegistration = errors.New("stale private raw registration")
 
 func (h *VideoHandler) vodRawCheck(ctx context.Context) error {
+	if g := shareMediaFrom(ctx); g != nil {
+		if g.handler != h {
+			return datastore.ErrSharePlaybackChanged
+		}
+		return g.current(ctx)
+	}
 	err := h.checkVODRawOwner(ctx)
 	if err != nil {
 		raw, ok := ctx.Value(vodRawOwnerKey{}).(*vodRawOwner)

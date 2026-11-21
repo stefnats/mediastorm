@@ -32,7 +32,9 @@ import (
 	"time"
 
 	"novastream/config"
+	"novastream/internal/apierror"
 	"novastream/internal/auth"
+	"novastream/internal/datastore"
 	"novastream/internal/integration"
 	"novastream/internal/livecapacity"
 	"novastream/internal/netproxy"
@@ -124,6 +126,7 @@ type VideoHandler struct {
 	libraryAccess   *libraryaccess.Service
 	recordingAccess *RecordingStreamAccess
 	vodBoundary     *vodBoundary
+	sharePlayback   *sharePlaybackInstallation
 
 	// castCaps answers "what can this receiver actually decode" from cache.
 	// Never probes on this path: a cast start must not wait on a device.
@@ -899,6 +902,9 @@ func (h *VideoHandler) SetThumbnailCacheDir(baseDir string) {
 
 // DetectCredits triggers async credits detection for a video path.
 func (h *VideoHandler) DetectCredits(w http.ResponseWriter, r *http.Request) {
+	if rejectShareAncillary(w, r) {
+		return
+	}
 	if r.Method == http.MethodOptions {
 		h.HandleOptions(w, r)
 		return
@@ -956,6 +962,9 @@ func (h *VideoHandler) DetectCredits(w http.ResponseWriter, r *http.Request) {
 
 // GetCreditsStatus returns the cached credits detection result for a video path.
 func (h *VideoHandler) GetCreditsStatus(w http.ResponseWriter, r *http.Request) {
+	if rejectShareAncillary(w, r) {
+		return
+	}
 	if r.Method == http.MethodOptions {
 		h.HandleOptions(w, r)
 		return
@@ -1165,7 +1174,7 @@ func (h *VideoHandler) StreamVideo(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Get the file path from query parameter
-	filePath := r.URL.Query().Get("path")
+	filePath := resolveScopedPlaybackPath(r, r.URL.Query().Get("path"))
 	if filePath == "" {
 		http.Error(w, "Missing path parameter", http.StatusBadRequest)
 		return
@@ -1219,6 +1228,9 @@ func (h *VideoHandler) StreamVideo(w http.ResponseWriter, r *http.Request) {
 		videoTracef("[video] SEEK REQUEST detected: range=%q path=%q method=%s", rangeHeader, cleanPath, r.Method)
 	}
 
+	if shouldTransmux && rejectShareAncillary(w, r) {
+		return
+	}
 	if shouldTransmux {
 		if h.streamer == nil {
 			http.Error(w, "stream provider not configured", http.StatusServiceUnavailable)
@@ -1283,7 +1295,7 @@ func (h *VideoHandler) streamViaProvider(w http.ResponseWriter, r *http.Request,
 	// seek storms from hammering the debrid CDN. ExoPlayer on Android TV generates
 	// hundreds of 2-byte range requests when seeking through DV files with
 	// interleaved tracks. Each CDN round trip takes ~1s, causing multi-second stalls.
-	if h.vodBoundary == nil && rangeHeader != "" && r.Method == http.MethodGet && isDebridPath && !isLocalMediaPath {
+	if h.vodBoundary == nil && shareMediaFrom(r.Context()) == nil && rangeHeader != "" && r.Method == http.MethodGet && isDebridPath && !isLocalMediaPath {
 		if rangeStart, rangeEnd, ok := parseByteRange(rangeHeader); ok {
 			rangeLen := rangeEnd - rangeStart + 1
 			if rangeLen > 0 && rangeLen <= rangeCacheMinFetchSize {
@@ -1400,7 +1412,7 @@ func (h *VideoHandler) streamViaProvider(w http.ResponseWriter, r *http.Request,
 	// in non-interleaved MP4 files. The pool keeps CDN connections alive after
 	// client disconnects, so the next request at a nearby position is served
 	// from the buffer instead of making a new CDN round-trip.
-	if h.vodBoundary == nil && rangeHeader != "" && r.Method == http.MethodGet && h.streamPool != nil && isDebridPath && !isLocalMediaPath && !isPlaybackProbe {
+	if h.vodBoundary == nil && shareMediaFrom(r.Context()) == nil && rangeHeader != "" && r.Method == http.MethodGet && h.streamPool != nil && isDebridPath && !isLocalMediaPath && !isPlaybackProbe {
 		if reqStart, ok := parseRangeStart(rangeHeader); ok {
 			displayName := sanitizeExternalDisplayName(r.URL.Query().Get("displayName"))
 			if displayName == "" {
@@ -1462,7 +1474,7 @@ func (h *VideoHandler) streamViaProvider(w http.ResponseWriter, r *http.Request,
 	contentRange := resp.Headers.Get("Content-Range")
 	contentLength := resp.Headers.Get("Content-Length")
 	acceptRanges := resp.Headers.Get("Accept-Ranges")
-	if h.vodBoundary == nil {
+	if h.vodBoundary == nil && shareMediaFrom(r.Context()) == nil {
 		if total := parseContentRangeTotal(contentRange); total > 0 {
 			h.rangeCache.setTotal(cleanPath, total)
 		} else if resp.Status == http.StatusOK && resp.ContentLength > 0 {
@@ -2270,7 +2282,7 @@ func (h *VideoHandler) providerOrCachedDuration(ctx context.Context, cleanPath s
 			}
 		}
 	}
-	if h.vodBoundary == nil {
+	if h.vodBoundary == nil && shareMediaFrom(ctx) == nil {
 		if cached := h.getCachedMetadata(cleanPath); cached != nil && cached.DurationSeconds > 0 {
 			return cached.DurationSeconds
 		}
@@ -2279,6 +2291,9 @@ func (h *VideoHandler) providerOrCachedDuration(ctx context.Context, cleanPath s
 }
 
 func (h *VideoHandler) runFFProbeFromProvider(ctx context.Context, cleanPath string) (*ffprobeOutput, error) {
+	if shareMediaFrom(ctx) != nil {
+		return h.runShareMetadataProbe(ctx, cleanPath)
+	}
 	if err := h.vodRawCheck(ctx); err != nil {
 		return nil, err
 	}
@@ -2526,7 +2541,7 @@ func parseFFProbeStreamPID(value string) (int, bool) {
 func (h *VideoHandler) enrichBluRayStreamLanguages(ctx context.Context, sourcePath string, meta *ffprobeOutput) {
 	// A companion file has no captured raw input in this packet. Missing
 	// languages remain unknown instead of opening an unbound CLPI file.
-	if h.vodBoundary != nil {
+	if h.vodBoundary != nil || shareMediaFrom(ctx) != nil {
 		return
 	}
 	if meta == nil || h.streamer == nil {
@@ -2654,6 +2669,17 @@ func (h *VideoHandler) ProbeVideo(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if shareMediaFrom(r.Context()) != nil {
+		meta, err := h.runShareMetadataProbe(r.Context(), cleanPath)
+		if err != nil {
+			shareMediaError(w, datastore.ErrSharePlaybackUnavailable)
+			return
+		}
+		response := composeMetadataResponse(meta, models.SessionScopeResourcePlaceholder, determineAudioPlanWithLanguage(meta, false, r.URL.Query().Get("audioLang")))
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(response)
+		return
+	}
 	videoTracef("[video] ProbeVideo: after cleaning, path=%q", cleanPath)
 
 	sanitizedPath := cleanPath
@@ -2661,7 +2687,7 @@ func (h *VideoHandler) ProbeVideo(w http.ResponseWriter, r *http.Request) {
 		sanitizedPath = filePath
 	}
 
-	if h.vodBoundary == nil {
+	if h.vodBoundary == nil && shareMediaFrom(r.Context()) == nil {
 		// Check cache first to avoid repeated ffprobe calls during playback
 		if cachedResp := h.getCachedMetadata(cleanPath); cachedResp != nil {
 			videoTracef("[video] ProbeVideo: using cached metadata for path=%q", cleanPath)
@@ -3616,6 +3642,17 @@ func (h *VideoHandler) runFFProbeWithHeaders(ctx context.Context, inputSpecifier
 		args = append(args, "-i", inputSpecifier)
 	}
 
+	if shareMediaFrom(ctx) != nil {
+		if reader == nil || inputSpecifier != "pipe:0" {
+			return nil, datastore.ErrSharePlaybackForbidden
+		}
+		for i := 0; i+1 < len(args); i++ {
+			if args[i] == "-protocol_whitelist" {
+				args[i+1] = "pipe"
+			}
+		}
+		args = append([]string{"-format_whitelist", "matroska,webm,mov,mpegts,mpeg,mpegvideo,avi,flv,ogg,wav,aac,ac3,eac3,mp3,flac"}, args...)
+	}
 	cmd := exec.CommandContext(probeCtx, h.ffprobePath, args...)
 	if reader != nil {
 		cmd.Stdin = reader
@@ -4309,7 +4346,7 @@ func isConnectionError(err error) bool {
 
 // StartHLSSession creates a new HLS transcoding session for Dolby Vision content
 func (h *VideoHandler) StartHLSSession(w http.ResponseWriter, r *http.Request) {
-	if h.configuredHLSInput() {
+	if h.configuredHLSInput() && shareMediaFrom(r.Context()) == nil {
 		path := resolveScopedPlaybackPath(r, r.URL.Query().Get("path"))
 		if strings.HasPrefix(path, "/webdav/") {
 			path = strings.TrimPrefix(path, "/webdav")
@@ -4480,7 +4517,7 @@ func (h *VideoHandler) StartHLSSession(w http.ResponseWriter, r *http.Request) {
 	// reaching canplay (MSE stuck). Match the working seek path for web warm starts.
 	transcodingOffset := startSeconds
 	if startSeconds > 0 {
-		if isWebBrowserPlaybackTarget(playbackTarget) {
+		if shareMediaFrom(r.Context()) != nil || isWebBrowserPlaybackTarget(playbackTarget) {
 			videoTracef("[video] web warm start: skipping keyframe probe (match seek path) start=%.3fs", startSeconds)
 		} else {
 			keyframePos := h.hlsManager.probeKeyframePosition(r.Context(), cleanPath, startSeconds)
@@ -4579,6 +4616,10 @@ type youtubeCaptionTrack struct {
 
 // StartYouTubeHLSSession creates an HLS session from high-quality separate YouTube video/audio streams.
 func (h *VideoHandler) StartYouTubeHLSSession(w http.ResponseWriter, r *http.Request) {
+	if shareMediaFrom(r.Context()) != nil {
+		apierror.Write(w, http.StatusNotImplemented, "share_source_unsupported", "Shared playback is unavailable for this source.")
+		return
+	}
 	if h.configuredHLSInput() {
 		vodDeny(w, kidsvod.CodeUnsupportedSource)
 		return
@@ -5337,6 +5378,10 @@ func resolveStremioLiveStreamResource(ctx context.Context, streamResourceURL, pr
 
 // StartLiveHLSSession creates a new HLS session for live TV streams
 func (h *VideoHandler) StartLiveHLSSession(w http.ResponseWriter, r *http.Request) {
+	if shareMediaFrom(r.Context()) != nil {
+		apierror.Write(w, http.StatusNotImplemented, "share_source_unsupported", "Shared playback is unavailable for this source.")
+		return
+	}
 	if h.configuredHLSInput() {
 		vodDeny(w, kidsvod.CodeUnsupportedSource)
 		return
@@ -5940,6 +5985,15 @@ func (h *VideoHandler) StopHLSSession(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if ref := shareHLSRef(r); ref != nil {
+		if ref.owner.id != sessionID || ref.owner.manager != h.hlsManager || !h.hlsManager.cleanupShareHLSInstance(ref.owner) {
+			vodDeny(w, kidsvod.CodeContextChanged)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]bool{"stopped": true})
+		return
+	}
 	if h.vodBoundary != nil {
 		scope := hlsScope(r)
 		if scope == nil || scope.check(r.Context()) != nil || !h.hlsManager.cleanupHLSSessionSnapshot(scope.snapshot) {
@@ -6787,7 +6841,7 @@ func (h *VideoHandler) proxyExternalURL(w http.ResponseWriter, r *http.Request, 
 	videoTracef("[video] external proxy: final URL host=%s", parsedURL.Host)
 	allowRestricted := h.configuredExternalHostPolicy()
 	requestStartedAt := time.Now()
-	startupExperiment := h.vodBoundary == nil && strings.TrimSpace(r.URL.Query().Get("_startupExperiment")) == "1"
+	startupExperiment := h.vodBoundary == nil && shareMediaFrom(r.Context()) == nil && strings.TrimSpace(r.URL.Query().Get("_startupExperiment")) == "1"
 	requestID := atomic.AddUint64(&h.externalProxyRequestSeq, 1)
 	if err := requestsecurity.ValidateOutboundURL(r.Context(), cleanURL, allowRestricted); err != nil {
 		http.Error(w, "external URL is not allowed", http.StatusBadRequest)
@@ -6844,7 +6898,7 @@ func (h *VideoHandler) proxyExternalURL(w http.ResponseWriter, r *http.Request, 
 	}
 	// Snapshot for startup diagnostics only; live opens re-check the cache.
 	usedRedirectCache := false
-	if h.vodBoundary == nil {
+	if h.vodBoundary == nil && shareMediaFrom(r.Context()) == nil {
 		_, usedRedirectCache = h.cachedExternalRedirectURL(cleanURL)
 	}
 
@@ -6937,7 +6991,7 @@ func (h *VideoHandler) proxyExternalURL(w http.ResponseWriter, r *http.Request, 
 	// redirect once when needed. Caller owns the response body.
 	doExternalProxyOpen := func(rangeValue string) (*http.Response, error) {
 		target, fromCache := cleanURL, false
-		if h.vodBoundary == nil {
+		if h.vodBoundary == nil && shareMediaFrom(r.Context()) == nil {
 			target, fromCache = h.cachedExternalRedirectURL(cleanURL)
 		}
 		if err := requestsecurity.ValidateOutboundURL(ctx, target, allowRestricted); err != nil {
@@ -7424,7 +7478,7 @@ func (h *VideoHandler) proxyExternalURL(w http.ResponseWriter, r *http.Request, 
 				}
 				return true, fmt.Errorf("%w: %s", errExternalStreamPlaceholder, requestsecurity.URLForLog(finalReconnectURL))
 			}
-			if h.vodBoundary == nil && finalReconnectURL != "" && finalReconnectURL != cleanURL {
+			if h.vodBoundary == nil && shareMediaFrom(r.Context()) == nil && finalReconnectURL != "" && finalReconnectURL != cleanURL {
 				h.rememberExternalRedirect(cleanURL, finalReconnectURL)
 			}
 			// Prefer Content-Range start; if missing, assume the server honoured Range.
@@ -7546,6 +7600,9 @@ func (h *VideoHandler) GetDirectURL(w http.ResponseWriter, r *http.Request) {
 	}
 
 	path := strings.TrimSpace(r.URL.Query().Get("path"))
+	if shareMediaFrom(r.Context()) != nil {
+		path = resolveScopedPlaybackPath(r, path)
+	}
 	if path == "" {
 		http.Error(w, "missing path parameter", http.StatusBadRequest)
 		return
@@ -7561,6 +7618,40 @@ func (h *VideoHandler) GetDirectURL(w http.ResponseWriter, r *http.Request) {
 	// A direct URL starts a playback the backend never proxies, so it must
 	// respect the same concurrent stream limits as proxied playback.
 	if !h.enforceVODStreamLimits(w, r, path) {
+		return
+	}
+
+	if g := shareMediaFrom(r.Context()); g != nil {
+		if g.handler != h || g.current(r.Context()) != nil {
+			shareMediaError(w, datastore.ErrSharePlaybackChanged)
+			return
+		}
+		session, ok := auth.GetSession(r)
+		if !ok || session.Scope != models.SessionScopeStream || session.IsMaster {
+			shareMediaError(w, datastore.ErrSharePlaybackChanged)
+			return
+		}
+		base := ""
+		if h.configManager != nil {
+			settings, err := h.configManager.Load()
+			if err != nil {
+				shareMediaError(w, datastore.ErrSharePlaybackUnavailable)
+				return
+			}
+			prefix := strings.Trim(settings.Server.BasePath, "/")
+			if prefix != "" {
+				base = "/" + prefix
+			}
+		}
+		query := url.Values{"path": []string{models.SessionScopeResourcePlaceholder}, "profileId": []string{g.owner.ProfileID()}, "token": []string{session.Token}}
+		if g.current(r.Context()) != nil {
+			shareMediaError(w, datastore.ErrSharePlaybackChanged)
+			return
+		}
+		w.Header().Set("Cache-Control", "private, no-store")
+		w.Header().Set("Referrer-Policy", "no-referrer")
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]string{"url": base + "/api/video/stream?" + query.Encode()})
 		return
 	}
 
@@ -7706,6 +7797,9 @@ var cropdetectRegex = regexp.MustCompile(`crop=(\d+):(\d+):(\d+):(\d+)`)
 
 // CropDetect runs ffmpeg cropdetect on a video to detect letterbox bars.
 func (h *VideoHandler) CropDetect(w http.ResponseWriter, r *http.Request) {
+	if rejectShareAncillary(w, r) {
+		return
+	}
 	if r.Method == http.MethodOptions {
 		h.writeCommonHeaders(w)
 		w.Header().Set("Access-Control-Allow-Methods", "GET, OPTIONS")

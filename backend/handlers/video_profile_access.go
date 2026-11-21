@@ -10,7 +10,12 @@ import (
 )
 
 func (h *VideoHandler) requireHLSSessionAccess(w http.ResponseWriter, r *http.Request, sessionID string) bool {
-	if h.vodBoundary != nil {
+	if ref := shareHLSRef(r); ref != nil {
+		if ref.owner.id != sessionID || ref.owner.manager != h.hlsManager || ref.check(r.Context()) != nil {
+			vodDeny(w, kidsvod.CodeContextChanged)
+			return false
+		}
+	} else if h.vodBoundary != nil {
 		scope := hlsScope(r)
 		if scope == nil || scope.handler != h || scope.snapshot.id != sessionID || scope.check(r.Context()) != nil {
 			vodDeny(w, kidsvod.CodeContextChanged)

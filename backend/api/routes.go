@@ -282,6 +282,9 @@ func Register(
 		protected.Use(shareHandler.BoundedCreateEntry)
 	}
 	protected.Use(AccountAuthMiddleware(sessionsSvc, accountsSvc, options.pgPins))
+	if videoHandler != nil {
+		protected.Use(videoHandler.ManagedSharePlaybackEntry)
+	}
 	if options.pgPins != nil {
 		protected.Use(profileaccess.CurrentMiddleware(options.pgPins.Owns))
 		protected.Use(profileaccess.CurrentKidsLiveTV(options.pgPins.IsKids))

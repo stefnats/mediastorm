@@ -13,6 +13,7 @@ import (
 
 	"novastream/internal/apierror"
 	"novastream/internal/auth"
+	"novastream/internal/datastore"
 	"novastream/models"
 )
 
@@ -77,11 +78,27 @@ func Middleware(owns func(profileID, accountID string) bool) mux.MiddlewareFunc 
 	}
 }
 
+type sharePlaybackOwnerKey struct{}
+
+// WithSharePlaybackOwner attaches only the concrete original scoped owner.
+// CheckResource still reads that owner's actual current SQL; no DATA callback
+// or profile/resource string can replace its private authenticated binding.
+func WithSharePlaybackOwner(r *http.Request, owner *datastore.SharePlaybackOwner) *http.Request {
+	return r.WithContext(context.WithValue(r.Context(), sharePlaybackOwnerKey{}, owner))
+}
+
 // CheckResource checks the stored profile of an existing playback resource, so
 // omitting or substituting a query selector cannot grant access to its session.
 // Internal integrations without this entrypoint middleware retain their own
 // authorization layer. Share sessions remain restricted to their bound source.
 func CheckResource(w http.ResponseWriter, r *http.Request, profileID, resource string) bool {
+	if owner, installed := r.Context().Value(sharePlaybackOwnerKey{}).(*datastore.SharePlaybackOwner); installed {
+		if owner == nil || owner.CheckRequest(r, profileID, resource) != nil || profileID == "" || resource == "" {
+			apierror.Write(w, http.StatusNotFound, "resource_not_found", "resource not found")
+			return false
+		}
+	}
+
 	check, installed := r.Context().Value(ownershipKey{}).(ownerCheck)
 	current, currentInstalled := r.Context().Value(currentOwnershipKey{}).(currentOwnerCheck)
 	if !installed && !currentInstalled {

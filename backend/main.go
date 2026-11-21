@@ -1258,6 +1258,10 @@ func main() {
 		currentProfilePins = profileunlock.NewPGProfilePins(store, sessionsService)
 	}
 
+	if shareErr := configureManagedSharePlayback(managedStartup, store, currentProfilePins, videoHandler, shareHandler); shareErr != nil {
+		log.Printf("[share] managed playback unavailable: %v", shareErr)
+	}
+
 	profileSecurityPolicy := api.CachedSecuritySettings(cfgManager, 3*time.Second)
 	profileRecoveryHandler := handlers.NewProfileRecoveryHandler(profile_recovery.NewService(store, userService, userSettingsService, currentProfilePins), profileSecurityPolicy)
 
@@ -3123,4 +3127,29 @@ func registerParentProfileCreationCookieRoutes(r *mux.Router, admin *handlers.Ad
 			shared.ReadProfileCreationManagement(w, r, settings)
 		}))).Methods(http.MethodPost)
 	}
+}
+
+// This concrete composition is shared by the actual Main path and installation
+// tests. A configured PG store always selects managed mode, including failure.
+func configureManagedSharePlayback(startup *settingsbootstrap.Startup, store *datastore.DataStore, pins *profileunlock.PGProfilePins, video *handlers.VideoHandler, share *handlers.ShareHandler) error {
+	if store == nil {
+		return nil
+	}
+	var runtime *datastore.ShareLinkRedeemer
+	var err error
+	if startup == nil || pins == nil || video == nil || share == nil {
+		err = datastore.ErrSharePlaybackUnavailable
+	} else {
+		runtime, err = startup.NewShareLinkRedeemer(store)
+	}
+	if share != nil {
+		share.SetManagedShareRedemption(runtime)
+	}
+	if pins != nil {
+		err = errors.Join(err, pins.SetManagedSharePlayback(runtime))
+	}
+	if video != nil {
+		err = errors.Join(err, video.SetManagedSharePlayback(runtime, pins))
+	}
+	return err
 }

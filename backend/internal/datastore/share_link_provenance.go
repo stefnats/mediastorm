@@ -195,10 +195,16 @@ func (c *ShareLinkCreator) Create(r *http.Request, profile string, params map[st
 	if e != nil || current.session != original || !sameParentMutationRow(current.sessionRow, frame.sessionRow) || !sameParentMutationRow(current.actorRow, frame.actorRow) {
 		return nil, ErrShareProvenanceChanged
 	}
-	var currentOwner, profileRow, ownerRow string
+	var currentOwner, profileRow, ownerRow, profileIncarnation, ownerIncarnation string
 	var allowed bool
-	e = g.tx.QueryRow(queryContext, `SELECT u.account_id,u.allow_share_links,concat(u.tableoid::oid,':',u.xmin::text,':',u.ctid::text),concat(a.tableoid::oid,':',a.xmin::text,':',a.ctid::text) FROM users u JOIN accounts a ON a.id=u.account_id WHERE u.id=$1 FOR UPDATE OF u`, profile).Scan(&currentOwner, &allowed, &profileRow, &ownerRow)
+	e = g.tx.QueryRow(queryContext, `SELECT u.account_id,u.allow_share_links,concat(u.tableoid::oid,':',u.xmin::text,':',u.ctid::text),concat(a.tableoid::oid,':',a.xmin::text,':',a.ctid::text),u.share_incarnation::text,a.share_incarnation::text FROM users u JOIN accounts a ON a.id=u.account_id WHERE u.id=$1 FOR UPDATE OF u`, profile).Scan(&currentOwner, &allowed, &profileRow, &ownerRow, &profileIncarnation, &ownerIncarnation)
 	if e != nil || currentOwner != owner || profileRow != initialProfileRow || ownerRow != initialOwnerRow {
+		return nil, ErrShareProvenanceChanged
+	}
+	var creatorIdentity struct {
+		Incarnation string `json:"share_incarnation"`
+	}
+	if json.Unmarshal(current.actorRow.raw, &creatorIdentity) != nil || !shareCanonicalUUID(creatorIdentity.Incarnation) || !shareCanonicalUUID(ownerIncarnation) || !shareCanonicalUUID(profileIncarnation) {
 		return nil, ErrShareProvenanceChanged
 	}
 	if !allowed || !original.IsMaster && owner != original.AccountID {
@@ -235,7 +241,7 @@ func (c *ShareLinkCreator) Create(r *http.Request, profile string, params map[st
 	if _, e = finalFence.EnforceProfilePins(); e != nil {
 		return nil, ErrShareProvenanceChanged
 	}
-	tag, e := g.tx.Exec(queryContext, `INSERT INTO share_links (`+shareCols+`,provenance_version,source_profile_id,source_account_id) SELECT $1,$2,$3,$4,$5,$6,0,true,$7,$8,NULL,1,$9,$10 WHERE clock_timestamp()<$11`, link.Token, link.AccountID, link.IsMaster, link.Label, paramsJSON, link.MaxUses, link.CreatedAt, link.ExpiresAt, profile, owner, deadline)
+	tag, e := g.tx.Exec(queryContext, `INSERT INTO share_links (`+shareCols+`,provenance_version,source_profile_id,source_account_id,delegation_version,creator_incarnation,source_owner_incarnation,source_profile_incarnation) SELECT $1,$2,$3,$4,$5,$6,0,true,$7,$8,NULL,1,$9,$10,1,$12::uuid,$13::uuid,$14::uuid WHERE clock_timestamp()<$11`, link.Token, link.AccountID, link.IsMaster, link.Label, paramsJSON, link.MaxUses, link.CreatedAt, link.ExpiresAt, profile, owner, deadline, creatorIdentity.Incarnation, ownerIncarnation, profileIncarnation)
 	if e != nil || tag.RowsAffected() != 1 {
 		return nil, ErrShareProvenanceUnavailable
 	}

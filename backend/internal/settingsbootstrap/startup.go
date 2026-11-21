@@ -29,6 +29,7 @@ type Startup struct {
 	finishing                 bool
 	operations                sync.WaitGroup
 	recordingProgress         recordingProgressCleanup
+	sharePlayback             *datastore.ShareLinkRedeemer
 	recordingProgressBuilding *recordingProgressBuildState
 	recordingProgressReady    chan struct{}
 	recordingProgressClosing  bool
@@ -234,6 +235,7 @@ func (s *Startup) Close() error {
 		}
 		_ = s.Finish()
 		s.closeRecordingProgress()
+		s.closeSharePlayback()
 		if s.security != nil {
 			_ = s.security.Close()
 		}

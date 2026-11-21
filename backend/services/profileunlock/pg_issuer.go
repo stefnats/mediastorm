@@ -12,6 +12,7 @@ import (
 	"sync"
 	"time"
 
+	"novastream/internal/auth"
 	"novastream/internal/datastore"
 	"novastream/models"
 	"novastream/services/sessions"
@@ -109,6 +110,8 @@ type PGProfilePins struct {
 	parentModeMu    *sync.Mutex
 	parentModes     map[string]*parentModeEntry
 	parentModeBytes int
+	managedShare    bool
+	sharePlayback   *datastore.ShareLinkRedeemer
 }
 
 func NewPGProfilePins(store *datastore.DataStore, scoped ...*sessions.Service) *PGProfilePins {
@@ -138,10 +141,21 @@ func (v *PGProfilePins) Authenticate(r *http.Request, token, clientID string) (*
 	if v.scopeSessions != nil {
 		resolver = v.scopeSessions.ResolveProfilePinStreamResource
 	}
+	beforeScope, _ := auth.GetSession(checked)
 	checked, err = v.store.ResolveProfilePinStreamRequest(checked, resolver)
 	if err != nil {
 		release()
 		return nil, nil, err
+	}
+	if beforeScope.Scope == models.SessionScopeStream && strings.HasPrefix(beforeScope.ScopeResource, "watch-party-playback:v1:") {
+		// Only the actual successful existing private party resolver reaches here.
+		checked = checked.WithContext(context.WithValue(checked.Context(), resolvedSharePartyKey{}, v))
+	}
+	if session, ok := auth.GetSession(checked); ok && session.Scope == models.SessionScopeStream {
+		if err = v.validateManagedShare(checked); err != nil {
+			release()
+			return nil, nil, err
+		}
 	}
 	return checked, release, nil
 }

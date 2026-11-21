@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"sync"
 
+	"novastream/internal/datastore"
 	"novastream/services/streaming"
 )
 
@@ -24,6 +25,15 @@ type vodRawBody struct {
 }
 
 func (h *VideoHandler) wrapVODRawBody(ctx context.Context, body io.ReadCloser) (io.ReadCloser, error) {
+	if g := shareMediaFrom(ctx); g != nil {
+		if g.handler != h {
+			if body != nil {
+				_ = body.Close()
+			}
+			return nil, datastore.ErrSharePlaybackChanged
+		}
+		return g.wrapBody(ctx, body)
+	}
 	if body == nil || h.vodBoundary == nil {
 		return body, nil
 	}
@@ -78,16 +88,48 @@ func (r *vodRawBody) Close() error {
 }
 
 func (h *VideoHandler) vodOpenStream(ctx context.Context, req streaming.Request) (*streaming.Response, error) {
+	if g := shareMediaFrom(ctx); g != nil && normalizeShareResource(req.Path) != g.owner.Resource() {
+		return nil, datastore.ErrSharePlaybackChanged
+	}
 	if err := h.vodRawCheck(ctx); err != nil {
 		return nil, err
 	}
-	if h.vodBoundary != nil {
+	if h.vodBoundary != nil && shareMediaFrom(ctx) == nil {
 		raw, _ := ctx.Value(vodRawOwnerKey{}).(*vodRawOwner)
 		if raw == nil || req.Path != raw.source {
 			return nil, errVODOwner
 		}
 	}
+	if g := shareMediaFrom(ctx); g != nil {
+		if err := g.ensureLease(); err != nil {
+			return nil, err
+		}
+	}
 	resp, err := h.streamer.Stream(ctx, req)
+	if g := shareMediaFrom(ctx); g != nil {
+		// Track/join the real returned body before checking a late open failure or
+		// current source retirement. Error+response cannot escape genuine F2 cleanup.
+		if resp != nil && resp.Body != nil {
+			var wrapErr error
+			resp.Body, wrapErr = g.wrapProviderBody(ctx, resp.Body, h.streamer, req.Method, resp.Status)
+			if wrapErr != nil {
+				return nil, wrapErr
+			}
+		}
+		if err != nil {
+			if resp != nil {
+				_ = resp.Close()
+			}
+			return nil, err
+		}
+		if check := h.vodRawCheck(ctx); check != nil {
+			if resp != nil {
+				_ = resp.Close()
+			}
+			return nil, check
+		}
+		return resp, nil
+	}
 	if err != nil {
 		if h.vodBoundary != nil && resp != nil {
 			resp.Close()
@@ -110,10 +152,13 @@ func (h *VideoHandler) vodOpenStream(ctx context.Context, req streaming.Request)
 	return resp, nil
 }
 func (h *VideoHandler) vodDirectURL(ctx context.Context, path string) (string, error) {
+	if g := shareMediaFrom(ctx); g != nil && normalizeShareResource(path) != g.owner.Resource() {
+		return "", datastore.ErrSharePlaybackChanged
+	}
 	if err := h.vodRawCheck(ctx); err != nil {
 		return "", err
 	}
-	if h.vodBoundary != nil {
+	if h.vodBoundary != nil && shareMediaFrom(ctx) == nil {
 		raw, _ := ctx.Value(vodRawOwnerKey{}).(*vodRawOwner)
 		if raw == nil || path != raw.source {
 			return "", errVODOwner
@@ -132,8 +177,13 @@ func (h *VideoHandler) vodHTTPDo(client *http.Client, req *http.Request) (*http.
 	if err := h.vodRawCheck(req.Context()); err != nil {
 		return nil, err
 	}
+	if g := shareMediaFrom(req.Context()); g != nil {
+		if err := g.ensureLease(); err != nil {
+			return nil, err
+		}
+	}
 	selected := client
-	if h.vodBoundary != nil {
+	if h.vodBoundary != nil || shareMediaFrom(req.Context()) != nil {
 		copy := *client
 		before := client.CheckRedirect
 		copy.CheckRedirect = func(next *http.Request, via []*http.Request) error {
@@ -157,7 +207,7 @@ func (h *VideoHandler) vodHTTPDo(client *http.Client, req *http.Request) (*http.
 	if err != nil {
 		// Client.Do returns response+error only for a rejected redirect;
 		// net/http has already closed that body. Withhold it without a second Close.
-		if h.vodBoundary != nil {
+		if h.vodBoundary != nil || shareMediaFrom(req.Context()) != nil {
 			return nil, err
 		}
 		return resp, err

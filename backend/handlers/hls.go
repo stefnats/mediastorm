@@ -288,6 +288,9 @@ func newThrottledReader(r io.Reader, session *HLSSession) *throttledReader {
 }
 
 func (t *throttledReader) Read(p []byte) (n int, err error) {
+	if t.session.shareOwned != nil && t.session.shareOwned.guard.current(t.session.shareOwned.guard.ctx) != nil {
+		return 0, errVODOwner
+	}
 	// Check how far ahead ffmpeg is compared to player requests
 	t.session.mu.RLock()
 	maxRequested := t.session.MaxSegmentRequested
@@ -341,7 +344,20 @@ func (t *throttledReader) Read(p []byte) (n int, err error) {
 				delayMs = 15000
 			}
 
-			time.Sleep(time.Duration(delayMs) * time.Millisecond)
+			if t.session.shareOwned != nil {
+				t.session.shareOwned.mu.Lock()
+				current := t.session.shareOwned.run
+				t.session.shareOwned.mu.Unlock()
+				timer := time.NewTimer(time.Duration(delayMs) * time.Millisecond)
+				select {
+				case <-current.Done():
+					timer.Stop()
+					return 0, current.Err()
+				case <-timer.C:
+				}
+			} else {
+				time.Sleep(time.Duration(delayMs) * time.Millisecond)
+			}
 			t.throttleCount++
 
 			// Log throttling periodically (every 10 seconds)
@@ -358,6 +374,7 @@ func (t *throttledReader) Read(p []byte) (n int, err error) {
 
 // HLSSession represents an active HLS transcoding session
 type HLSSession struct {
+	shareOwned   *shareHLSOwned
 	vodInput     *vodHLSInput
 	vodIdentity  *hlsSessionIdentity
 	vodDirectory *hlsDirectoryClaim
@@ -1960,7 +1977,7 @@ func (m *HLSManager) buildLocalWebDAVURLFromPath(path string) (string, bool) {
 
 // CreateSession starts a new HLS transcoding session
 func (m *HLSManager) CreateSession(ctx context.Context, path string, originalPath string, hasDV bool, dvProfile string, hasHDR bool, forceAAC bool, startOffset float64, transcodingOffset float64, audioTrackIndex int, subtitleTrackIndex int, profileID string, profileName string, clientIP string, castMode bool, prequeueType string, playbackTarget string, durationHint float64, castReceiverHost string) (*HLSSession, error) {
-	if m.hlsInputConfigured() {
+	if m.hlsInputConfigured() && shareMediaFrom(ctx) == nil {
 		return nil, errVODOwner
 	}
 
@@ -1978,7 +1995,25 @@ func (m *HLSManager) CreateSession(ctx context.Context, path string, originalPat
 
 	// Use background context so transcoding continues after HTTP response
 	// The original ctx is only used for the initial setup
-	bgCtx, cancel := context.WithCancel(context.Background())
+	bgCtx, cancel, owned, prepareErr := m.prepareSharedHLS(ctx, path, originalPath, profileID)
+	if prepareErr != nil {
+		return nil, prepareErr
+	}
+	prepared := false
+	if owned != nil {
+		owned.output = outputDir
+		ctx = bgCtx
+		defer func() { owned.finishSetup(prepared) }()
+	}
+	metadataProbe := m.probeAllMetadata
+	if owned != nil {
+		if m.ffprobePath == "" {
+			return nil, errors.New("shared HLS probe unavailable")
+		}
+		metadataProbe = func(current context.Context, _ string) (*UnifiedProbeResult, error) {
+			return m.probeSharedHLS(current, owned)
+		}
+	}
 
 	// Check if the path is an external URL (e.g., from AIOStreams pre-resolved streams)
 	isExternalURL := strings.HasPrefix(path, "http://") || strings.HasPrefix(path, "https://")
@@ -1986,7 +2021,7 @@ func (m *HLSManager) CreateSession(ctx context.Context, path string, originalPat
 	// For external URLs (like Comet/AIOstreams), resolve redirects upfront to get the actual
 	// debrid CDN URL. This is critical because Comet URLs are API endpoints that redirect,
 	// and repeatedly following redirects during probing causes timeouts.
-	if isExternalURL {
+	if isExternalURL && owned == nil {
 		resolvedURL, err := m.resolveExternalURL(ctx, path)
 		if err != nil {
 			if errors.Is(err, errExternalStreamPlaceholder) {
@@ -2006,7 +2041,7 @@ func (m *HLSManager) CreateSession(ctx context.Context, path string, originalPat
 	// This replaces 4 separate ffprobe invocations with 1, significantly reducing playback start time
 	var duration float64
 	metadataDuration := durationHint
-	if durationProvider, ok := m.streamer.(streaming.DurationProvider); ok {
+	if durationProvider, ok := m.streamer.(streaming.DurationProvider); ok && owned == nil {
 		if providerDuration, durationErr := durationProvider.GetDuration(ctx, path); durationErr == nil && providerDuration > 0 {
 			metadataDuration = providerDuration
 		}
@@ -2014,7 +2049,7 @@ func (m *HLSManager) CreateSession(ctx context.Context, path string, originalPat
 	var probeData *UnifiedProbeResult
 	if m.ffprobePath != "" && (m.streamer != nil || isExternalURL) {
 		log.Printf("[hls] running unified probe for session %s path=%q", sessionID, path)
-		if pd, probeErr := m.probeAllMetadata(ctx, path); probeErr != nil && errors.Is(probeErr, streaming.ErrStaleTorrent) {
+		if pd, probeErr := metadataProbe(ctx, path); probeErr != nil && errors.Is(probeErr, streaming.ErrStaleTorrent) {
 			cancel()
 			os.RemoveAll(outputDir)
 			return nil, probeErr
@@ -2036,6 +2071,9 @@ func (m *HLSManager) CreateSession(ctx context.Context, path string, originalPat
 				hasHDR = true // DV Profile 8 has HDR10 fallback, enable HDR mode
 			}
 		} else if probeErr != nil {
+			if owned != nil {
+				return nil, probeErr
+			}
 			log.Printf("[hls] failed unified probe for session %s: %v", sessionID, probeErr)
 		}
 	}
@@ -2059,6 +2097,11 @@ func (m *HLSManager) CreateSession(ctx context.Context, path string, originalPat
 	}
 
 	normalizedPlaybackTarget := strings.ToLower(strings.TrimSpace(playbackTarget))
+	// Shared pipe inputs do not claim a remotely seekable keyframe index.
+	if owned != nil && normalizedPlaybackTarget == "web-stable" {
+		normalizedPlaybackTarget = "web"
+		castMode = false
+	}
 
 	// "web-stable" asks for a browser playlist covering the whole title, where
 	// any point can be seeked to directly. Browser-compatible H.264 with a
@@ -2196,6 +2239,11 @@ func (m *HLSManager) CreateSession(ctx context.Context, path string, originalPat
 		GrowingSource:           growingSource,
 		SourceGrowing:           growingSource,
 	}
+	if owned != nil {
+		session.shareOwned = owned
+		session.RequestedSource = owned.resource
+		owned.attach(session)
+	}
 	if session.StableCopy {
 		// The playlist always covers the whole title; a requested start just
 		// begins FFmpeg at the segment containing it.
@@ -2216,15 +2264,19 @@ func (m *HLSManager) CreateSession(ctx context.Context, path string, originalPat
 		return nil, errVODOwner
 	}
 
+	if owned != nil {
+		owned.watch()
+	}
 	// Start FFmpeg transcoding in background with background context
-	go func() {
+	shareHLSGo(session, func() {
 		if err := m.startTranscoding(bgCtx, session, forceAAC); err != nil {
 			log.Printf("[hls] session %s transcoding failed: %v", sessionID, err)
 			session.mu.Lock()
 			session.Completed = true
 			session.mu.Unlock()
 		}
-	}()
+
+	})
 
 	log.Printf("[hls] created session %s for path %q (DV=%v, duration=%.2fs, startOffset=%.2fs)", sessionID, path, hasDV, duration, startOffset)
 
@@ -2248,6 +2300,10 @@ func (m *HLSManager) CreateSession(ctx context.Context, path string, originalPat
 	// Note: FFmpeg always numbers segments from 0 for the remaining timeline after -ss.
 	// session.StartOffset is the absolute timeline position for UI/progress only; the
 	// player must keep media currentTime near 0 (hlsPlaybackOffset holds the absolute base).
+	if owned != nil && owned.check(bgCtx, false) != nil {
+		return nil, errVODOwner
+	}
+	prepared = true
 	return session, nil
 }
 
@@ -2264,6 +2320,14 @@ func (m *HLSManager) waitForPlaylistReady(session *HLSSession, maxWait time.Dura
 	pollInterval := 25 * time.Millisecond
 	waitStart := time.Now()
 	for {
+		if session.shareOwned != nil {
+			session.shareOwned.mu.Lock()
+			current := session.shareOwned.run
+			session.shareOwned.mu.Unlock()
+			if session.shareOwned.checkSource(current) != nil {
+				return false, 0
+			}
+		}
 		if data, err := os.ReadFile(playlistPath); err == nil && playlistHasMediaSegment(data) {
 			return true, len(data)
 		}
@@ -2287,6 +2351,10 @@ func resolvedSessionDuration(probedDuration, durationHint float64) float64 {
 
 // CreateYouTubeSession starts an HLS session from separate YouTube video/audio URLs.
 func (m *HLSManager) CreateYouTubeSession(ctx context.Context, videoURL, audioURL, originalURL, proxyURL, profileID, profileName, clientIP string) (*HLSSession, error) {
+	if shareMediaFrom(ctx) != nil {
+		return nil, errors.New("shared HLS requires a confined raw media source")
+	}
+
 	if m.hlsInputConfigured() {
 		return nil, errVODOwner
 	}
@@ -2633,6 +2701,10 @@ func youtubeTranscodingArgs(videoURL, audioURL, proxyURL, playlistPath, segmentP
 // CreateLiveSession creates an HLS session for live TV streams
 // Unlike VOD sessions, live sessions don't have a known duration and don't support seeking
 func (m *HLSManager) CreateLiveSession(ctx context.Context, liveURL, provider, bucketKey, profileID, profileName, clientIP, playbackTarget string, tuning LiveTuningSettings, liveCCExtractionEnabled bool) (*HLSSession, error) {
+	if shareMediaFrom(ctx) != nil {
+		return nil, errors.New("shared HLS requires a confined raw media source")
+	}
+
 	if m.hlsInputConfigured() {
 		return nil, errVODOwner
 	}
@@ -3666,10 +3738,13 @@ func (m *HLSManager) fixDVCodecTag(session *HLSSession) error {
 
 // startTranscoding begins FFmpeg HLS transcoding
 func (m *HLSManager) startTranscoding(ctx context.Context, session *HLSSession, forceAAC bool) error {
-	if m.hlsInputConfigured() {
+	if m.hlsInputConfigured() && session.shareOwned == nil {
 		return errVODOwner
 	}
 
+	if session.shareOwned != nil && session.shareOwned.checkSource(ctx) != nil {
+		return errVODOwner
+	}
 	startTime := time.Now()
 	session.disableUnsafeDirectCast(m.castCapabilities(session))
 	stableCastMode := session.usesStableCastTimeline()
@@ -3706,6 +3781,15 @@ func (m *HLSManager) startTranscoding(ctx context.Context, session *HLSSession, 
 	var subtitleStreams []subtitleStreamInfo
 	var hasTrueHD, hasCompatibleAudio bool
 
+	if session.shareOwned != nil && session.ProbeData == nil {
+		probe, err := m.probeSharedHLS(ctx, session.shareOwned)
+		if err != nil {
+			return err
+		}
+		session.mu.Lock()
+		session.ProbeData = probe
+		session.mu.Unlock()
+	}
 	if session.ProbeData != nil {
 		// Use cached unified probe results - no additional ffprobe calls needed
 		audioStreams = session.ProbeData.AudioStreams
@@ -3782,7 +3866,10 @@ func (m *HLSManager) startTranscoding(ctx context.Context, session *HLSSession, 
 	// For seeking to work with -c:v copy, we need a seekable input
 	// Check if we can get a direct HTTP URL instead of using a pipe
 	log.Printf("[hls] session %s: checking for direct URL support (transcodingOffset=%.3f)", session.ID, session.TranscodingOffset)
-	directURL, hasDirectURL := m.getDirectURL(ctx, session)
+	directURL, hasDirectURL := "", false
+	if session.shareOwned == nil {
+		directURL, hasDirectURL = m.getDirectURL(ctx, session)
+	}
 	if hasDirectURL {
 		videoTracef("[hls] session %s: got direct URL", session.ID)
 	} else {
@@ -3839,7 +3926,7 @@ func (m *HLSManager) startTranscoding(ctx context.Context, session *HLSSession, 
 
 		// Calculate byte offset from time offset for seeking support
 		var rangeHeader string
-		if session.TranscodingOffset > 0 && session.Duration > 0 {
+		if session.shareOwned == nil && session.TranscodingOffset > 0 && session.Duration > 0 {
 			// Get file size for byte offset calculation
 			headResp, err := m.streamer.Stream(ctx, streaming.Request{
 				Path:   session.Path,
@@ -3907,11 +3994,13 @@ func (m *HLSManager) startTranscoding(ctx context.Context, session *HLSSession, 
 			}
 		}
 
-		streamResp, err := m.streamer.Stream(ctx, streaming.Request{
-			Path:        session.Path,
-			Method:      http.MethodGet,
-			RangeHeader: rangeHeader,
-		})
+		var streamResp *streaming.Response
+		var err error
+		if session.shareOwned != nil {
+			streamResp, err = session.shareOwned.openInput(ctx, http.MethodGet, "")
+		} else {
+			streamResp, err = m.streamer.Stream(ctx, streaming.Request{Path: session.Path, Method: http.MethodGet, RangeHeader: rangeHeader})
+		}
 		if err != nil {
 			log.Printf("[hls] session %s: provider stream failed after %v: %v",
 				session.ID, time.Since(providerStartTime), err)
@@ -3938,6 +4027,9 @@ func (m *HLSManager) startTranscoding(ctx context.Context, session *HLSSession, 
 		"-analyzeduration", "500000", // 0.5s
 		// A/V sync flags: generate PTS if missing, discard corrupt packets
 		"-fflags", "+genpts+discardcorrupt",
+	}
+	if session.shareOwned != nil {
+		args = append(args, vodHLSPipeOptions...)
 	}
 	// NOTE: -strict unofficial is added AFTER -i as an output option (see below)
 	// Placing it before -i doesn't enable writing dvcC boxes to the output
@@ -4023,6 +4115,9 @@ func (m *HLSManager) startTranscoding(ctx context.Context, session *HLSSession, 
 		!stableCastMode &&
 		!stableCopyMode
 
+	if session.shareOwned != nil && session.TranscodingOffset > 0 {
+		useOutputSeeking = true
+	}
 	// For INPUT seeking, add -ss before -i.
 	// -noaccurate_seek is only for pure video-copy: first packet must be a keyframe.
 	// Whenever we decode (transcode, web mid-file PTS reset, same-pass subs, cast),
@@ -4714,6 +4809,9 @@ func (m *HLSManager) startTranscoding(ctx context.Context, session *HLSSession, 
 				"-avoid_negative_ts", "disabled",
 			)
 		}
+		if session.shareOwned != nil && session.TranscodingOffset > 0 {
+			args = append(args, "-ss", fmt.Sprintf("%.3f", session.TranscodingOffset))
+		}
 		args = append(args,
 			"-map", fmt.Sprintf("0:%d", webSubtitleAbsIndex),
 			"-c:s", "webvtt",
@@ -4727,6 +4825,7 @@ func (m *HLSManager) startTranscoding(ctx context.Context, session *HLSSession, 
 	log.Printf("[hls] session %s: starting FFmpeg with args: %v", session.ID, args)
 
 	cmd := exec.CommandContext(ctx, m.ffmpegPath, args...)
+	var sharedPipe *shareHLSPipe
 	if usingPipe {
 		pipeReader := io.Reader(resp.Body)
 
@@ -4755,7 +4854,16 @@ func (m *HLSManager) startTranscoding(ctx context.Context, session *HLSSession, 
 
 		// Wrap with debug reader to track bytes read and detect when source stream ends
 		debugPipe := newDebugReader(throttledPipe, session.ID)
-		cmd.Stdin = debugPipe
+		if session.shareOwned != nil {
+			var pipeErr error
+			sharedPipe, pipeErr = newShareHLSPipe(cmd, resp.Body, debugPipe)
+			if pipeErr != nil {
+				return pipeErr
+			}
+			defer sharedPipe.closeAndJoin()
+		} else {
+			cmd.Stdin = debugPipe
+		}
 		log.Printf("[hls] session %s: SOURCE_STREAM started (with throttling and debug reader)", session.ID)
 	}
 
@@ -4769,6 +4877,9 @@ func (m *HLSManager) startTranscoding(ctx context.Context, session *HLSSession, 
 	if err := cmd.Start(); err != nil {
 		log.Printf("[hls] session %s: FFmpeg start failed: %v", session.ID, err)
 		return fmt.Errorf("ffmpeg start: %w", err)
+	}
+	if sharedPipe != nil {
+		sharedPipe.start()
 	}
 
 	session.mu.Lock()
@@ -4792,7 +4903,7 @@ func (m *HLSManager) startTranscoding(ctx context.Context, session *HLSSession, 
 	inputErrorDetected := false
 
 	// Log FFmpeg errors with timing
-	go func() {
+	shareHLSGo(session, func() {
 		buf := make([]byte, 4096)
 		lastLog := time.Now()
 		dvErrorCount := 0
@@ -4939,10 +5050,11 @@ func (m *HLSManager) startTranscoding(ctx context.Context, session *HLSSession, 
 				break
 			}
 		}
-	}()
+
+	})
 
 	// Monitor for DV errors and kill FFmpeg if detected
-	go func() {
+	shareHLSGo(session, func() {
 		select {
 		case <-dvErrorCh:
 			dvErrorDetected = true
@@ -4956,10 +5068,11 @@ func (m *HLSManager) startTranscoding(ctx context.Context, session *HLSSession, 
 		case <-ctx.Done():
 			// Context cancelled, no action needed
 		}
-	}()
+
+	})
 
 	// Monitor for hevc_metadata errors and kill FFmpeg if detected
-	go func() {
+	shareHLSGo(session, func() {
 		select {
 		case <-hdrMetadataErrorCh:
 			hdrMetadataErrorDetected = true
@@ -4973,10 +5086,11 @@ func (m *HLSManager) startTranscoding(ctx context.Context, session *HLSSession, 
 		case <-ctx.Done():
 			// Context cancelled, no action needed
 		}
-	}()
+
+	})
 
 	// Monitor for input stream errors and kill FFmpeg for recovery
-	go func() {
+	shareHLSGo(session, func() {
 		select {
 		case <-inputErrorCh:
 			inputErrorDetected = true
@@ -4990,11 +5104,12 @@ func (m *HLSManager) startTranscoding(ctx context.Context, session *HLSSession, 
 		case <-ctx.Done():
 			// Context cancelled, no action needed
 		}
-	}()
+
+	})
 
 	// Start a goroutine to periodically log performance metrics
 	perfDone := make(chan struct{})
-	go func() {
+	shareHLSGo(session, func() {
 		ticker := time.NewTicker(10 * time.Second)
 		defer ticker.Stop()
 
@@ -5024,7 +5139,8 @@ func (m *HLSManager) startTranscoding(ctx context.Context, session *HLSSession, 
 				return
 			}
 		}
-	}()
+
+	})
 
 	// Start idle timeout monitoring goroutine
 	idleTimeout := hlsIdleTimeout
@@ -5032,7 +5148,7 @@ func (m *HLSManager) startTranscoding(ctx context.Context, session *HLSSession, 
 		idleTimeout = hlsGrowingIdleTimeout
 	}
 	idleDone := make(chan struct{})
-	go func() {
+	shareHLSGo(session, func() {
 		ticker := time.NewTicker(5 * time.Second) // Check every 5 seconds
 		defer ticker.Stop()
 
@@ -5129,11 +5245,12 @@ func (m *HLSManager) startTranscoding(ctx context.Context, session *HLSSession, 
 				return
 			}
 		}
-	}()
+
+	})
 
 	// Start rate limiting goroutine to pause FFmpeg when too far ahead of player
 	rateLimitDone := make(chan struct{})
-	go func() {
+	shareHLSGo(session, func() {
 		ticker := time.NewTicker(2 * time.Second) // Check every 2 seconds
 		defer ticker.Stop()
 		var lastSkipLog time.Time
@@ -5212,12 +5329,16 @@ func (m *HLSManager) startTranscoding(ctx context.Context, session *HLSSession, 
 				return
 			}
 		}
-	}()
+
+	})
 
 	// Wait for FFmpeg to complete
 	log.Printf("[hls] session %s: waiting for FFmpeg to complete", session.ID)
 	waitStart := time.Now()
 	err = cmd.Wait()
+	if sharedPipe != nil {
+		sharedPipe.closeAndJoin()
+	}
 	waitDuration := time.Since(waitStart)
 
 	// Clean up throttling proxy if we used one
@@ -5392,7 +5513,7 @@ func (m *HLSManager) startTranscoding(ctx context.Context, session *HLSSession, 
 		session.mu.Unlock()
 
 		// Create a new background context for the restart (old context may be cancelled)
-		newCtx, newCancel := context.WithCancel(context.Background())
+		newCtx, newCancel := shareHLSWorkerContext(ctx, session)
 		session.mu.Lock()
 		session.Cancel = newCancel
 		session.mu.Unlock()
@@ -5536,7 +5657,7 @@ func (m *HLSManager) startTranscoding(ctx context.Context, session *HLSSession, 
 			session.mu.Unlock()
 
 			// Create a new background context for the restart
-			newCtx, newCancel := context.WithCancel(context.Background())
+			newCtx, newCancel := shareHLSWorkerContext(ctx, session)
 			session.mu.Lock()
 			session.Cancel = newCancel
 			session.mu.Unlock()
@@ -5737,7 +5858,7 @@ func (m *HLSManager) KeepAlive(w http.ResponseWriter, r *http.Request, sessionID
 		m.mu.RLock()
 		observer := m.playbackObserver
 		m.mu.RUnlock()
-		if !configuredHLSRequest(r) && observer != nil && metadata.MediaType != "live" {
+		if !configuredHLSRequest(r) && session.shareOwned == nil && observer != nil && metadata.MediaType != "live" {
 			update := enrichPlaybackUpdateFromStream(models.PlaybackProgressUpdate{
 				MediaType:         metadata.MediaType,
 				ItemID:            metadata.ItemID,
@@ -5815,12 +5936,12 @@ type SeekResponse struct {
 // This is faster than creating a new session since it reuses the existing session structure
 // Query param: time=<seconds> specifies the target seek position in absolute media time
 func (m *HLSManager) Seek(w http.ResponseWriter, r *http.Request, sessionID string) {
-	if m.hlsInputConfigured() {
+	if m.hlsInputConfigured() && shareHLSRef(r) == nil {
 		vodDeny(w, kidsvod.CodeUnsupportedSource)
 		return
 	}
 
-	session, exists := m.GetSession(sessionID)
+	session, exists := m.sessionForHTTP(w, r, sessionID)
 	if !exists {
 		http.Error(w, "session not found", http.StatusNotFound)
 		return
@@ -5865,6 +5986,17 @@ func (m *HLSManager) Seek(w http.ResponseWriter, r *http.Request, sessionID stri
 		targetTime = 0
 	}
 
+	var sharedContext context.Context
+	var sharedCancel context.CancelFunc
+	if session.shareOwned != nil {
+		next, cancel, finish, changeErr := session.shareOwned.beginChange(r.Context())
+		if changeErr != nil {
+			shareMediaError(w, changeErr)
+			return
+		}
+		sharedContext, sharedCancel = next, cancel
+		defer finish()
+	}
 	log.Printf("[hls] session %s: seek requested to %.2fs (current offset: %.2fs)", sessionID, targetTime, session.StartOffset)
 
 	// Mark seek in progress to prevent recovery logic from triggering
@@ -5877,7 +6009,9 @@ func (m *HLSManager) Seek(w http.ResponseWriter, r *http.Request, sessionID stri
 	session.mu.Unlock()
 
 	// Wait briefly for FFmpeg to stop (reduced from 50ms)
-	time.Sleep(25 * time.Millisecond)
+	if session.shareOwned == nil {
+		time.Sleep(25 * time.Millisecond)
+	}
 
 	// Clear all existing segments since they're at the old time offset
 	if err := m.clearSessionSegments(session); err != nil {
@@ -5915,13 +6049,20 @@ func (m *HLSManager) Seek(w http.ResponseWriter, r *http.Request, sessionID stri
 
 	// Create a new context for the restarted transcoding
 	newCtx, newCancel := context.WithCancel(context.Background())
+	if sharedContext != nil {
+		newCancel()
+		newCtx, newCancel = sharedContext, sharedCancel
+	}
 	session.mu.Lock()
 	session.Cancel = newCancel
 	session.mu.Unlock()
 
+	if session.shareOwned != nil {
+		session.shareOwned.endChange()
+	}
 	// Start transcoding from the new offset in background.
 	if playbackTarget == "youtube" && youtubeVideoURL != "" && youtubeAudioURL != "" {
-		go func() {
+		shareHLSGo(session, func() {
 			if err := m.startYouTubeTranscoding(newCtx, session, youtubeVideoURL, youtubeAudioURL, youtubeProxyURL); err != nil {
 				if errors.Is(err, context.Canceled) {
 					log.Printf("[hls-youtube] session %s: seek transcoding cancelled", sessionID)
@@ -5934,16 +6075,18 @@ func (m *HLSManager) Seek(w http.ResponseWriter, r *http.Request, sessionID stri
 				session.FatalErrorTime = time.Now()
 				session.mu.Unlock()
 			}
-		}()
+
+		})
 	} else {
-		go func() {
+		shareHLSGo(session, func() {
 			if err := m.startTranscoding(newCtx, session, cachedForceAAC); err != nil {
 				log.Printf("[hls] session %s: seek transcoding failed: %v", sessionID, err)
 				session.mu.Lock()
 				session.Completed = true
 				session.mu.Unlock()
 			}
-		}()
+
+		})
 	}
 
 	// Start background keyframe probe for subtitle sync correction
@@ -5960,10 +6103,10 @@ func (m *HLSManager) Seek(w http.ResponseWriter, r *http.Request, sessionID stri
 	}
 	session.mu.RUnlock()
 
-	if shouldUseAccurateRequestedSeekForWebSubtitle(probePlaybackTarget, probeData, probeSubtitleStreams, probeSubtitleTrack) {
+	if session.shareOwned != nil || shouldUseAccurateRequestedSeekForWebSubtitle(probePlaybackTarget, probeData, probeSubtitleStreams, probeSubtitleTrack) {
 		log.Printf("[hls] session %s: skipping background keyframe probe for accurate web video+subtitle seek", sessionID)
 	} else {
-		go func() {
+		shareHLSGo(session, func() {
 			probeCtx, probeCancel := context.WithTimeout(context.Background(), 15*time.Second)
 			defer probeCancel()
 
@@ -5976,7 +6119,8 @@ func (m *HLSManager) Seek(w http.ResponseWriter, r *http.Request, sessionID stri
 
 			log.Printf("[hls] session %s: background keyframe probe complete: requested=%.3fs actual=%.3fs delta=%.3fs",
 				sessionID, targetTime, keyframePos, delta)
-		}()
+
+		})
 	}
 
 	// Wait for the playlist file to be created before returning
@@ -6620,8 +6764,8 @@ func (m *HLSManager) ServeSubtitlePlaylist(w http.ResponseWriter, r *http.Reques
 	_, _ = w.Write([]byte(playlistContent))
 }
 
-func (m *HLSManager) restartCastTranscodingForSegment(session *HLSSession, requestedSegment int) {
-	if m.hlsInputConfigured() {
+func (m *HLSManager) restartCastTranscodingForSegment(session *HLSSession, requestedSegment int, callers ...*http.Request) {
+	if m.hlsInputConfigured() && session.shareOwned == nil {
 		return
 	}
 
@@ -6660,17 +6804,34 @@ func (m *HLSManager) restartCastTranscodingForSegment(session *HLSSession, reque
 		session.ID, plan.SegmentStartNumber, plan.OutputTimestampOffset, plan.TranscodingOffset, highestAvailable)
 	session.mu.Unlock()
 
-	m.restartCastTranscodingAt(session, plan)
+	m.restartCastTranscodingAt(session, plan, callers...)
 }
 
 // restartCastTranscodingAt replaces the running FFmpeg with one that resumes
 // the stable Cast timeline at plan.SegmentStartNumber. Callers own the decision
 // (timeline jump, quality change); this only performs the swap.
-func (m *HLSManager) restartCastTranscodingAt(session *HLSSession, plan castSegmentRestart) {
-	if m.hlsInputConfigured() {
+func (m *HLSManager) restartCastTranscodingAt(session *HLSSession, plan castSegmentRestart, callers ...*http.Request) {
+	if m.hlsInputConfigured() && session.shareOwned == nil {
 		return
 	}
 
+	var caller *shareHLSHTTPRef
+	if session.shareOwned != nil && len(callers) > 0 {
+		caller = shareHLSRef(callers[0])
+		if caller == nil || caller.suspend() != nil {
+			return
+		}
+	}
+	var sharedContext context.Context
+	var sharedCancel context.CancelFunc
+	if session.shareOwned != nil {
+		next, cancel, finish, err := session.shareOwned.beginChange(session.shareOwned.guard.ctx)
+		if err != nil {
+			return
+		}
+		defer finish()
+		sharedContext, sharedCancel = next, cancel
+	}
 	session.mu.Lock()
 	session.SeekInProgress = true
 	if session.Cancel != nil {
@@ -6701,37 +6862,55 @@ func (m *HLSManager) restartCastTranscodingAt(session *HLSSession, plan castSegm
 
 	// Let the cancelled process release its output files before the replacement
 	// process writes the same stable playlist.
-	time.Sleep(25 * time.Millisecond)
+	if session.shareOwned == nil {
+		time.Sleep(25 * time.Millisecond)
+	}
 	if session.usesStableCopyTimeline() {
 		m.resetStableCopyFrom(session, plan.SegmentStartNumber)
 	}
 
 	newCtx, newCancel := context.WithCancel(context.Background())
+	if sharedContext != nil {
+		newCancel()
+		newCtx, newCancel = sharedContext, sharedCancel
+	}
 	session.mu.Lock()
 	session.Cancel = newCancel
 	session.SeekInProgress = false
 	session.mu.Unlock()
 
-	go func(segmentStart int) {
-		var err error
-		if youtubeVideoURL != "" && youtubeAudioURL != "" {
-			err = m.startYouTubeTranscoding(newCtx, session, youtubeVideoURL, youtubeAudioURL, youtubeProxyURL)
-		} else {
-			err = m.startTranscoding(newCtx, session, cachedForceAAC)
-		}
-		if err == nil || errors.Is(err, context.Canceled) {
+	if session.shareOwned != nil {
+		session.mu.Lock()
+		session.SeekGeneration++
+		session.mu.Unlock()
+		session.shareOwned.endChange()
+		if caller != nil && caller.resume(callers[0].Context()) != nil {
+			newCancel()
 			return
 		}
+	}
+	shareHLSGo(session, func() {
+		func(segmentStart int) {
+			var err error
+			if youtubeVideoURL != "" && youtubeAudioURL != "" {
+				err = m.startYouTubeTranscoding(newCtx, session, youtubeVideoURL, youtubeAudioURL, youtubeProxyURL)
+			} else {
+				err = m.startTranscoding(newCtx, session, cachedForceAAC)
+			}
+			if err == nil || errors.Is(err, context.Canceled) {
+				return
+			}
 
-		log.Printf("[hls] session %s: stable Cast segment restart failed: %v", session.ID, err)
-		session.mu.Lock()
-		if session.SegmentStartNumber == segmentStart {
-			session.Completed = true
-			session.FatalError = err.Error()
-			session.FatalErrorTime = time.Now()
-		}
-		session.mu.Unlock()
-	}(plan.SegmentStartNumber)
+			log.Printf("[hls] session %s: stable Cast segment restart failed: %v", session.ID, err)
+			session.mu.Lock()
+			if session.SegmentStartNumber == segmentStart {
+				session.Completed = true
+				session.FatalError = err.Error()
+				session.FatalErrorTime = time.Now()
+			}
+			session.mu.Unlock()
+		}(plan.SegmentStartNumber)
+	})
 }
 
 // isChromecastReceiverRequest reports whether a segment request came from the
@@ -6794,7 +6973,7 @@ func (m *HLSManager) noteCastSegmentDelivery(session *HLSSession, r *http.Reques
 		SegmentStartNumber:    restartSegment,
 		TranscodingOffset:     transcodingOffset,
 		OutputTimestampOffset: timelineOffset,
-	})
+	}, r)
 }
 
 // ServeSegment serves an HLS segment file
@@ -6876,7 +7055,7 @@ func (m *HLSManager) ServeSegment(w http.ResponseWriter, r *http.Request, sessio
 				vodDeny(w, kidsvod.CodeUnsupportedSource)
 				return
 			}
-			m.restartCastTranscodingForSegment(session, segmentNum)
+			m.restartCastTranscodingForSegment(session, segmentNum, r)
 		}
 	}
 
@@ -7058,17 +7237,17 @@ func (m *HLSManager) ServeSegment(w http.ResponseWriter, r *http.Request, sessio
 		return // Background pruning has no captured HTTP owner until P3B.
 	}
 	if session.isTimeshiftSession() {
-		go m.pruneTimeshiftSegments(session)
+		shareHLSGo(session, func() { m.pruneTimeshiftSegments(session) })
 	} else if session.IsLive {
 		if !checkHLSSessionHTTP(w, r, sessionID) {
 			return
 		}
-		go m.deleteOldLiveTransmuxSegments(session, servedSegmentNum)
+		shareHLSGo(session, func() { m.deleteOldLiveTransmuxSegments(session, servedSegmentNum) })
 	} else {
 		if !checkHLSSessionHTTP(w, r, sessionID) {
 			return
 		}
-		go m.deleteOldSegments(session, segmentName)
+		shareHLSGo(session, func() { m.deleteOldSegments(session, segmentName) })
 	}
 }
 
@@ -7157,6 +7336,13 @@ func (m *HLSManager) ServeSubtitleTrack(w http.ResponseWriter, r *http.Request, 
 				extractID = session.subtitleExtractSeq
 				session.subtitleExtracting[requestedTrack] = true
 				extractCtx, extractCancel = context.WithCancel(context.Background())
+				if session.shareOwned != nil {
+					extractCancel()
+					session.shareOwned.mu.Lock()
+					parent := session.shareOwned.run
+					session.shareOwned.mu.Unlock()
+					extractCtx, extractCancel = shareHLSWorkerContext(parent, session)
+				}
 				session.subtitleExtractCancelFunc[requestedTrack] = extractCancel
 				session.subtitleExtractIDs[requestedTrack] = extractID
 				startExtract = true
@@ -7169,7 +7355,7 @@ func (m *HLSManager) ServeSubtitleTrack(w http.ResponseWriter, r *http.Request, 
 			log.Printf("[hls] subtitle track %d extraction already in progress for session %s, waiting", requestedTrack, sessionID)
 		} else if startExtract {
 			log.Printf("[hls] starting subtitle track %d extraction on demand for session %s", requestedTrack, sessionID)
-			go func() {
+			shareHLSGo(session, func() {
 				extractErr := m.extractSubtitleTrackToVTT(extractCtx, session, requestedTrack, vttPath)
 				session.subtitleExtractionMu.Lock()
 				if session.subtitleExtractIDs != nil && session.subtitleExtractIDs[requestedTrack] == extractID {
@@ -7183,7 +7369,8 @@ func (m *HLSManager) ServeSubtitleTrack(w http.ResponseWriter, r *http.Request, 
 					return
 				}
 				log.Printf("[hls] subtitle track %d extraction complete for session %s", requestedTrack, sessionID)
-			}()
+
+			})
 		}
 	}
 
@@ -7359,6 +7546,9 @@ func (s *HLSSession) subtitleExtractionInProgress(track int) bool {
 // This allows switching subtitle tracks without recreating the HLS session
 // trackIndex is the absolute ffprobe stream index (same as session.SubtitleTrackIndex)
 func (m *HLSManager) extractSubtitleTrackToVTT(ctx context.Context, session *HLSSession, trackIndex int, outputPath string) error {
+	if session.shareOwned != nil {
+		return m.sharedSubtitle(ctx, session, trackIndex, outputPath)
+	}
 	if m.hlsInputConfigured() {
 		return errVODOwner
 	}
@@ -7601,6 +7791,10 @@ func (m *HLSManager) CleanupSession(sessionID string) {
 }
 
 func (m *HLSManager) cleanupDetachedHLSSession(sessionID string, session *HLSSession, outputDir string) {
+	if session.shareOwned != nil {
+		session.shareOwned.close()
+		return
+	}
 	if session.vodInput != nil && !session.vodInput.stopAndWait() {
 		log.Printf("[hls] input cleanup still pending; preserving owned output")
 		return

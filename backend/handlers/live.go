@@ -546,6 +546,19 @@ func (h *LiveHandler) FetchPlaylist(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *LiveHandler) StreamChannel(w http.ResponseWriter, r *http.Request) {
+	if g := shareMediaFrom(r.Context()); g != nil {
+		source := strings.TrimSpace(r.URL.Query().Get("url"))
+		if normalizeShareResource(source) != g.owner.Resource() || g.current(r.Context()) != nil {
+			shareMediaError(w, g.current(r.Context()))
+			return
+		}
+		_, err := g.handler.proxyExternalURL(w, r, source)
+		if err != nil && r.Context().Err() == nil {
+			return
+		}
+		return
+	}
+
 	requestID := atomic.AddUint64(&liveStreamRequestSequence, 1)
 	requestStartedAt := time.Now()
 	requestTarget := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("target")))

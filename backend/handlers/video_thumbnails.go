@@ -846,6 +846,9 @@ func (m *ThumbnailManager) isInflight(key string) bool {
 }
 
 func (h *VideoHandler) StartThumbnails(w http.ResponseWriter, r *http.Request) {
+	if rejectShareAncillary(w, r) {
+		return
+	}
 	if r.Method == http.MethodOptions {
 		h.writeCommonHeaders(w)
 		w.Header().Set("Access-Control-Allow-Methods", "POST, OPTIONS")
@@ -957,6 +960,9 @@ func parseThumbnailChapterTimes(values []string) []float64 {
 }
 
 func (h *VideoHandler) GetThumbnailsStatus(w http.ResponseWriter, r *http.Request) {
+	if rejectShareAncillary(w, r) {
+		return
+	}
 	if r.Method == http.MethodOptions {
 		h.writeCommonHeaders(w)
 		w.Header().Set("Access-Control-Allow-Methods", "GET, OPTIONS")
@@ -990,6 +996,9 @@ func (h *VideoHandler) GetThumbnailsStatus(w http.ResponseWriter, r *http.Reques
 }
 
 func (h *VideoHandler) ServeThumbnailImage(w http.ResponseWriter, r *http.Request) {
+	if rejectShareAncillary(w, r) {
+		return
+	}
 	if r.Method == http.MethodOptions {
 		h.writeCommonHeaders(w)
 		w.Header().Set("Access-Control-Allow-Methods", "GET, OPTIONS")

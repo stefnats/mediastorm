@@ -1,17 +1,26 @@
 package handlers
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"encoding/hex"
 	"errors"
+	"fmt"
+	"io"
 	"net/http"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
+	"novastream/internal/nzb/utils"
+	"novastream/internal/requestsecurity"
+	"novastream/internal/streamheaders"
 	"novastream/services/kidsvod"
+	"novastream/services/streaming"
 )
 
 // Runtime identity is assigned only by normal server publication, never a
@@ -232,6 +241,16 @@ func (s *vodHLSScope) check(ctx context.Context) error {
 
 func (h *VideoHandler) beginHLSVOD(w http.ResponseWriter, r *http.Request, id string, cleanup bool) (http.ResponseWriter, *http.Request, func(), bool) {
 	noop := func() {}
+	if h.hlsManager != nil {
+		snapshot, exists := h.hlsManager.snapshotHLSSession(id)
+		if exists && snapshot.session.shareOwned != nil {
+			return h.beginSharedHLS(w, r, snapshot, cleanup)
+		}
+		if shareMediaFrom(r.Context()) != nil {
+			shareMediaError(w, errVODOwner)
+			return w, r, noop, false
+		}
+	}
 	if h.vodBoundary == nil {
 		if h.hlsManager != nil && h.hlsManager.hlsInputConfigured() {
 			vodDeny(w, kidsvod.CodeContextChanged)
@@ -323,6 +342,13 @@ func hlsScope(r *http.Request) *vodHLSScope {
 	return s
 }
 func checkHLSSessionHTTP(w http.ResponseWriter, r *http.Request, id string) bool {
+	if ref := shareHLSRef(r); ref != nil {
+		if ref.owner.id != id || ref.check(r.Context()) != nil {
+			shareMediaError(w, errVODOwner)
+			return false
+		}
+		return true
+	}
 	s := hlsScope(r)
 	if s == nil {
 		return true
@@ -334,6 +360,16 @@ func checkHLSSessionHTTP(w http.ResponseWriter, r *http.Request, id string) bool
 	return true
 }
 func (m *HLSManager) sessionForHTTP(w http.ResponseWriter, r *http.Request, id string) (*HLSSession, bool) {
+	if ref := shareHLSRef(r); ref != nil {
+		if ref.owner.manager != m || ref.owner.id != id || !checkHLSSessionHTTP(w, r, id) {
+			return nil, false
+		}
+		session := ref.owner.session
+		session.mu.Lock()
+		session.LastAccess = time.Now()
+		session.mu.Unlock()
+		return session, true
+	}
 	if hlsScope(r) == nil {
 		return m.GetSession(id)
 	}
@@ -442,7 +478,7 @@ func (w *vodHLSWriter) Flush() {
 // Configured requests recheck before every filesystem retry; legacy callers keep
 // the original subtitle wait semantics. This does not start an extractor.
 func waitForHLSSubtitleFile(w http.ResponseWriter, r *http.Request, id, path string, maxWait time.Duration) (os.FileInfo, []byte, error) {
-	if !configuredHLSRequest(r) {
+	if !configuredHLSRequest(r) && shareHLSRef(r) == nil {
 		return waitForSubtitleFile(path, true, maxWait)
 	}
 	deadline := time.Now().Add(maxWait)
@@ -473,4 +509,699 @@ func waitForHLSSubtitleFile(w http.ResponseWriter, r *http.Request, id, path str
 		case <-timer.C:
 		}
 	}
+}
+
+// shareHLSOwned is the concrete original scoped source actor. Its DATA never
+// supplies a replacement frame, recipient, source permission or renewed expiry.
+type shareHLSOwned struct {
+	self                                 *shareHLSOwned
+	manager                              *HLSManager
+	guard                                *shareMediaGuard
+	profile, resource, input, id, output string
+	session                              *HLSSession
+	mu                                   sync.Mutex
+	changing, closing                    bool
+	run                                  context.Context
+	cancel                               context.CancelFunc
+	refs                                 map[*shareHLSHTTPRef]struct{}
+	workers                              sync.WaitGroup
+	setupOnce                            sync.Once
+	closeOnce                            sync.Once
+	done                                 chan struct{}
+	cleanupErr                           error
+}
+type shareHLSContextKey struct{}
+type shareHLSHTTPKey struct{}
+type shareHLSHTTPRef struct {
+	owner      *shareHLSOwned
+	cancel     context.CancelFunc
+	generation int
+	mutation   bool
+	suspended  bool
+}
+
+func sharedHLSContext(ctx context.Context) *shareHLSOwned {
+	if ctx == nil {
+		return nil
+	}
+	value, _ := ctx.Value(shareHLSContextKey{}).(*shareHLSOwned)
+	return value
+}
+func (m *HLSManager) prepareSharedHLS(ctx context.Context, path, original, profile string) (context.Context, context.CancelFunc, *shareHLSOwned, error) {
+	guard := shareMediaFrom(ctx)
+	if guard == nil {
+		next, cancel := context.WithCancel(context.Background())
+		return next, cancel, nil, nil
+	}
+	source := original
+	if source == "" {
+		source = path
+	}
+	if guard.handler == nil || guard.handler.hlsManager != m || guard.current(ctx) != nil ||
+		profile != guard.owner.ProfileID() || normalizeShareResource(source) != guard.owner.Resource() ||
+		normalizeShareResource(path) != normalizeShareResource(source) {
+		return nil, nil, nil, errVODOwner
+	}
+	fixed, err := guard.transfer(profile, source)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	owned := &shareHLSOwned{manager: m, guard: guard, profile: profile, resource: normalizeShareResource(source), input: path, refs: make(map[*shareHLSHTTPRef]struct{}), done: make(chan struct{})}
+	owned.self = owned
+	run, cancel := context.WithCancel(fixed)
+	owned.run = context.WithValue(run, shareHLSContextKey{}, owned)
+	owned.cancel = cancel
+	// Setup is a real work reference: publication/cancellation cannot refund a
+	// source before its actual setup returns or its worker has registered.
+	owned.workers.Add(1)
+	return owned.run, cancel, owned, nil
+}
+func (o *shareHLSOwned) finishSetup(success bool) {
+	if o == nil {
+		return
+	}
+	o.setupOnce.Do(func() { o.workers.Done() })
+	if !success {
+		if o.session != nil {
+			o.manager.cleanupShareHLSInstance(o)
+		} else {
+			o.close()
+		}
+	}
+}
+func (o *shareHLSOwned) attach(s *HLSSession) {
+	if o == nil {
+		return
+	}
+	o.mu.Lock()
+	o.session, o.id, o.output = s, s.ID, s.OutputDir
+	o.mu.Unlock()
+}
+func (o *shareHLSOwned) watch() {
+	if o == nil {
+		return
+	}
+	context.AfterFunc(o.guard.ctx, func() {
+		// Cleanup runs outside every source/HTTP work reference. A stop never
+		// waits for itself, and a replaced ID cannot remove a new instance.
+		o.manager.cleanupShareHLSInstance(o)
+	})
+}
+func (m *HLSManager) cleanupShareHLSInstance(o *shareHLSOwned) bool {
+	if o == nil || o.self != o || o.manager != m {
+		return false
+	}
+	m.sessionLifecycleMu.Lock()
+	m.mu.Lock()
+	matched := false
+	if current := m.sessions[o.id]; current == o.session && current != nil {
+		current.mu.RLock()
+		same := current.shareOwned == o
+		current.mu.RUnlock()
+		if same {
+			delete(m.sessions, o.id)
+			matched = true
+		}
+	}
+	m.mu.Unlock()
+	m.sessionLifecycleMu.Unlock()
+	_ = o.close()
+	return matched && o.cleanupErr == nil
+}
+func (o *shareHLSOwned) check(ctx context.Context, mutation bool) error {
+	if o == nil || o.self != o || ctx == nil || ctx.Err() != nil || o.guard.current(ctx) != nil {
+		return errVODOwner
+	}
+	o.mu.Lock()
+	denied := o.closing || o.changing && !mutation
+	s, id, output := o.session, o.id, o.output
+	o.mu.Unlock()
+	if denied || s == nil || id == "" || output == "" {
+		return errVODOwner
+	}
+	o.manager.mu.RLock()
+	current := o.manager.sessions[id]
+	o.manager.mu.RUnlock()
+	s.mu.RLock()
+	same := current == s && s.shareOwned == o && s.ID == id && s.OutputDir == output &&
+		s.ProfileID == o.profile && normalizeShareResource(s.RequestedSource) == o.resource && !s.Stopped
+	s.mu.RUnlock()
+	if !same {
+		return errVODOwner
+	}
+	return nil
+}
+func shareHLSWorkerContext(ctx context.Context, session *HLSSession) (context.Context, context.CancelFunc) {
+	if session.shareOwned == nil {
+		return context.WithCancel(context.Background())
+	}
+	o := session.shareOwned
+	if sharedHLSContext(ctx) != o {
+		failed, cancel := context.WithCancel(o.guard.ctx)
+		cancel()
+		return failed, cancel
+	}
+	return context.WithCancel(ctx)
+}
+
+// Registration happens before go starts. Every such call is inside the original
+// registered setup, HTTP reference or worker; Wait cannot observe a false zero.
+func shareHLSGo(session *HLSSession, work func()) {
+	if session.shareOwned == nil {
+		go work()
+		return
+	}
+	o := session.shareOwned
+	o.workers.Add(1)
+	go func() { defer o.workers.Done(); work() }()
+}
+func (o *shareHLSOwned) beginChange(ctx context.Context) (context.Context, context.CancelFunc, func(), error) {
+	noop := func() {}
+	if o == nil || o.guard.current(ctx) != nil {
+		return nil, nil, noop, errVODOwner
+	}
+	o.mu.Lock()
+	if o.closing || o.changing {
+		o.mu.Unlock()
+		return nil, nil, noop, errVODOwner
+	}
+	o.changing = true
+	cancel := o.cancel
+	refs := make([]*shareHLSHTTPRef, 0, len(o.refs))
+	for ref := range o.refs {
+		refs = append(refs, ref)
+	}
+	o.mu.Unlock()
+	cancel()
+	for _, ref := range refs {
+		ref.cancel()
+	}
+	o.workers.Wait()
+	if o.guard.current(ctx) != nil {
+		o.mu.Lock()
+		o.changing = false
+		o.mu.Unlock()
+		return nil, nil, noop, errVODOwner
+	}
+	o.mu.Lock()
+	if o.closing {
+		o.mu.Unlock()
+		return nil, nil, noop, errVODOwner
+	}
+	run, stop := context.WithCancel(o.guard.ctx)
+	o.run = context.WithValue(run, shareHLSContextKey{}, o)
+	o.cancel = stop
+	o.workers.Add(1) // actual mutation/setup reference, released on handler return
+	next := o.run
+	o.mu.Unlock()
+	var once sync.Once
+	return next, stop, func() { once.Do(func() { o.mu.Lock(); o.changing = false; o.mu.Unlock(); o.workers.Done() }) }, nil
+}
+func (o *shareHLSOwned) close() error {
+	if o == nil {
+		return errVODOwner
+	}
+	o.closeOnce.Do(func() {
+		o.mu.Lock()
+		o.closing = true
+		cancel := o.cancel
+		refs := make([]*shareHLSHTTPRef, 0, len(o.refs))
+		for ref := range o.refs {
+			refs = append(refs, ref)
+		}
+		s, output := o.session, o.output
+		o.mu.Unlock()
+		if s != nil {
+			s.mu.Lock()
+			s.Stopped = true
+			s.mu.Unlock()
+		}
+		cancel()
+		for _, ref := range refs {
+			ref.cancel()
+		}
+		stopped := make(chan struct{})
+		go func() { o.guard.stopAndWait(); close(stopped) }()
+		o.workers.Wait()
+		<-stopped
+		// Child Wait, source bodies/readers and real HTTP descriptors have ended
+		// before output deletion or the original one-shot lease is released.
+		if output != "" {
+			if err := os.RemoveAll(output); err != nil {
+				// Keep the lease charged on unknown physical output cleanup.
+				o.cleanupErr = err
+				close(o.done)
+				return
+			}
+		}
+		o.guard.Close()
+		close(o.done)
+	})
+	<-o.done
+	return o.cleanupErr
+}
+func (h *VideoHandler) beginSharedHLS(w http.ResponseWriter, r *http.Request, snapshot hlsSessionSnapshot, cleanup bool) (http.ResponseWriter, *http.Request, func(), bool) {
+	noop := func() {}
+	o := snapshot.session.shareOwned
+	if o == nil || o.manager != h.hlsManager || o.guard.handler != h || o.guard.owner.CheckRequest(r, o.profile, o.resource) != nil || o.check(r.Context(), cleanup) != nil {
+		shareMediaError(w, errVODOwner)
+		return w, r, noop, false
+	}
+	if cleanup {
+		ref := &shareHLSHTTPRef{owner: o, generation: snapshot.generation, mutation: true}
+		return w, r.WithContext(context.WithValue(r.Context(), shareHLSHTTPKey{}, ref)), noop, true
+	}
+	mutation := r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/seek")
+	out, request, finish, err := o.guard.borrowHTTP(w, r, o.profile, o.resource)
+	if err != nil {
+		shareMediaError(w, err)
+		return w, r, noop, false
+	}
+	ctx, cancel := context.WithCancel(request.Context())
+	ref := &shareHLSHTTPRef{owner: o, cancel: cancel, generation: snapshot.generation, mutation: mutation}
+	o.mu.Lock()
+	if o.closing || o.changing {
+		o.mu.Unlock()
+		cancel()
+		finish()
+		shareMediaError(w, errVODOwner)
+		return w, r, noop, false
+	}
+	if !mutation {
+		o.workers.Add(1)
+		o.refs[ref] = struct{}{}
+	}
+	o.mu.Unlock()
+	request = request.WithContext(context.WithValue(ctx, shareHLSHTTPKey{}, ref))
+	transport := http.NewResponseController(out)
+	interrupted := make(chan struct{})
+	stopIO := context.AfterFunc(ctx, func() {
+		defer close(interrupted)
+		_ = transport.SetReadDeadline(time.Now())
+		_ = transport.SetWriteDeadline(time.Now())
+	})
+	var once sync.Once
+	release := func() {
+		once.Do(func() {
+			cancel()
+			if !stopIO() {
+				<-interrupted
+			}
+			finish()
+			if !mutation {
+				o.mu.Lock()
+				_, counted := o.refs[ref]
+				delete(o.refs, ref)
+				o.mu.Unlock()
+				if counted {
+					o.workers.Done()
+				}
+			}
+		})
+	}
+	return &shareHLSWriter{ResponseWriter: out, ref: ref, ctx: ctx}, request, release, true
+}
+func shareHLSRef(r *http.Request) *shareHLSHTTPRef {
+	ref, _ := r.Context().Value(shareHLSHTTPKey{}).(*shareHLSHTTPRef)
+	return ref
+}
+func (ref *shareHLSHTTPRef) check(ctx context.Context) error {
+	if ref == nil || ref.owner.check(ctx, ref.mutation) != nil {
+		return errVODOwner
+	}
+	ref.owner.mu.Lock()
+	suspended, generation := ref.suspended, ref.generation
+	ref.owner.mu.Unlock()
+	if suspended {
+		return errVODOwner
+	}
+	s := ref.owner.session
+	s.mu.RLock()
+	same := ref.mutation || s.SeekGeneration == generation
+	s.mu.RUnlock()
+	if !same {
+		return errVODOwner
+	}
+	return nil
+}
+
+type shareHLSWriter struct {
+	http.ResponseWriter
+	ref *shareHLSHTTPRef
+	ctx context.Context
+}
+
+func (w *shareHLSWriter) Unwrap() http.ResponseWriter { return w.ResponseWriter }
+func (w *shareHLSWriter) WriteHeader(status int) {
+	if w.ref.check(w.ctx) == nil {
+		w.ResponseWriter.WriteHeader(status)
+	}
+}
+func (w *shareHLSWriter) Write(p []byte) (int, error) {
+	if err := w.ref.check(w.ctx); err != nil {
+		return 0, err
+	}
+	return w.ResponseWriter.Write(p)
+}
+func (w *shareHLSWriter) Flush() {
+	if w.ref.check(w.ctx) == nil {
+		_ = http.NewResponseController(w.ResponseWriter).Flush()
+	}
+}
+
+type shareHLSBody struct {
+	io.ReadCloser
+	stop   func() bool
+	joined chan struct{}
+	once   sync.Once
+	err    error
+}
+
+func (b *shareHLSBody) Close() error {
+	b.once.Do(func() {
+		b.err = b.ReadCloser.Close()
+		if !b.stop() {
+			<-b.joined
+		}
+	})
+	return b.err
+}
+func sharedHLSBody(ctx context.Context, s *HLSSession, body io.ReadCloser) (io.ReadCloser, error) {
+	if s.shareOwned == nil {
+		return body, nil
+	}
+	o := s.shareOwned
+	if sharedHLSContext(ctx) != o || o.check(ctx, false) != nil {
+		_ = body.Close()
+		return nil, errVODOwner
+	}
+	wrapped, err := o.guard.wrapBody(ctx, body)
+	if err != nil {
+		return nil, err
+	}
+	joined := make(chan struct{})
+	stop := context.AfterFunc(ctx, func() { defer close(joined); _ = wrapped.Close() })
+	return &shareHLSBody{ReadCloser: wrapped, stop: stop, joined: joined}, nil
+}
+
+func (o *shareHLSOwned) endChange() {
+	if o != nil {
+		o.mu.Lock()
+		o.changing = false
+		o.mu.Unlock()
+	}
+}
+func (o *shareHLSOwned) checkSource(ctx context.Context) error {
+	if o == nil || o.self != o || sharedHLSContext(ctx) != o || o.guard.current(ctx) != nil {
+		return errVODOwner
+	}
+	o.mu.Lock()
+	closing, changing, s := o.closing, o.changing, o.session
+	o.mu.Unlock()
+	if closing || changing {
+		return errVODOwner
+	}
+	if s != nil {
+		return o.check(ctx, false)
+	}
+	return nil
+}
+func (o *shareHLSOwned) openInput(ctx context.Context, method, rangeHeader string) (*streaming.Response, error) {
+	if o.checkSource(ctx) != nil {
+		return nil, errVODOwner
+	}
+	var response *streaming.Response
+	var err error
+	providerBacked := false
+	if strings.HasPrefix(o.input, "http://") || strings.HasPrefix(o.input, "https://") {
+		rawURL, headers := streamheaders.Extract(o.input)
+		encodedURL, e := utils.EncodeURLWithSpaces(rawURL)
+		if e != nil {
+			return nil, e
+		}
+		request, e := http.NewRequestWithContext(ctx, method, encodedURL, nil)
+		if e != nil {
+			return nil, e
+		}
+		streamheaders.Apply(request.Header, headers)
+		o.manager.applyExternalUsenetWebDAVAuth(request)
+		if rangeHeader != "" {
+			request.Header.Set("Range", rangeHeader)
+		}
+		if o.checkSource(ctx) != nil {
+			return nil, errVODOwner
+		}
+		handler := o.guard.handler
+		if handler == nil || handler.externalProxyHTTPClient == nil {
+			return nil, errVODOwner
+		}
+		if e := requestsecurity.ValidateOutboundURL(ctx, request.URL.String(), handler.configuredExternalHostPolicy()); e != nil {
+			return nil, e
+		}
+		// Reuse the actual established safe transport, including its dial-time
+		// restricted-address checks. A client copy only adds original ownership;
+		// it cannot loosen the configured callback or the ten-hop ceiling.
+		client := *handler.externalProxyHTTPClient
+		previous := client.CheckRedirect
+		client.CheckRedirect = func(next *http.Request, via []*http.Request) error {
+			if o.checkSource(next.Context()) != nil || len(via) >= 10 {
+				return errVODOwner
+			}
+			if previous != nil {
+				if e := previous(next, via); e != nil {
+					return e
+				}
+			}
+			if o.checkSource(next.Context()) != nil {
+				return errVODOwner
+			}
+			return requestsecurity.ValidateOutboundURL(next.Context(), next.URL.String(), handler.configuredExternalHostPolicy())
+		}
+		if o.checkSource(ctx) != nil {
+			return nil, errVODOwner
+		}
+		result, e := client.Do(request)
+		err = e
+		if result != nil {
+			response = &streaming.Response{Body: result.Body, Headers: result.Header, Status: result.StatusCode, ContentLength: result.ContentLength}
+		}
+	} else if o.manager.streamer != nil {
+		providerBacked = true
+		response, err = o.manager.streamer.Stream(ctx, streaming.Request{Path: o.input, Method: method, RangeHeader: rangeHeader})
+	} else {
+		return nil, errors.New("shared HLS input unavailable")
+	}
+	if response != nil {
+		copy := *response
+		copy.Headers = response.Headers.Clone()
+		response = &copy
+	}
+	if response != nil && response.Body != nil {
+		var body io.ReadCloser
+		var e error
+		if providerBacked {
+			body, e = o.guard.wrapProviderBody(ctx, response.Body, o.manager.streamer, method, response.Status)
+		} else {
+			body, e = o.guard.wrapBody(ctx, response.Body)
+		}
+		if e != nil {
+			return nil, e
+		}
+		joined := make(chan struct{})
+		stop := context.AfterFunc(ctx, func() { defer close(joined); _ = body.Close() })
+		response.Body = &shareHLSBody{ReadCloser: body, stop: stop, joined: joined}
+	}
+	if err != nil || o.checkSource(ctx) != nil {
+		if response != nil {
+			_ = response.Close()
+		}
+		if err != nil {
+			return nil, err
+		}
+		return nil, errVODOwner
+	}
+	if response == nil || response.Status != http.StatusOK && response.Status != http.StatusPartialContent {
+		if response != nil {
+			_ = response.Close()
+		}
+		return nil, errors.New("shared HLS input unavailable")
+	}
+	return response, nil
+}
+
+type shareHLSPipe struct {
+	source  io.ReadCloser
+	writer  io.WriteCloser
+	reader  io.Reader
+	mu      sync.Mutex
+	started bool
+	done    chan struct{}
+	once    sync.Once
+	err     error
+}
+
+func newShareHLSPipe(cmd *exec.Cmd, source io.ReadCloser, reader io.Reader) (*shareHLSPipe, error) {
+	writer, err := cmd.StdinPipe()
+	if err != nil {
+		return nil, err
+	}
+	return &shareHLSPipe{source: source, reader: reader, writer: writer, done: make(chan struct{})}, nil
+}
+func (p *shareHLSPipe) start() {
+	p.mu.Lock()
+	p.started = true
+	p.mu.Unlock()
+	go func() { defer close(p.done); _, p.err = io.Copy(p.writer, p.reader); _ = p.writer.Close() }()
+}
+func (p *shareHLSPipe) closeAndJoin() {
+	if p == nil {
+		return
+	}
+	p.once.Do(func() {
+		_ = p.source.Close()
+		_ = p.writer.Close()
+		p.mu.Lock()
+		started := p.started
+		p.mu.Unlock()
+		if started {
+			<-p.done
+		}
+	})
+}
+
+type shareHLSCapture struct{ bytes.Buffer }
+
+func (b *shareHLSCapture) Write(p []byte) (int, error) {
+	if len(p) > 1<<20-b.Len() {
+		return 0, errors.New("shared HLS metadata bound exceeded")
+	}
+	return b.Buffer.Write(p)
+}
+func (m *HLSManager) probeSharedHLS(ctx context.Context, o *shareHLSOwned) (*UnifiedProbeResult, error) {
+	probe, cancel := context.WithTimeout(ctx, 15*time.Second)
+	defer cancel()
+	source, err := o.openInput(probe, http.MethodGet, "")
+	if err != nil {
+		return nil, err
+	}
+	defer source.Close()
+	if source.Body == nil {
+		return nil, errors.New("shared HLS input body unavailable")
+	}
+	args := append([]string{"-v", "error", "-probesize", "1000000", "-analyzeduration", "500000"}, vodHLSPipeOptions...)
+	args = append(args, "-print_format", "json", "-show_format", "-show_streams", "-i", "pipe:0")
+	cmd := exec.CommandContext(probe, m.ffprobePath, args...)
+	var output shareHLSCapture
+	cmd.Stdout = &output
+	pipe, err := newShareHLSPipe(cmd, source.Body, source.Body)
+	if err != nil {
+		return nil, err
+	}
+	defer pipe.closeAndJoin()
+	if o.checkSource(probe) != nil {
+		return nil, errVODOwner
+	}
+	if err = cmd.Start(); err != nil {
+		return nil, err
+	}
+	pipe.start()
+	err = cmd.Wait()
+	pipe.closeAndJoin()
+	if err != nil || o.checkSource(probe) != nil {
+		return nil, errors.New("shared HLS confined probe unavailable")
+	}
+	result, err := m.parseUnifiedProbeOutput(output.Bytes())
+	if err != nil || result == nil || len(result.AudioStreams) > 128 || len(result.SubtitleStreams) > 128 {
+		return nil, errors.New("shared HLS metadata unavailable")
+	}
+	return result, nil
+}
+func (m *HLSManager) sharedSubtitle(ctx context.Context, s *HLSSession, track int, output string) error {
+	o := s.shareOwned
+	if o == nil || o.checkSource(ctx) != nil {
+		return errVODOwner
+	}
+	s.mu.RLock()
+	probe := s.ProbeData
+	offset := s.TranscodingOffset
+	if offset <= 0 {
+		offset = s.StartOffset
+	}
+	s.mu.RUnlock()
+	if probe == nil {
+		return errors.New("shared subtitle inventory unavailable")
+	}
+	found := false
+	for _, item := range probe.SubtitleStreams {
+		if item.Index == track && isTextSubtitleCodec(item.Codec) {
+			found = true
+		}
+	}
+	if !found {
+		return errors.New("shared subtitle track unavailable")
+	}
+	source, err := o.openInput(ctx, http.MethodGet, "")
+	if err != nil {
+		return err
+	}
+	defer source.Close()
+	args := append([]string{"-nostdin", "-hide_banner", "-loglevel", "error", "-y"}, vodHLSPipeOptions...)
+	args = append(args, "-i", "pipe:0")
+	if offset > 0 {
+		args = append(args, "-ss", fmt.Sprintf("%.3f", offset))
+	}
+	args = append(args, "-map", fmt.Sprintf("0:%d", track), "-c", "webvtt", "-f", "webvtt", "-flush_packets", "1", output)
+	cmd := exec.CommandContext(ctx, m.ffmpegPath, args...)
+	pipe, err := newShareHLSPipe(cmd, source.Body, source.Body)
+	if err != nil {
+		return err
+	}
+	defer pipe.closeAndJoin()
+	if err = cmd.Start(); err != nil {
+		return err
+	}
+	pipe.start()
+	err = cmd.Wait()
+	pipe.closeAndJoin()
+	if err != nil || o.checkSource(ctx) != nil {
+		return errors.New("shared subtitle extraction unavailable")
+	}
+	s.setSubtitleExtractionOffset(track, offset)
+	return nil
+}
+
+// A segment-triggered cast restart releases ONLY its own real file/HTTP work
+// reference before joining the old generation. It cannot wait for itself.
+func (ref *shareHLSHTTPRef) suspend() error {
+	if ref == nil || ref.mutation {
+		return errVODOwner
+	}
+	o := ref.owner
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	if _, ok := o.refs[ref]; !ok || o.closing || o.changing {
+		return errVODOwner
+	}
+	delete(o.refs, ref)
+	ref.suspended = true
+	o.workers.Done()
+	return nil
+}
+func (ref *shareHLSHTTPRef) resume(ctx context.Context) error {
+	o := ref.owner
+	if o.check(ctx, false) != nil {
+		return errVODOwner
+	}
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	if o.closing || o.changing || ctx.Err() != nil || !ref.suspended {
+		return errVODOwner
+	}
+	o.session.mu.RLock()
+	ref.generation = o.session.SeekGeneration
+	o.session.mu.RUnlock()
+	ref.suspended = false
+	o.refs[ref] = struct{}{}
+	o.workers.Add(1)
+	return nil
 }
