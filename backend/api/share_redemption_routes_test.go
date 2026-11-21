@@ -91,7 +91,7 @@ func TestSharePlaybackRegisteredAPI(t *testing.T) {
 			share.SetManagedShareRedemption(runtime)
 			token := result.Session.Token
 			method := "GET"
-			path := "/api/video/stream?path=%40shared&profileId=" + url.QueryEscape(f.open)
+			path := "/api/video/stream?path=" + url.QueryEscape(models.SessionScopeResourcePlaceholder) + "&profileId=" + url.QueryEscape(f.open)
 			var body io.Reader
 			switch kind {
 			case "missing-consumer-denied":
@@ -158,6 +158,15 @@ func TestSharePlaybackRegisteredAPI(t *testing.T) {
 			if want == 200 {
 				if record.Body.String() != "SYNTHETIC-REGISTERED-SHARE" || p.calls.Load() != 1 {
 					t.Fatal("actual registered provider/body not consumed")
+				}
+				if kind == "main-bound-plain-stream" {
+					invalid := httptest.NewRequest(http.MethodGet, "http://synthetic.test/api/video/stream?path=%40shared&profileId="+url.QueryEscape(f.open), nil)
+					invalid.Header.Set("Authorization", "Bearer "+token)
+					denied := httptest.NewRecorder()
+					router.ServeHTTP(denied, invalid)
+					if denied.Code != http.StatusForbidden || p.calls.Load() != 1 {
+						t.Fatal("unrecognized source alias bypassed original scoped binding", denied.Code, p.calls.Load())
+					}
 				}
 			} else if p.calls.Load() != 0 {
 				t.Fatal("denied registered route opened source")
