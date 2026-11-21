@@ -199,7 +199,7 @@ func ordinaryLifeOutput(t *testing.T, s *HLSSession) string {
 	var path string
 	ordinaryLifeWait(t, "actual nonempty segment not produced", func() bool {
 		s.mu.RLock()
-		ext, dir := s.actualSegmentExt, s.OutputDir
+		ext, dir := s.SegmentExt, s.OutputDir
 		s.mu.RUnlock()
 		if ext != ".ts" && ext != ".m4s" && ext != ".mp4" {
 			return false
@@ -543,7 +543,7 @@ func TestOrdinaryHLSActualGenerationJoin(t *testing.T) {
 			t.Fatal("same original generation cannot run recovery", e)
 		}
 		g.cancel()
-		if _, e := s.ordinary.beginChange(next); e == nil {
+		if _, _, e := s.ordinary.beginChange(next); e == nil {
 			t.Fatal("revoked original renewed after recovery")
 		}
 	})
