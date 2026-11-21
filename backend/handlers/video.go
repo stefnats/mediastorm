@@ -127,6 +127,7 @@ type VideoHandler struct {
 	recordingAccess *RecordingStreamAccess
 	vodBoundary     *vodBoundary
 	sharePlayback   *sharePlaybackInstallation
+	partyPlayback   *partyPlaybackInstallation
 
 	// castCaps answers "what can this receiver actually decode" from cache.
 	// Never probes on this path: a cast start must not wait on a device.

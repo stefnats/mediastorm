@@ -87,11 +87,26 @@ func WithSharePlaybackOwner(r *http.Request, owner *datastore.SharePlaybackOwner
 	return r.WithContext(context.WithValue(r.Context(), sharePlaybackOwnerKey{}, owner))
 }
 
+type watchPartyPlaybackOwnerKey struct{}
+
+// WithWatchPartyPlaybackOwner carries only a genuine distinct scoped core.
+// The actual current source/private SQL proof is still checked by CheckResource.
+func WithWatchPartyPlaybackOwner(r *http.Request, owner *datastore.WatchPartyPlaybackOwner) *http.Request {
+	return r.WithContext(context.WithValue(r.Context(), watchPartyPlaybackOwnerKey{}, owner))
+}
+
 // CheckResource checks the stored profile of an existing playback resource, so
 // omitting or substituting a query selector cannot grant access to its session.
 // Internal integrations without this entrypoint middleware retain their own
 // authorization layer. Share sessions remain restricted to their bound source.
 func CheckResource(w http.ResponseWriter, r *http.Request, profileID, resource string) bool {
+	if owner, installed := r.Context().Value(watchPartyPlaybackOwnerKey{}).(*datastore.WatchPartyPlaybackOwner); installed {
+		if owner == nil || profileID == "" || resource == "" || owner.CheckRequest(r, profileID, resource) != nil {
+			apierror.Write(w, http.StatusNotFound, "resource_not_found", "resource not found")
+			return false
+		}
+	}
+
 	if owner, installed := r.Context().Value(sharePlaybackOwnerKey{}).(*datastore.SharePlaybackOwner); installed {
 		if owner == nil || owner.CheckRequest(r, profileID, resource) != nil || profileID == "" || resource == "" {
 			apierror.Write(w, http.StatusNotFound, "resource_not_found", "resource not found")

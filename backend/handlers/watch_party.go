@@ -1,11 +1,13 @@
 package handlers
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"html"
+	"io"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -25,12 +27,13 @@ import (
 const watchPartyCookieName = "strmr_watch_party"
 
 type WatchPartyHandler struct {
-	service        *watchrooms.Service
-	sessions       *sessions.Service
-	serverBasePath string
-	libraryAccess  *libraryaccess.Service
-	settings       watchPartySettingsProvider
-	managedRoom    *managedWatchRoomEntry
+	service          *watchrooms.Service
+	sessions         *sessions.Service
+	serverBasePath   string
+	libraryAccess    *libraryaccess.Service
+	settings         watchPartySettingsProvider
+	managedRoom      *managedWatchRoomEntry
+	publicPartyEntry *managedWatchRoomEntry
 }
 
 type watchPartySettingsProvider interface {
@@ -174,6 +177,10 @@ func (h *WatchPartyHandler) Landing(w http.ResponseWriter, _ *http.Request) {
 }
 
 func (h *WatchPartyHandler) ResolveCode(w http.ResponseWriter, r *http.Request) {
+	if h.publicPartyEntry != nil {
+		h.serveManagedParty(w, r, http.HandlerFunc(h.resolveManagedPartyCode))
+		return
+	}
 	invite, err := h.service.ResolveExternalInvitation(r.Context(), r.FormValue("code"), true)
 	if err != nil {
 		h.renderUnavailable(w)
@@ -191,6 +198,10 @@ func (h *WatchPartyHandler) OpenCode(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *WatchPartyHandler) openInvitation(w http.ResponseWriter, r *http.Request, secret string, byCode bool) {
+	if h.publicPartyEntry != nil {
+		h.serveManagedParty(w, r, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { h.openManagedPartyInvitation(w, r, secret, byCode) }))
+		return
+	}
 	invite, err := h.service.ResolveExternalInvitation(r.Context(), secret, byCode)
 	if err != nil {
 		h.renderUnavailable(w)
@@ -220,6 +231,10 @@ func (h *WatchPartyHandler) JoinCode(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *WatchPartyHandler) joinInvitation(w http.ResponseWriter, r *http.Request, secret string, byCode bool) {
+	if h.publicPartyEntry != nil {
+		h.serveManagedParty(w, r, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { h.joinManagedPartyInvitation(w, r, secret, byCode) }))
+		return
+	}
 	invite, err := h.service.ResolveExternalInvitation(r.Context(), secret, byCode)
 	if err != nil {
 		h.renderUnavailable(w)
@@ -288,6 +303,30 @@ func (h *WatchPartyHandler) guestSession(r *http.Request, roomID string) (models
 var errGuestSessionMissing = errors.New("watch party session required")
 
 func (h *WatchPartyHandler) lookupGuestSession(r *http.Request, roomID string) (models.Session, string, error) {
+	if h.publicPartyEntry != nil {
+		cookie, e := r.Cookie(watchPartyCookieName)
+		if e != nil {
+			return models.Session{}, "", errGuestSessionMissing
+		}
+		authority := h.publicPartyEntry.authority
+		if authority == nil {
+			return models.Session{}, "", datastore.ErrWatchRoomUnavailable
+		}
+		actual, release, e := authority.AuthenticateGuestRequest(r, cookie.Value, roomID)
+		if e != nil {
+			if errors.Is(e, datastore.ErrWatchRoomForbidden) || errors.Is(e, datastore.ErrWatchRoomChanged) || errors.Is(e, datastore.ErrWatchRoomRecreate) {
+				return models.Session{}, "", errGuestSessionMissing
+			}
+			return models.Session{}, "", e
+		}
+		defer release()
+		session, ok := auth.GetSession(actual)
+		if !ok || session.Scope != models.SessionScopeWatchParty || session.ScopeResource != roomID {
+			return models.Session{}, "", errGuestSessionMissing
+		}
+		return session, watchPartyGuestID(session.Token), nil
+	}
+
 	if session, guestID, ok := verifiedGuestFromContext(r, roomID); ok {
 		return session, guestID, nil
 	}
@@ -356,6 +395,10 @@ func externalRoomView(room *models.WatchRoom, guestID string) watchPartyRoomView
 }
 
 func (h *WatchPartyHandler) RoomPage(w http.ResponseWriter, r *http.Request) {
+	if h.publicPartyEntry != nil {
+		h.serveManagedParty(w, r, http.HandlerFunc(h.managedPartyRoomPage))
+		return
+	}
 	roomID := mux.Vars(r)["roomID"]
 	_, guestID, ok := h.guestSession(r, roomID)
 	if !ok {
@@ -367,6 +410,10 @@ func (h *WatchPartyHandler) RoomPage(w http.ResponseWriter, r *http.Request) {
 		h.renderUnavailable(w)
 		return
 	}
+	h.renderPartyRoomPage(w, roomID, room)
+}
+
+func (h *WatchPartyHandler) renderPartyRoomPage(w http.ResponseWriter, roomID string, room *models.WatchRoom) {
 	content := `<p>Connected to <strong>` + html.EscapeString(room.Title) + `</strong>.</p>
 	<div id="status">Waiting for the host…</div>
 	<div id="members"></div>
@@ -431,6 +478,10 @@ func mustJSON(value string) []byte {
 }
 
 func (h *WatchPartyHandler) RoomSnapshot(w http.ResponseWriter, r *http.Request) {
+	if h.publicPartyEntry != nil {
+		h.serveManagedParty(w, r, http.HandlerFunc(h.managedPartySnapshot))
+		return
+	}
 	roomID := mux.Vars(r)["roomID"]
 	_, guestID, ok := h.requireGuestSession(w, r, roomID)
 	if !ok {
@@ -454,6 +505,10 @@ func (h *WatchPartyHandler) RoomSnapshot(w http.ResponseWriter, r *http.Request)
 }
 
 func (h *WatchPartyHandler) Ready(w http.ResponseWriter, r *http.Request) {
+	if h.publicPartyEntry != nil {
+		h.serveManagedParty(w, r, http.HandlerFunc(h.managedPartyReady))
+		return
+	}
 	roomID := mux.Vars(r)["roomID"]
 	_, guestID, ok := h.requireGuestSession(w, r, roomID)
 	if !ok {
@@ -474,6 +529,10 @@ func (h *WatchPartyHandler) Ready(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *WatchPartyHandler) PlaybackGrant(w http.ResponseWriter, r *http.Request) {
+	if h.publicPartyEntry != nil {
+		h.serveManagedParty(w, r, http.HandlerFunc(h.managedPartyGrant))
+		return
+	}
 	roomID := mux.Vars(r)["roomID"]
 	guestSession, guestID, ok := h.requireGuestSession(w, r, roomID)
 	if !ok {
@@ -517,6 +576,10 @@ func (h *WatchPartyHandler) PlaybackGrant(w http.ResponseWriter, r *http.Request
 }
 
 func (h *WatchPartyHandler) Heartbeat(w http.ResponseWriter, r *http.Request) {
+	if h.publicPartyEntry != nil {
+		h.serveManagedParty(w, r, http.HandlerFunc(h.managedPartyHeartbeat))
+		return
+	}
 	roomID := mux.Vars(r)["roomID"]
 	_, guestID, ok := h.requireGuestSession(w, r, roomID)
 	if !ok {
@@ -610,4 +673,235 @@ func (h *WatchPartyHandler) bindManagedSource(w http.ResponseWriter, r *http.Req
 	// Only the existing public ready view is delivered, never the internal
 	// publication deadline or trusted source/nonce provenance.
 	writeManagedRoomResult(w, r, h.managedRoom, http.StatusOK, map[string]bool{"ready": true}, result.PublicationUntil)
+}
+
+func (h *WatchPartyHandler) SetManagedPublicParty(authority *datastore.WatchRoomAuthority) {
+	h.publicPartyEntry = &managedWatchRoomEntry{authority: authority, basePath: h.serverBasePath}
+}
+
+type managedPartyEntryKey struct{}
+
+// This marker only avoids duplicate ingress plumbing. Every guest/media core
+// still consumes the actual original frame and current private SQL proof.
+func (h *WatchPartyHandler) serveManagedParty(w http.ResponseWriter, r *http.Request, next http.Handler) {
+	entry := h.publicPartyEntry
+	if producer, _ := r.Context().Value(managedPartyEntryKey{}).(*managedWatchRoomEntry); producer != nil && producer == entry {
+		next.ServeHTTP(w, r)
+		return
+	}
+	entry.serve(w, r, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		marked := r.WithContext(context.WithValue(r.Context(), managedPartyEntryKey{}, entry))
+		complete := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			// Body.Close may drain a real incomplete request. Keep actual deadline
+			// interruption and entry ownership armed through that physical read too.
+			defer func() {
+				if r.Body != nil {
+					_ = r.Body.Close()
+				}
+			}()
+			next.ServeHTTP(w, r)
+		})
+		roomID := mux.Vars(marked)["roomID"]
+		if roomID == "" {
+			complete.ServeHTTP(w, marked)
+			return
+		}
+		cookie, e := marked.Cookie(watchPartyCookieName)
+		if e != nil {
+			writeJSONError(w, "watch party session required", http.StatusUnauthorized)
+			if marked.Body != nil {
+				_ = marked.Body.Close()
+			}
+			return
+		}
+		actual, release, e := entry.authority.AuthenticateGuestRequest(marked, cookie.Value, roomID)
+		if e != nil {
+			writeManagedPartyGuestError(w, e)
+			if marked.Body != nil {
+				_ = marked.Body.Close()
+			}
+			return
+		}
+		defer release()
+		// Re-arm the genuine earlier guest/account expiry while preserving the SAME
+		// authenticated request. Physical read/write/Flush ends before release.
+		watchRoomIO(w, actual, complete, entry.authority)
+	}))
+}
+func (h *WatchPartyHandler) BoundedManagedPartyEntry(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if h.publicPartyEntry == nil {
+			next.ServeHTTP(w, r)
+			return
+		}
+		h.serveManagedParty(w, r, next)
+	})
+}
+func writeManagedPartyGuestError(w http.ResponseWriter, e error) {
+	if errors.Is(e, datastore.ErrWatchRoomForbidden) || errors.Is(e, datastore.ErrWatchRoomChanged) || errors.Is(e, datastore.ErrWatchRoomRecreate) {
+		writeJSONError(w, "watch party session required", http.StatusUnauthorized)
+		return
+	}
+	writeManagedRoomError(w, e)
+}
+func withManagedPartyOutput(w http.ResponseWriter, r *http.Request, entry *managedWatchRoomEntry, until time.Time, publish func()) {
+	valid := func() bool {
+		return entry != nil && entry.authority != nil && entry.authority.Context().Err() == nil && r.Context().Err() == nil && until.After(time.Now())
+	}
+	if at, ok := r.Context().Deadline(); ok && at.Before(until) {
+		until = at
+	}
+	if !valid() {
+		writeJSONError(w, "watch party unavailable", 503)
+		return
+	}
+	ctx, cancel := context.WithDeadline(r.Context(), until)
+	transport := http.NewResponseController(w)
+	_ = transport.SetWriteDeadline(until)
+	ended := make(chan struct{})
+	stop := context.AfterFunc(ctx, func() { defer close(ended); _ = transport.SetWriteDeadline(time.Now()) })
+	defer func() {
+		if !stop() {
+			<-ended
+		}
+		cancel()
+	}()
+	if ctx.Err() != nil || !valid() {
+		writeJSONError(w, "watch party unavailable", 503)
+		return
+	}
+	publish()
+	_ = transport.Flush()
+}
+func (h *WatchPartyHandler) resolveManagedPartyCode(w http.ResponseWriter, r *http.Request) {
+	r.Body = http.MaxBytesReader(w, r.Body, 32<<10)
+	if e := r.ParseForm(); e != nil {
+		writeManagedRoomError(w, datastore.ErrWatchRoomInvalid)
+		return
+	}
+	view, e := h.publicPartyEntry.authority.ResolveInvitation(r, r.Form.Get("code"), true)
+	if e != nil {
+		writeManagedRoomError(w, e)
+		return
+	}
+	withManagedPartyOutput(w, r, h.publicPartyEntry, view.PublicationUntil, func() {
+		http.Redirect(w, r, h.serverBasePath+"/watch-party/code/"+url.PathEscape(view.ShortCode), http.StatusSeeOther)
+	})
+}
+func (h *WatchPartyHandler) openManagedPartyInvitation(w http.ResponseWriter, r *http.Request, secret string, byCode bool) {
+	view, e := h.publicPartyEntry.authority.ResolveInvitation(r, secret, byCode)
+	if e != nil {
+		writeManagedRoomError(w, e)
+		return
+	}
+	action := h.serverBasePath + "/watch-party/"
+	if byCode {
+		action += "code/" + url.PathEscape(view.ShortCode)
+	} else {
+		action += url.PathEscape(secret)
+	}
+	withManagedPartyOutput(w, r, h.publicPartyEntry, view.PublicationUntil, func() {
+		h.renderPage(w, "Join "+view.Title, `<p><strong>`+html.EscapeString(view.CreatorName)+`</strong> invited you to watch <strong>`+html.EscapeString(view.Title)+`</strong>.</p><form method="post" action="`+html.EscapeString(action)+`"><label for="name">Display name</label><input id="name" name="name" maxlength="40" autocomplete="nickname" required><button type="submit">Join room</button></form>`)
+	})
+}
+func (h *WatchPartyHandler) joinManagedPartyInvitation(w http.ResponseWriter, r *http.Request, secret string, byCode bool) {
+	r.Body = http.MaxBytesReader(w, r.Body, 32<<10)
+	if e := r.ParseForm(); e != nil {
+		writeManagedRoomError(w, datastore.ErrWatchRoomInvalid)
+		return
+	}
+	previous := ""
+	if cookie, e := r.Cookie(watchPartyCookieName); e == nil {
+		previous = cookie.Value
+	}
+	result, e := h.publicPartyEntry.authority.JoinInvitation(r, secret, byCode, r.Form.Get("name"), previous)
+	if e != nil {
+		writeManagedRoomError(w, e)
+		return
+	}
+	withManagedPartyOutput(w, r, h.publicPartyEntry, result.PublicationUntil, func() {
+		h.setWatchPartyCookie(w, r, result.Session)
+		http.Redirect(w, r, h.serverBasePath+"/watch-party/room/"+url.PathEscape(result.RoomID), http.StatusSeeOther)
+	})
+}
+func (h *WatchPartyHandler) managedPartyRoomPage(w http.ResponseWriter, r *http.Request) {
+	result, e := h.publicPartyEntry.authority.ReadGuestRoom(r, mux.Vars(r)["roomID"])
+	if e != nil {
+		writeManagedPartyGuestError(w, e)
+		return
+	}
+	withManagedPartyOutput(w, r, h.publicPartyEntry, result.PublicationUntil, func() { h.renderPartyRoomPage(w, result.Room.ID, result.Room) })
+}
+func (h *WatchPartyHandler) managedPartySnapshot(w http.ResponseWriter, r *http.Request) {
+	result, e := h.publicPartyEntry.authority.ReadGuestRoom(r, mux.Vars(r)["roomID"])
+	if e != nil {
+		writeManagedPartyGuestError(w, e)
+		return
+	}
+	session, ok := auth.GetSession(r)
+	if !ok {
+		writeManagedPartyGuestError(w, datastore.ErrWatchRoomForbidden)
+		return
+	}
+	view := externalRoomView(result.Room, watchPartyGuestID(session.Token))
+	view.PlaybackReady = result.PlaybackReady
+	writeManagedRoomResult(w, r, h.publicPartyEntry, http.StatusOK, view, result.PublicationUntil)
+}
+func (h *WatchPartyHandler) managedPartyReady(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		Ready bool `json:"ready"`
+	}
+	decoder := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1024))
+	decoder.DisallowUnknownFields()
+	if e := decoder.Decode(&body); e != nil {
+		writeManagedRoomError(w, datastore.ErrWatchRoomInvalid)
+		return
+	}
+	// An additional value/trailing incomplete body must finish under the same
+	// owned read deadline before the actual ready mutation can commit.
+	var extra any
+	if e := decoder.Decode(&extra); e != io.EOF {
+		writeManagedRoomError(w, datastore.ErrWatchRoomInvalid)
+		return
+	}
+	if e := h.publicPartyEntry.authority.SetGuestReady(r, mux.Vars(r)["roomID"], body.Ready); e != nil {
+		writeManagedPartyGuestError(w, e)
+		return
+	}
+	writeManagedRoomResult(w, r, h.publicPartyEntry, http.StatusNoContent, nil, time.Time{})
+}
+func (h *WatchPartyHandler) managedPartyGrant(w http.ResponseWriter, r *http.Request) {
+	if _, e := io.ReadAll(http.MaxBytesReader(w, r.Body, 1024)); e != nil {
+		writeManagedRoomError(w, datastore.ErrWatchRoomInvalid)
+		return
+	}
+	result, e := h.publicPartyEntry.authority.GrantPartyPlayback(r, mux.Vars(r)["roomID"])
+	if e != nil {
+		writeManagedPartyGuestError(w, e)
+		return
+	}
+	values := url.Values{}
+	for key, value := range result.Params {
+		if watchPartySourceAllowedParams[key] || key == "profileId" {
+			values.Set(key, value)
+		}
+	}
+	values.Set("token", result.Session.Token)
+	values.Set("shareMode", "1")
+	values.Set("sharedSource", "1")
+	values.Set("watchPartyRoomId", result.RoomID)
+	values.Set("startOffset", strconv.FormatFloat(result.Position, 'f', 2, 64))
+	writeManagedRoomResult(w, r, h.publicPartyEntry, http.StatusOK, map[string]string{"url": h.serverBasePath + "/watch/playback.html?" + values.Encode()}, result.PublicationUntil)
+}
+func (h *WatchPartyHandler) managedPartyHeartbeat(w http.ResponseWriter, r *http.Request) {
+	if _, e := io.ReadAll(http.MaxBytesReader(w, r.Body, 1024)); e != nil {
+		writeManagedRoomError(w, datastore.ErrWatchRoomInvalid)
+		return
+	}
+	buffering, _ := strconv.ParseBool(r.URL.Query().Get("buffering"))
+	if e := h.publicPartyEntry.authority.HeartbeatGuest(r, mux.Vars(r)["roomID"], buffering); e != nil {
+		writeManagedPartyGuestError(w, e)
+		return
+	}
+	writeManagedRoomResult(w, r, h.publicPartyEntry, http.StatusNoContent, nil, time.Time{})
 }

@@ -1208,3 +1208,42 @@ func ConfigureManagedWatchRoomAuthority(startup *settingsbootstrap.Startup, stor
 	party.SetManagedWatchRoomAuthority(authority, basePath)
 	return nil
 }
+
+// ConfigureManagedWatchPartyPlayback is the concrete Main composition for both
+// public guest admission and the actual restricted media consumer. A missing
+// managed dependency selects denial instead of an isolated legacy constructor.
+func ConfigureManagedWatchPartyPlayback(startup *settingsbootstrap.Startup, store *datastore.DataStore, pins *profileunlock.PGProfilePins, video *handlers.VideoHandler, party *handlers.WatchPartyHandler) error {
+	if store == nil {
+		return nil
+	}
+	deny := func() {
+		if pins != nil {
+			_ = pins.SetManagedWatchPartyPlayback(nil)
+		}
+		if video != nil {
+			_ = video.SetManagedWatchPartyPlayback(nil, pins)
+		}
+		if party != nil {
+			party.SetManagedPublicParty(nil)
+		}
+	}
+	if startup == nil || pins == nil || video == nil || party == nil {
+		deny()
+		return errors.New("managed watch party dependencies unavailable")
+	}
+	runtime, e := startup.NewWatchRoomAuthority(store)
+	if e != nil {
+		deny()
+		return e
+	}
+	if e = pins.SetManagedWatchPartyPlayback(runtime); e != nil {
+		deny()
+		return e
+	}
+	if e = video.SetManagedWatchPartyPlayback(runtime, pins); e != nil {
+		deny()
+		return e
+	}
+	party.SetManagedPublicParty(runtime)
+	return nil
+}

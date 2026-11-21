@@ -978,6 +978,12 @@ func (o *shareHLSOwned) openInput(ctx context.Context, method, rangeHeader strin
 	if o.checkSource(ctx) != nil {
 		return nil, errVODOwner
 	}
+	bounded, finish, e := o.guard.beginSourceOperation(ctx)
+	if e != nil {
+		return nil, e
+	}
+	defer finish()
+	ctx = bounded
 	var response *streaming.Response
 	var err error
 	providerBacked := false
