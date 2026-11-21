@@ -8,6 +8,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
@@ -83,6 +84,21 @@ func (mrf *MetadataRemoteFile) getGlobalSalt() string {
 
 // OpenFile opens a virtual file backed by metadata
 func (mrf *MetadataRemoteFile) OpenFile(ctx context.Context, name string, r utils.PathWithArgs) (bool, afero.File, error) {
+	if ctx == nil || ctx.Err() != nil {
+		return false, nil, ErrRequestSourceRetired
+	}
+	ctx, cancel := context.WithDeadline(ctx, time.Now().Add(24*time.Hour))
+	published := false
+	defer func() {
+		if !published {
+			cancel()
+		}
+	}()
+	request, _ := ctx.Value(requestSourceKey{}).(*RequestSource)
+	if request != nil && request.self != request {
+		return false, nil, ErrRequestSourceRetired
+	}
+
 	// Forbid COPY operations - nzbfilesystem is read-only
 	if r.IsCopy() {
 		return false, nil, os.ErrPermission
@@ -94,8 +110,20 @@ func (mrf *MetadataRemoteFile) OpenFile(ctx context.Context, name string, r util
 	// Extract showCorrupted flag from args
 	showCorrupted := r.ShowCorrupted()
 
-	// Check if this is a directory first
-	if mrf.metadataService.DirectoryExists(normalizedName) {
+	var requestFileMeta *metapb.FileMetadata
+	requestDirectory := false
+	if request != nil {
+		var err error
+		requestDirectory, requestFileMeta, err = request.pathEntry(ctx, normalizedName)
+		if err != nil {
+			return false, nil, err
+		}
+		if !requestDirectory && requestFileMeta == nil {
+			return false, nil, nil
+		}
+	}
+	// Check request entries through the confined bounded view; legacy probes stay separate.
+	if requestDirectory || request == nil && mrf.metadataService.DirectoryExists(normalizedName) {
 		// Create a directory handle
 		virtualDir := &MetadataVirtualDirectory{
 			name:            name,
@@ -103,11 +131,19 @@ func (mrf *MetadataRemoteFile) OpenFile(ctx context.Context, name string, r util
 			metadataService: mrf.metadataService,
 			showCorrupted:   showCorrupted,
 		}
+		if ctx.Err() != nil {
+			return false, nil, ErrRequestSourceRetired
+		}
+		attachSourceLifetime(ctx, cancel, virtualDir)
+		published = true
 		return true, virtualDir, nil
 	}
 
 	// Check if this path exists as a file in our metadata
-	exists := mrf.metadataService.FileExists(normalizedName)
+	exists := requestFileMeta != nil
+	if request == nil {
+		exists = mrf.metadataService.FileExists(normalizedName)
+	}
 	if !exists {
 		// Check if this could be a valid empty directory
 		if mrf.isValidEmptyDirectory(normalizedName) {
@@ -118,6 +154,11 @@ func (mrf *MetadataRemoteFile) OpenFile(ctx context.Context, name string, r util
 				metadataService: mrf.metadataService,
 				showCorrupted:   showCorrupted,
 			}
+			if ctx.Err() != nil {
+				return false, nil, ErrRequestSourceRetired
+			}
+			attachSourceLifetime(ctx, cancel, virtualDir)
+			published = true
 			return true, virtualDir, nil
 		}
 		// Neither file nor directory found
@@ -125,7 +166,13 @@ func (mrf *MetadataRemoteFile) OpenFile(ctx context.Context, name string, r util
 	}
 
 	// Get file metadata using simplified schema
-	fileMeta, err := mrf.metadataService.ReadFileMetadata(normalizedName)
+	var fileMeta *metapb.FileMetadata
+	var err error
+	if request != nil {
+		fileMeta = requestFileMeta
+	} else {
+		fileMeta, err = mrf.metadataService.ReadFileMetadata(normalizedName)
+	}
 	if err != nil {
 		return false, nil, fmt.Errorf("failed to read file metadata: %w", err)
 	}
@@ -155,6 +202,11 @@ func (mrf *MetadataRemoteFile) OpenFile(ctx context.Context, name string, r util
 		globalSalt:       mrf.getGlobalSalt(),
 	}
 
+	if ctx.Err() != nil {
+		return false, nil, ErrRequestSourceRetired
+	}
+	attachSourceLifetime(ctx, cancel, virtualFile)
+	published = true
 	return true, virtualFile, nil
 }
 
@@ -333,6 +385,11 @@ type MetadataVirtualDirectory struct {
 	normalizedPath  string
 	metadataService *metadata.MetadataService
 	showCorrupted   bool
+	lifetime        *sourceLifetime
+	listingMu       sync.Mutex
+	listing         []fs.FileInfo
+	listingReady    bool
+	listingOffset   int
 }
 
 // Read implements afero.File.Read (not supported for directories)
@@ -352,6 +409,9 @@ func (mvd *MetadataVirtualDirectory) Seek(offset int64, whence int) (int64, erro
 
 // Close implements afero.File.Close
 func (mvd *MetadataVirtualDirectory) Close() error {
+	if mvd.lifetime != nil {
+		mvd.lifetime.signal()
+	}
 	return nil
 }
 
@@ -362,6 +422,15 @@ func (mvd *MetadataVirtualDirectory) Name() string {
 
 // Readdir implements afero.File.Readdir
 func (mvd *MetadataVirtualDirectory) Readdir(count int) ([]fs.FileInfo, error) {
+	if mvd.lifetime != nil {
+		if err := mvd.lifetime.enter(); err != nil {
+			return nil, err
+		}
+		defer mvd.lifetime.leave()
+		if request, _ := mvd.lifetime.ctx.Value(requestSourceKey{}).(*RequestSource); request != nil && request.self == request {
+			return mvd.readRequestDirectory(request, count)
+		}
+	}
 	// Create metadata reader for directory operations
 	reader := metadata.NewMetadataReader(mvd.metadataService)
 
@@ -434,6 +503,12 @@ func (mvd *MetadataVirtualDirectory) Readdirnames(n int) ([]string, error) {
 
 // Stat implements afero.File.Stat
 func (mvd *MetadataVirtualDirectory) Stat() (fs.FileInfo, error) {
+	if mvd.lifetime != nil {
+		if err := mvd.lifetime.enter(); err != nil {
+			return nil, err
+		}
+		defer mvd.lifetime.leave()
+	}
 	info := &MetadataFileInfo{
 		name:    filepath.Base(mvd.normalizedPath),
 		size:    0,
@@ -471,6 +546,7 @@ func (mvd *MetadataVirtualDirectory) Truncate(size int64) error {
 
 // MetadataVirtualFile implements afero.File for metadata-backed virtual files
 type MetadataVirtualFile struct {
+	lifetime         *sourceLifetime
 	name             string
 	fileMeta         *metapb.FileMetadata
 	metadataService  *metadata.MetadataService
@@ -498,6 +574,18 @@ type MetadataVirtualFile struct {
 
 // Read implements afero.File.Read
 func (mvf *MetadataVirtualFile) Read(p []byte) (n int, err error) {
+	if mvf.lifetime != nil {
+		if err := mvf.lifetime.enter(); err != nil {
+			return 0, err
+		}
+		defer mvf.lifetime.leave()
+		defer func() {
+			if mvf.ctx.Err() != nil {
+				n = 0
+				err = ErrRequestSourceRetired
+			}
+		}()
+	}
 	if len(p) == 0 {
 		return 0, nil
 	}
@@ -576,6 +664,12 @@ func (mvf *MetadataVirtualFile) ReadAt(p []byte, off int64) (n int, err error) {
 
 // Seek implements afero.File.Seek
 func (mvf *MetadataVirtualFile) Seek(offset int64, whence int) (int64, error) {
+	if mvf.lifetime != nil {
+		if err := mvf.lifetime.enter(); err != nil {
+			return 0, err
+		}
+		defer mvf.lifetime.leave()
+	}
 	mvf.mu.Lock()
 	defer mvf.mu.Unlock()
 
@@ -613,10 +707,16 @@ func (mvf *MetadataVirtualFile) Seek(offset int64, whence int) (int64, error) {
 
 // Close implements afero.File.Close
 func (mvf *MetadataVirtualFile) Close() error {
+	if mvf.lifetime != nil {
+		mvf.lifetime.signal()
+	}
 	mvf.mu.Lock()
 	defer mvf.mu.Unlock()
 	if mvf.reader != nil {
 		err := mvf.reader.Close()
+		if err != nil && mvf.lifetime != nil {
+			mvf.lifetime.recordError(err)
+		}
 		mvf.reader = nil
 		mvf.readerInitialized = false
 		return err
@@ -652,6 +752,12 @@ func (mvf *MetadataVirtualFile) Readdirnames(n int) ([]string, error) {
 
 // Stat implements afero.File.Stat
 func (mvf *MetadataVirtualFile) Stat() (fs.FileInfo, error) {
+	if mvf.lifetime != nil {
+		if err := mvf.lifetime.enter(); err != nil {
+			return nil, err
+		}
+		defer mvf.lifetime.leave()
+	}
 	info := &MetadataFileInfo{
 		name:    filepath.Base(mvf.name),
 		size:    mvf.fileMeta.FileSize,
@@ -860,7 +966,16 @@ func (mvf *MetadataVirtualFile) createUsenetReader(ctx context.Context, start, e
 
 	loader := newMetadataSegmentLoader(mvf.fileMeta.SegmentData)
 	rg := usenet.GetSegmentsInRangeWithLimit(start, end, loader, maxSegments)
-	return usenet.NewUsenetReaderWithActivity(ctx, cp, rg, mvf.maxWorkers, "Playback: "+mvf.Name(), mvf.maxCacheSizeMB)
+	reader, err := usenet.NewUsenetReaderWithActivity(ctx, cp, rg, mvf.maxWorkers, "Playback: "+mvf.Name(), mvf.maxCacheSizeMB)
+	if err != nil {
+		return nil, err
+	}
+	if mvf.lifetime != nil {
+		if err = mvf.lifetime.register(reader); err != nil {
+			return nil, err
+		}
+	}
+	return reader, nil
 }
 
 // wrapWithEncryption wraps a usenet reader with encryption using metadata
@@ -930,16 +1045,27 @@ func (mvf *MetadataVirtualFile) updateFileHealthOnError(articleErr *usenet.Artic
 		dbStatus = database.HealthStatusCorrupted
 	}
 
-	// Update metadata status (non-blocking)
-	go func() {
-		if err := mvf.metadataService.UpdateFileStatus(mvf.name, metadataStatus); err != nil {
+	// Register health work before publishing each goroutine.
+	mvf.runHealthUpdate(func() {
+		if mvf.metadataService == nil {
+			return
+		}
+		var err error
+		if mvf.lifetime != nil && mvf.lifetime.request != nil {
+			err = mvf.lifetime.request.updateFileStatus(mvf.name, metadataStatus)
+		} else {
+			err = mvf.metadataService.UpdateFileStatus(mvf.name, metadataStatus)
+		}
+		if err != nil {
 			// Log error but don't fail the read operation
 			fmt.Printf("Warning: failed to update metadata status for %s: %v\n", mvf.name, err)
 		}
-	}()
+	})
 
-	// Update database health tracking (non-blocking)
-	go func() {
+	mvf.runHealthUpdate(func() {
+		if mvf.healthRepository == nil {
+			return
+		}
 		errorMsg := articleErr.Error()
 		sourceNzbPath := &mvf.fileMeta.SourceNzbPath
 		if *sourceNzbPath == "" {
@@ -959,7 +1085,7 @@ func (mvf *MetadataVirtualFile) updateFileHealthOnError(articleErr *usenet.Artic
 		); err != nil {
 			fmt.Printf("Warning: failed to update file health for %s: %v\n", mvf.name, err)
 		}
-	}()
+	})
 }
 
 // isValidEmptyDirectory checks if a path could represent a valid empty directory
@@ -983,4 +1109,73 @@ func (mrf *MetadataRemoteFile) isValidEmptyDirectory(normalizedPath string) bool
 
 	// Recursively check if parent could be a valid empty directory
 	return mrf.isValidEmptyDirectory(parentDir)
+}
+
+func (mvf *MetadataVirtualFile) runHealthUpdate(work func()) {
+	if mvf.lifetime == nil {
+		go work()
+		return
+	}
+	if mvf.lifetime.enter() != nil {
+		return
+	}
+	go func() { defer mvf.lifetime.leave(); work() }()
+}
+
+func (mvd *MetadataVirtualDirectory) readRequestDirectory(request *RequestSource, count int) ([]fs.FileInfo, error) {
+	mvd.listingMu.Lock()
+	defer mvd.listingMu.Unlock()
+	if !mvd.listingReady {
+		entries, err := mvd.metadataService.ListRequestDirectory(mvd.lifetime.ctx, mvd.normalizedPath, request.budgets.Entries)
+		if err != nil {
+			return nil, err
+		}
+		if err = request.reserveEntries(len(entries)); err != nil {
+			return nil, err
+		}
+		infos := make([]fs.FileInfo, 0, len(entries))
+		for _, entry := range entries {
+			if err = mvd.lifetime.ctx.Err(); err != nil {
+				return nil, err
+			}
+			if entry.IsDir() {
+				info, e := entry.Info()
+				if e != nil {
+					return nil, e
+				}
+				infos = append(infos, info)
+				continue
+			}
+			if !strings.HasSuffix(entry.Name(), ".meta") {
+				continue
+			}
+			name := strings.TrimSuffix(entry.Name(), ".meta")
+			value, e := mvd.metadataService.ReadRequestMetadata(mvd.lifetime.ctx, filepath.Join(mvd.normalizedPath, name), request.budgets.MetadataBytes)
+			if e != nil {
+				return nil, e
+			}
+			if value == nil {
+				return nil, os.ErrNotExist
+			}
+			if !mvd.showCorrupted && value.Status == metapb.FileStatus_FILE_STATUS_CORRUPTED {
+				continue
+			}
+			infos = append(infos, &MetadataFileInfo{name: name, size: value.FileSize, mode: 0644, modTime: time.Unix(value.ModifiedAt, 0)})
+		}
+		mvd.listing = infos
+		mvd.listingReady = true
+	}
+	if mvd.listingOffset >= len(mvd.listing) {
+		if count > 0 {
+			return nil, io.EOF
+		}
+		return []fs.FileInfo{}, nil
+	}
+	end := len(mvd.listing)
+	if count > 0 && count < end-mvd.listingOffset {
+		end = mvd.listingOffset + count
+	}
+	values := append([]fs.FileInfo(nil), mvd.listing[mvd.listingOffset:end]...)
+	mvd.listingOffset = end
+	return values, nil
 }

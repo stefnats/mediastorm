@@ -6,8 +6,8 @@ import (
 	"os"
 	"time"
 
-	"novastream/internal/nzb/utils"
 	"github.com/spf13/afero"
+	"novastream/internal/nzb/utils"
 )
 
 // NzbFilesystem implements afero.Fs interface directly using the metadata service
@@ -182,4 +182,52 @@ func (nfs *NzbFilesystem) Chtimes(name string, atime, mtime time.Time) error {
 // GetRemoteFile returns the underlying MetadataRemoteFile for configuration updates
 func (nfs *NzbFilesystem) GetRemoteFile() *MetadataRemoteFile {
 	return nfs.remoteFile
+}
+
+// OpenFileWithContext uses a bounded source view and preserves the caller cancellation.
+// Closing the returned file also joins the temporary view's actual pending work.
+func (nfs *NzbFilesystem) OpenFileWithContext(ctx context.Context, name string, flag int, perm os.FileMode) (afero.File, error) {
+	source, err := nfs.NewRequestSource(ctx, RequestSourceBudgets{})
+	if err != nil {
+		return nil, err
+	}
+	file, err := source.OpenFile(name, flag, perm)
+	if err != nil {
+		_ = source.CloseAndJoin()
+		return nil, err
+	}
+	file.(*requestFile).ownsSource = true
+	return file, nil
+}
+func (nfs *NzbFilesystem) StatWithContext(ctx context.Context, name string) (fs.FileInfo, error) {
+	file, err := nfs.OpenFileWithContext(ctx, name, os.O_RDONLY, 0)
+	if err != nil {
+		return nil, err
+	}
+	defer file.Close()
+	return file.Stat()
+}
+func (nfs *NzbFilesystem) RemoveAllWithContext(ctx context.Context, name string) error {
+	source, err := nfs.NewRequestSource(ctx, RequestSourceBudgets{})
+	if err != nil {
+		return err
+	}
+	defer source.CloseAndJoin()
+	if err = source.RemoveAll(name); err != nil {
+		return err
+	}
+	if nfs.remoteFile.healthRepository != nil {
+		if err = nfs.remoteFile.healthRepository.DeleteHealthRecord(name); err != nil {
+			return err
+		}
+	}
+	return ctx.Err()
+}
+func (nfs *NzbFilesystem) RenameWithContext(ctx context.Context, oldName, newName string) error {
+	source, err := nfs.NewRequestSource(ctx, RequestSourceBudgets{})
+	if err != nil {
+		return err
+	}
+	defer source.CloseAndJoin()
+	return source.Rename(oldName, newName)
 }

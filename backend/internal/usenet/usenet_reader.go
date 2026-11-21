@@ -89,7 +89,41 @@ func (e *ArticleNotFoundError) Unwrap() error {
 	return e.UnderlyingErr
 }
 
+// ErrReaderCleanupUnsupported never treats an arbitrary Close method as actual worker completion.
+var ErrReaderCleanupUnsupported = errors.New("actual Usenet reader cleanup unavailable")
+
+// ReaderCleanupDone is DATA only. Its original channel closes after actual cleanup, never on cancellation.
+func ReaderCleanupDone(reader io.ReadCloser) (<-chan struct{}, error) {
+	value, ok := reader.(*usenetReader)
+	if !ok || value == nil || value.self != value || value.cleanupDone == nil {
+		return nil, ErrReaderCleanupUnsupported
+	}
+	return value.cleanupDone, nil
+}
+
+// JoinReaderCleanup joins only the genuine actor returned by this package's constructor.
+func JoinReaderCleanup(reader io.ReadCloser) error {
+	done, err := ReaderCleanupDone(reader)
+	if err != nil {
+		return err
+	}
+	value := reader.(*usenetReader)
+	_ = value.Close()
+	<-done
+	return value.cleanupErr
+}
+
 type usenetReader struct {
+	self        *usenetReader
+	ctx         context.Context
+	readMu      sync.Mutex
+	retiring    atomic.Bool
+	cleanupDone chan struct{}
+	cleanupErr  error
+	setupDone   chan struct{}
+	stopContext func() bool
+	contextDone chan struct{}
+
 	id                 int64
 	log                *slog.Logger
 	wg                 sync.WaitGroup
@@ -128,6 +162,14 @@ func NewUsenetReaderWithActivity(
 	activityLabel string,
 	maxCacheSizeMB ...int, // Optional parameter for compatibility
 ) (io.ReadCloser, error) {
+	if ctx == nil {
+		_ = rg.Clear()
+		return nil, context.Canceled
+	}
+	if err := ctx.Err(); err != nil {
+		_ = rg.Clear()
+		return nil, err
+	}
 	log := slog.Default()
 	readerID := atomic.AddInt64(&readerIDCounter, 1)
 
@@ -180,6 +222,8 @@ func NewUsenetReaderWithActivity(
 	}
 
 	ur := &usenetReader{
+		ctx:         ctx,
+		cleanupDone: make(chan struct{}), setupDone: make(chan struct{}), contextDone: make(chan struct{}),
 		id:                 readerID,
 		log:                log,
 		cancel:             cancel,
@@ -190,86 +234,64 @@ func NewUsenetReaderWithActivity(
 		windowSize:         windowSize,
 	}
 
-	// Will start go routine pool with max download workers that will fill the cache
-
+	ur.self = ur
 	ur.wg.Add(1)
-	go func() {
-		defer ur.wg.Done()
-		ur.downloadManager(ctx, cp)
-	}()
+	go func() { defer ur.wg.Done(); ur.downloadManager(ctx, cp) }()
+	// All manager work is registered before a possibly-immediate cancellation callback.
+	ur.stopContext = context.AfterFunc(ctx, func() { defer close(ur.contextDone); _ = ur.Close() })
+	close(ur.setupDone)
 
 	return ur, nil
 }
 
 func (b *usenetReader) Close() error {
 	b.closeOnce.Do(func() {
-		// Decrement global counters
-		var totalSegSize int64
-		for _, seg := range b.rg.segments {
-			totalSegSize += seg.SegmentSize
+		b.retiring.Store(true)
+		if b.cancel != nil {
+			b.cancel()
 		}
-		readers := atomic.AddInt64(&activeReaders, -1)
-		segs := atomic.AddInt64(&activeSegments, -int64(len(b.rg.segments)))
-		estMem := atomic.AddInt64(&estimatedMemory, -totalSegSize)
-		unregisterActivity(b.id)
-
-		b.mu.Lock()
-		totalBytesRead := b.totalBytesRead
-		readStartedAt := b.readStartedAt
-		b.mu.Unlock()
-		var avgDeliveryMBps float64
-		if !readStartedAt.IsZero() {
-			avgDeliveryMBps = mbps(totalBytesRead, time.Since(readStartedAt))
-		}
-
-		var m runtime.MemStats
-		runtime.ReadMemStats(&m)
-
-		if debugReaderLogs {
-			b.log.Info("usenet.reader.closing",
-				"reader_id", b.id,
-				"total_bytes_read", totalBytesRead,
-				"avg_delivery_mbps", avgDeliveryMBps,
-				"segments_count", len(b.rg.segments),
-				"freed_est_mb", totalSegSize/1024/1024,
-				"global_active_readers", readers,
-				"global_active_segments", segs,
-				"global_est_memory_mb", estMem/1024/1024,
-				"heap_alloc_mb", m.HeapAlloc/1024/1024,
-			)
-		}
-
-		b.cancel()
-		close(b.init)
-
-		go func() {
-			// Use a timeout to prevent cleanup from blocking indefinitely
-			// if download workers are stuck on network I/O
-			done := make(chan struct{})
-			go func() {
-				b.wg.Wait()
-				close(done)
-			}()
-
-			select {
-			case <-done:
-				// Normal cleanup path
-			case <-time.After(30 * time.Second):
-				b.log.Warn("usenet.reader.cleanup_timeout",
-					"reader_id", b.id,
-					"total_bytes_read", b.totalBytesRead,
-					"segments_count", len(b.rg.segments),
-				)
-				// Continue with cleanup anyway to free memory
+		// Wake ordered readers even when cancellation stopped scheduling an unstarted segment.
+		// Keep actual buffers allocated until all real BODY workers and Reads have ended.
+		for _, segment := range b.rg.segments {
+			if writer := segment.Writer(); writer != nil {
+				_ = writer.CloseWithError(context.Canceled)
 			}
-
-			_ = b.rg.Clear()
+		}
+		go func() {
+			actualWorkersDone := make(chan struct{})
+			go func() { b.wg.Wait(); close(actualWorkersDone) }()
+			warning := time.NewTimer(30 * time.Second)
+			select {
+			case <-actualWorkersDone:
+			case <-warning.C:
+				if b.log != nil {
+					b.log.Warn("usenet.reader.cleanup_still_pending", "reader_id", b.id)
+				}
+				<-actualWorkersDone // Diagnostic timeout is never actual completion.
+			}
+			warning.Stop()
+			b.readMu.Lock()
+			var size int64
+			for _, segment := range b.rg.segments {
+				size += segment.SegmentSize
+			}
+			count := len(b.rg.segments)
+			b.cleanupErr = b.rg.Clear()
 			b.rg = segmentRange{}
-
-			b.log.Debug("usenet.reader.cleanup_complete")
+			b.readMu.Unlock()
+			if b.self == b {
+				<-b.setupDone
+				if b.stopContext != nil && !b.stopContext() {
+					<-b.contextDone
+				}
+				atomic.AddInt64(&activeReaders, -1)
+				atomic.AddInt64(&activeSegments, -int64(count))
+				atomic.AddInt64(&estimatedMemory, -size)
+				unregisterActivity(b.id)
+				close(b.cleanupDone)
+			}
 		}()
 	})
-
 	return nil
 }
 
@@ -277,6 +299,12 @@ func (b *usenetReader) Close() error {
 // It returns the number of bytes read and an error if any.
 // Returns io.EOF error if pointer is at the end of the Buffer.
 func (b *usenetReader) Read(p []byte) (int, error) {
+	b.readMu.Lock()
+	defer b.readMu.Unlock()
+	if b.retiring.Load() {
+		return 0, context.Canceled
+	}
+
 	if len(p) == 0 {
 		return 0, nil
 	}
@@ -296,9 +324,19 @@ func (b *usenetReader) Read(p []byte) (int, error) {
 				"max_download_workers", b.maxDownloadWorkers,
 			)
 		}
-		b.init <- struct{}{}
+		if b.ctx == nil {
+			b.init <- struct{}{}
+		} else {
+			select {
+			case b.init <- struct{}{}:
+			case <-b.ctx.Done():
+			}
+		}
 	})
 
+	if b.retiring.Load() {
+		return 0, context.Canceled
+	}
 	s, err := b.rg.Get()
 	if err != nil {
 		// Check if this is an article not found error
@@ -530,7 +568,12 @@ func (b *usenetReader) downloadManager(
 
 		progressDone := make(chan struct{})
 		if debugReaderLogs {
-			go b.logDownloadProgress(ctx, cp, progressDone, &activeDownloads, &completedDownloads, &failedDownloads, &downloadedBytes)
+			progressExited := make(chan struct{})
+			go func() {
+				defer close(progressExited)
+				b.logDownloadProgress(ctx, cp, progressDone, &activeDownloads, &completedDownloads, &failedDownloads, &downloadedBytes)
+			}()
+			defer func() { close(progressDone); <-progressExited }()
 		}
 
 		// Download all segments in the range (now limited at segment range level)
@@ -623,9 +666,6 @@ func (b *usenetReader) downloadManager(
 		}
 
 		if err := pool.Wait(); err != nil {
-			if debugReaderLogs {
-				close(progressDone)
-			}
 			b.log.DebugContext(ctx, "Error downloading segments:",
 				"reader_id", b.id,
 				"error", err,
@@ -634,7 +674,6 @@ func (b *usenetReader) downloadManager(
 			return
 		}
 		if debugReaderLogs {
-			close(progressDone)
 			b.log.InfoContext(ctx, "usenet.download_manager.complete",
 				"reader_id", b.id,
 				"total_segments", len(b.rg.segments),
