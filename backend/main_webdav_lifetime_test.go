@@ -218,6 +218,9 @@ func TestManagedWebDAVRealTransport(t *testing.T) {
 			server.Start()
 			// Explicit cleanup is registered before any request producer or held acquire.
 			var connection net.Conn
+			var wireResponse *http.Response
+			var wireReader *bufio.Reader
+			var wirePrefix []byte
 			var heldRelease func()
 			var requestStarted bool
 			t.Cleanup(func() {
@@ -230,6 +233,9 @@ func TestManagedWebDAVRealTransport(t *testing.T) {
 				f.runtime.Close()
 				if requestStarted {
 					mainWebDAVWait(t, handlerDone, "outer original HTTP handler")
+				}
+				if wireResponse != nil && wireResponse.Body != nil {
+					_ = wireResponse.Body.Close()
 				}
 				server.Close()
 			})
@@ -262,6 +268,20 @@ func TestManagedWebDAVRealTransport(t *testing.T) {
 				t.Fatal(e)
 			}
 			actualConn := <-listener.connections
+			if name == "no-second-response-after-write" {
+				wireReader = bufio.NewReader(connection)
+				wireResponse, e = http.ReadResponse(wireReader, &http.Request{Method: "PROPFIND"})
+				if e != nil {
+					t.Fatal("actual first response headers", e)
+				}
+				if wireResponse.StatusCode != 207 || wireResponse.ContentLength < 256 || !strings.Contains(wireResponse.Header.Get("Content-Type"), "xml") {
+					t.Fatal("mid-write canary requires actual207 XML already started", wireResponse.StatusCode, wireResponse.ContentLength)
+				}
+				wirePrefix = make([]byte, 256)
+				if _, e = io.ReadFull(wireResponse.Body, wirePrefix); e != nil || !bytes.Contains(wirePrefix, []byte("multistatus")) {
+					t.Fatal("actual first multistatus body not observed", e)
+				}
+			}
 			if output {
 				deadline := time.Now().Add(10 * time.Second)
 				stable := time.Time{}
@@ -334,10 +354,16 @@ func TestManagedWebDAVRealTransport(t *testing.T) {
 				}
 			}
 			if name == "no-second-response-after-write" {
-				raw, _ := io.ReadAll(bufio.NewReader(connection))
-				if bytes.Count(raw, []byte("HTTP/1.1")) > 1 || bytes.Contains(raw, []byte("HTTP/1.1 503")) {
-					t.Fatal("midresponse failure emitted a second status")
+				tail, _ := io.ReadAll(wireResponse.Body)
+				_ = wireResponse.Body.Close()
+				extra, _ := io.ReadAll(wireReader)
+				body := append(append(wirePrefix, tail...), extra...)
+				// DAV propstat XML legitimately contains HTTP/1.1 text. Only a new wire
+				// status line or bytes following the declared response are a second response.
+				if bytes.Contains(body, []byte("\r\nHTTP/1.1 ")) || bytes.HasPrefix(body, []byte("HTTP/1.1 ")) || len(extra) != 0 {
+					t.Fatal("midresponse failure emitted another HTTP status line")
 				}
+
 			}
 			f.runtime.Close()
 			preflightBody := &mainWebDAVPreflightBody{reader: strings.NewReader("ignored")}
