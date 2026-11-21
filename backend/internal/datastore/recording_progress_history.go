@@ -2,6 +2,7 @@ package datastore
 
 import (
 	"bytes"
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -187,12 +188,20 @@ func (g *settingsProgressTx) historySchema() (string, error) {
 	if err := g.historyTransaction(); err != nil {
 		return "", err
 	}
-	c, err := readRecordingPlaybackCatalog(g.ctx, g.tx)
+	return readRecordingHistorySchema(g.ctx, g.tx)
+}
+
+// Catalog DATA only; the caller owns the genuine transaction and its lifetime.
+func readRecordingHistorySchema(ctx context.Context, tx pgx.Tx) (string, error) {
+	if ctx == nil || ctx.Err() != nil || tx == nil {
+		return "", errRecordingHistoryTransaction
+	}
+	c, err := readRecordingPlaybackCatalog(ctx, tx)
 	if err != nil {
 		return "", err
 	}
 	var valid bool
-	err = g.tx.QueryRow(g.ctx, `SELECT EXISTS(
+	err = tx.QueryRow(ctx, `SELECT EXISTS(
  SELECT 1 FROM pg_catalog.pg_class h JOIN pg_catalog.pg_namespace n ON n.oid=h.relnamespace
  WHERE n.nspname=$1 AND h.relname='recording_progress_history' AND h.relkind='r' AND h.relpersistence='p' AND NOT h.relispartition
  AND (SELECT count(*) FROM pg_catalog.pg_attribute a WHERE a.attrelid=h.oid AND a.attnum>0 AND NOT a.attisdropped)=13

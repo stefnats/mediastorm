@@ -944,6 +944,7 @@ type databaseExport struct {
 	LibraryAccessPolicies      map[string]models.LibraryAccessPolicy         `json:"libraryAccessPolicies,omitempty"`
 	Recordings                 []models.Recording                            `json:"recordings,omitempty"`
 	RecordingPlaybackPositions datastore.RecordingPlaybackPositionBackupRows `json:"recordingPlaybackPositions"`
+	RecordingProgressHistory   datastore.RecordingProgressHistoryBackupRows  `json:"recordingProgressHistory"`
 	NumbersStationProgress     []models.NumbersStationProgress               `json:"numbersStationProgress"`
 }
 
@@ -984,6 +985,7 @@ var databaseExportSections = []string{
 	"libraryAccessPolicies",
 	"recordings",
 	"recordingPlaybackPositions",
+	"recordingProgressHistory",
 	"numbersStationProgress",
 }
 
@@ -999,6 +1001,20 @@ func (s *Service) exportDatabaseBytes() ([]byte, error) {
 		return nil, fmt.Errorf("export recording playback positions: %w", err)
 	}
 	export.RecordingPlaybackPositions = positions
+	history, err := s.store.ExportRecordingProgressHistory(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("export recording progress history: %w", err)
+	}
+	parents := make(map[string]bool, len(positions))
+	for _, row := range positions {
+		parents[row.RecordingID] = true
+	}
+	for _, row := range history {
+		if !parents[row.RecordingID] {
+			return nil, datastore.ErrRecordingHistoryBackup
+		}
+	}
+	export.RecordingProgressHistory = history
 
 	accounts, err := s.store.Accounts().List(ctx)
 	if err != nil {
@@ -1248,6 +1264,10 @@ func (s *Service) exportDatabaseBytes() ([]byte, error) {
 	if err != nil || len(encodedPositions) > datastore.RecordingPlaybackPositionBackupByteLimit {
 		return nil, fmt.Errorf("export recording playback positions: %w", datastore.ErrRecordingPositionBackup)
 	}
+	encodedHistory, err := json.MarshalIndent(export.RecordingProgressHistory, "  ", "  ")
+	if err != nil || len(encodedHistory) > datastore.RecordingProgressHistoryBackupByteLimit {
+		return nil, fmt.Errorf("export recording progress history: %w", datastore.ErrRecordingHistoryBackup)
+	}
 	return json.MarshalIndent(export, "", "  ")
 }
 
@@ -1261,6 +1281,9 @@ func (s *Service) importDatabaseBytes(data []byte) error {
 	return s.importDatabaseBytesReserved(data, reservation)
 }
 func (s *Service) importDatabaseBytesReserved(data []byte, reservation *config.ManagedWriteReservation) error {
+	if err := preflightRecordingProgressHistory(data); err != nil {
+		return err
+	}
 	export, err := decodeDatabaseExport(data)
 	if err != nil {
 		return fmt.Errorf("unmarshal database export: %w", err)
@@ -1580,13 +1603,20 @@ func (s *Service) importDatabaseBytesReserved(data []byte, reservation *config.M
 		if err := restore.RestoreRecordingPlaybackPositions(tx, export.RecordingPlaybackPositions); err != nil {
 			return fmt.Errorf("restore recording playback positions: %w", err)
 		}
+		// Every repository/085/086 operation is strictly serial on this original
+		// body. An earlier error is terminal; admission flags prove no success.
+		if err := restore.RestoreRecordingProgressHistory(tx, export.RecordingProgressHistory); err != nil {
+			return fmt.Errorf("restore recording progress history: %w", err)
+		}
 		return nil
 	}()
 	if err == nil {
 		err = restore.Commit()
 	}
-	if err != nil {
-		return fmt.Errorf("database restore transaction: %w", err)
+	// Join real cleanup before reporting success or permitting the surrounding
+	// settings-file replacement. A prior body/unknown-ACK error stays original.
+	if err = finishRecordingHistoryRestore(restore, err); err != nil {
+		return err
 	}
 
 	log.Printf("[backup] Database restored: %d accounts, %d users, %d sessions, %d notification channels, %d local libraries, %d remote libraries",
@@ -1688,4 +1718,110 @@ func (s *Service) importDatabaseFromZipReserved(file *zip.File, reservation *con
 		return "", err
 	}
 	return checksum, nil
+}
+
+// Only the new subsection gets strict top-level duplicate/case checks. Existing
+// legacy keys retain their decoder behavior. Scan original byte spans without
+// cloning a potentially oversized section into json.RawMessage first.
+func preflightRecordingProgressHistory(data []byte) error {
+	if !json.Valid(data) {
+		return nil
+	} // Preserve the existing syntax error.
+	space := func(i int) int {
+		for i < len(data) && (data[i] == ' ' || data[i] == '\n' || data[i] == '\r' || data[i] == '\t') {
+			i++
+		}
+		return i
+	}
+	i := space(0)
+	if i >= len(data) || data[i] != '{' {
+		return nil
+	}
+	i = space(i + 1)
+	seen := false
+	for i < len(data) && data[i] != '}' {
+		start := i
+		i = historyBackupJSONValueEnd(data, i)
+		var key string
+		if i-start <= 6*len("recordingProgressHistory")+2 {
+			if json.Unmarshal(data[start:i], &key) != nil {
+				return datastore.ErrRecordingHistoryBackup
+			}
+		}
+		i = space(i)
+		i = space(i + 1) // Valid JSON guarantees the colon.
+		start = i
+		i = historyBackupJSONValueEnd(data, i)
+		if strings.EqualFold(key, "recordingProgressHistory") {
+			if seen || key != "recordingProgressHistory" || i-start > datastore.RecordingProgressHistoryBackupByteLimit {
+				return datastore.ErrRecordingHistoryBackup
+			}
+			seen = true
+		}
+		i = space(i)
+		if i < len(data) && data[i] == ',' {
+			i = space(i + 1)
+		}
+	}
+	return nil
+}
+
+// Input is already json.Valid. This fixed lexical walk finds one value's end
+// without materializing strings, arrays or unrelated legacy export sections.
+func historyBackupJSONValueEnd(data []byte, start int) int {
+	quoted := func(i int) int {
+		i++
+		for i < len(data) {
+			if data[i] == '\\' {
+				i += 2
+				continue
+			}
+			if data[i] == '"' {
+				return i + 1
+			}
+			i++
+		}
+		return i
+	}
+	if data[start] == '"' {
+		return quoted(start)
+	}
+	if data[start] == '{' || data[start] == '[' {
+		depth := 0
+		for i := start; i < len(data); i++ {
+			switch data[i] {
+			case '"':
+				i = quoted(i) - 1
+			case '{', '[':
+				depth++
+			case '}', ']':
+				depth--
+				if depth == 0 {
+					return i + 1
+				}
+			}
+		}
+	}
+	i := start
+	for i < len(data) && data[i] != ',' && data[i] != '}' && data[i] != ']' && data[i] != ' ' && data[i] != '\n' && data[i] != '\r' && data[i] != '\t' {
+		i++
+	}
+	return i
+}
+
+// Only the concrete original restore owner enters this service cleanup step.
+// Preserve an earlier body/unknown-ACK error; a new cleanup error cannot become
+// success and therefore cannot authorize the surrounding settings replacement.
+func finishRecordingHistoryRestore(restore *datastore.SettingsRestoreTransaction, previous error) error {
+	if restore == nil {
+		return datastore.ErrRecordingHistoryBackup
+	}
+	closeErr := restore.Close()
+	if previous != nil {
+		return fmt.Errorf("database restore transaction: %w", previous)
+	}
+	if closeErr != nil {
+		return fmt.Errorf("database restore cleanup: %w", closeErr)
+	}
+	return nil
 }

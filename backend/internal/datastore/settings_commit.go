@@ -337,6 +337,7 @@ type settingsRestoreState struct {
 	claimed          bool
 	bodyFinishing    bool
 	positionsClaimed bool
+	historyClaimed   bool
 	repositoryBody   *Tx
 	closing          bool
 	committed        bool
@@ -463,6 +464,25 @@ func (t *SettingsRestoreTransaction) Close() error {
 		}
 	}
 	if t.connection != nil {
+		connection := t.connection.Conn()
+		physical := connection.PgConn()
+		unhealthy := physical.IsClosed() || physical.IsBusy() || physical.TxStatus() != 'I'
+		if unhealthy && t.err == nil {
+			t.err = errors.New("settings restore connection unavailable during cleanup")
+		}
+		if !physical.IsClosed() && (unhealthy || t.err != nil) {
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			closeErr := connection.Close(ctx)
+			cancel()
+			if t.err == nil {
+				t.err = closeErr
+			}
+		}
+		// Pool Release may start an asynchronous destructor. The original
+		// physical connection must actually finish before its guard is refunded.
+		if physical.IsClosed() {
+			<-physical.CleanupDone()
+		}
 		t.connection.Release()
 	}
 	if t.finishContext != nil {
