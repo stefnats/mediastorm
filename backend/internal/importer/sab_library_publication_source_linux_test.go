@@ -12,6 +12,7 @@ import (
 	nzbmetadata "novastream/internal/nzb/metadata"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"sync"
 	"syscall"
@@ -207,6 +208,38 @@ func TestSABPublicationStagedSource(t *testing.T) {
 				}
 				if e := f.db.Repository.UpdateMetadata(1, func() *string { raw := `{"_invalid":"changed-original-attempt"}`; return &raw }()); e != nil {
 					t.Fatal(e)
+				}
+				preserved, e := f.service.readSABPublicationReceipt(f.ctx, 1)
+				if e != nil || !reflect.DeepEqual(preserved, actor.receipt) || actor.Check(f.ctx) != nil {
+					t.Fatal("generic metadata update replaced original reserved receipt", e)
+				}
+				item, e := f.db.Repository.GetQueueItem(1)
+				if e != nil || item == nil || item.Metadata == nil {
+					t.Fatal("actual saved metadata unavailable", e)
+				}
+				var fields map[string]json.RawMessage
+				if e := json.Unmarshal([]byte(*item.Metadata), &fields); e != nil {
+					t.Fatal(e)
+				}
+				replaced := *preserved
+				replaced.Attempt = strings.Repeat("3", 32)
+				receiptBytes, e := json.Marshal(replaced)
+				if e != nil {
+					t.Fatal(e)
+				}
+				fields[database.SABFallbackMetadataKey] = receiptBytes
+				nextBytes, e := json.Marshal(fields)
+				if e != nil {
+					t.Fatal(e)
+				}
+				next := string(nextBytes)
+				changed, e := f.db.Repository.CompareAndSwapMetadata(f.ctx, 1, item.Metadata, &next, true)
+				if e != nil || !changed {
+					t.Fatal("actual original receipt CAS did not change exactly one row", e)
+				}
+				observed, e := f.service.readSABPublicationReceipt(f.ctx, 1)
+				if e != nil || !reflect.DeepEqual(observed, &replaced) || observed.Attempt == actor.receipt.Attempt {
+					t.Fatal("actual replaced receipt was not observed", e)
 				}
 				if actor.Check(f.ctx) == nil {
 					t.Fatal("replaced original durable receipt accepted old staged copy")
