@@ -250,7 +250,7 @@ func publicationBrowserServer(t *testing.T, guard *previewRouteTransport) *httpt
 			counts.publishPosts.Add(1)
 		case strings.HasSuffix(path, "/publication") && r.Method == "GET":
 			counts.statusGets.Add(1)
-		case strings.HasSuffix(path, "/library/libraries"):
+		case path == "/app/admin/api/library/libraries":
 			counts.librariesGets.Add(1)
 		case strings.HasSuffix(path, "/refresh"):
 			counts.refreshPosts.Add(1)
