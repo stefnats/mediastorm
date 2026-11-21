@@ -49,6 +49,8 @@ type SABStagedPublication struct {
 	// Tests can hold the return of an actual regular-file read; this port never
 	// opens a source, supplies bytes or grants authority. Production leaves it nil.
 	afterRead func()
+	copy      *SABPublicationCopy
+	copyHooks *sabPublicationCopyHooks
 	mu        sync.Mutex
 	closed    bool
 	reads     sync.WaitGroup
@@ -422,7 +424,11 @@ func (s *SABStagedPublication) signal() {
 	}
 	s.closed = true
 	s.cancel()
+	copy := s.copy
 	s.mu.Unlock()
+	if copy != nil {
+		copy.signal()
+	}
 	for _, file := range s.files {
 		_ = file.Close()
 	}
@@ -441,6 +447,12 @@ func (s *SABStagedPublication) Close() {
 	}
 	s.once.Do(func() {
 		s.signal()
+		s.mu.Lock()
+		copy := s.copy
+		s.mu.Unlock()
+		if copy != nil {
+			copy.Close()
+		}
 		s.reads.Wait()
 		if s.stop != nil {
 			s.stop()

@@ -31,6 +31,7 @@ import (
 	"novastream/internal/apiusage"
 	"novastream/internal/auth"
 	"novastream/internal/datastore"
+	"novastream/internal/importer"
 	"novastream/internal/integration"
 	"novastream/internal/jellyfinbridge"
 	"novastream/internal/livecapacity"
@@ -1481,6 +1482,12 @@ func main() {
 		return current.SABnzbd, nil
 	})
 	registerUsenetFallbackRoutes(r, adminUIHandler, usenetFallbackHandler)
+	publicationHandler, publicationErr := newSABLibraryPublicationRuntime(managedStartup, store, nzbSystem.ImporterService(), currentProfilePins)
+	if publicationErr != nil {
+		log.Printf("[library-publication] managed runtime unavailable: %v", publicationErr)
+	}
+	defer publicationHandler.Close()
+	registerSABLibraryPublicationRoutes(r, adminUIHandler, publicationHandler)
 
 	r.HandleFunc("/admin/api/hardware-acceleration/status", adminUIHandler.RequireMasterAuth(adminUIHandler.GetHardwareAccelerationStatus)).Methods(http.MethodGet)
 	updatesHandler := handlers.NewUpdatesHandler()
@@ -2626,6 +2633,9 @@ func main() {
 	// Retire original WebDAV source/body/query work before stopping its actual
 	// NZB workers or closing the original Startup/store during deferred cleanup.
 	managedWebDAV.Close()
+	// Join original publication/body/copy/SQL/output owners before the importer
+	// or original Startup/store can close. Known commits remain persisted.
+	publicationHandler.Close()
 
 	// Stop NZB system workers first to cancel background processing
 	log.Println("🧹 Stopping NZB system workers...")
@@ -3103,6 +3113,57 @@ func registerUsenetFallbackRoutes(r *mux.Router, admin *handlers.AdminUIHandler,
 	r.HandleFunc("/admin/api/usenet/fallback/{queueID}/import-preview", admin.RequireAuth(recordingWebOrigin(fallback.Preview))).Methods(http.MethodPost)
 	r.HandleFunc("/admin/api/usenet/fallback/{queueID}/stage", admin.RequireAuth(fallback.GetManagedCopy)).Methods(http.MethodGet)
 	r.HandleFunc("/admin/api/usenet/fallback/{queueID}/stage", admin.RequireAuth(recordingWebOrigin(fallback.CopyFiles))).Methods(http.MethodPost)
+}
+
+// This is the actual managed Main composition. No missing source/PIN/store
+// dependency can select cached authority or a generic path-based publisher.
+func newSABLibraryPublicationRuntime(startup *settingsbootstrap.Startup, store *datastore.DataStore, source *importer.Service, pins *profileunlock.PGProfilePins) (*handlers.SABLibraryPublicationHandler, error) {
+	if startup == nil || store == nil || source == nil || pins == nil {
+		return nil, datastore.ErrSABLibraryPublicationUnavailable
+	}
+	issuer, err := startup.NewSABLibraryPublicationIssuer(store, source)
+	if err != nil {
+		return nil, err
+	}
+	publisher, err := localmedia.NewSABLibraryPublisher(issuer)
+	if err != nil {
+		issuer.Close()
+		return nil, err
+	}
+	handler, err := handlers.NewSABLibraryPublicationHandler(publisher)
+	if err != nil {
+		publisher.Close()
+		return nil, err
+	}
+	return handler, nil
+}
+
+func registerSABLibraryPublicationRoutes(router *mux.Router, admin *handlers.AdminUIHandler, handler *handlers.SABLibraryPublicationHandler) {
+	if router == nil {
+		return
+	}
+	unavailable := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = http.NewResponseController(w).SetWriteDeadline(time.Now().Add(time.Second))
+		http.Error(w, "503 Service Unavailable", http.StatusServiceUnavailable)
+	})
+	for _, route := range []struct {
+		path, method string
+		call         http.HandlerFunc
+	}{
+		{"/admin/api/usenet/fallback/{queueID}/publication", http.MethodPost, handler.Publish},
+		{"/admin/api/usenet/fallback/{queueID}/publication", http.MethodGet, handler.Status},
+		{"/admin/api/usenet/fallback/{queueID}/publication/reconcile", http.MethodPost, handler.Reconcile},
+	} {
+		var entry http.Handler = unavailable
+		if handler != nil && admin != nil {
+			call := route.call
+			if route.method == http.MethodPost {
+				call = recordingWebOrigin(call)
+			}
+			entry = handler.BoundedEntry(admin.RequireMasterAuth(call))
+		}
+		router.Handle(route.path, entry).Methods(route.method)
+	}
 }
 
 // registerProfileRecoveryCookieRoutes is shared by the actual Main wiring and
