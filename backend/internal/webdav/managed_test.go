@@ -21,6 +21,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"runtime"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -301,7 +302,7 @@ func managedTestPG(t *testing.T, hold bool, encryption string) *managedTestFixtu
 		t.Fatal(e)
 	}
 	f.system, e = integration.NewNzbSystem(integration.NzbConfig{QueueDatabasePath: filepath.Join(t.TempDir(), "queue.db"), MetadataRootPath: root, MaxProcessorWorkers: 1, MaxDownloadWorkers: 1}, &managedTestManager{pool: f.pool}, func() *config.AltMountConfig {
-		return &config.AltMountConfig{Streaming: config.StreamingConfig{MaxDownloadWorkers: 1, MaxCacheSizeMB: 1}}
+		return &config.AltMountConfig{Streaming: config.StreamingConfig{MaxDownloadWorkers: 1, MaxCacheSizeMB: 1}, Import: config.ImportConfig{QueueProcessingIntervalSeconds: 1}}
 	})
 	if e != nil {
 		t.Fatal(e)
@@ -416,7 +417,7 @@ func TestManagedWebDAVRegisteredBasic(t *testing.T) {
 					t.Fatal(e)
 				}
 				fs := afero.NewMemMapFs()
-				if e := afero.WriteFile(fs, "movie", []byte("synthetic-legacy"), 0600); e != nil {
+				if e := afero.WriteFile(fs, "/movie", []byte("synthetic-legacy"), 0600); e != nil {
 					t.Fatal(e)
 				}
 				legacy, e := NewHandler(&Config{Prefix: "/webdav", User: "synthetic-basic", Pass: "synthetic-password"}, fs, nil, nil, nil)
@@ -541,10 +542,18 @@ func managedTestHeldSource(t *testing.T, name, flavor string) {
 		if e != nil {
 			t.Fatal(e)
 		}
-		data, e := io.ReadAll(response.Body)
+		if response == nil || response.Body == nil {
+			t.Fatal("actual ordinary provider returned no source")
+		}
+		defer response.Close()
+		if response.Status != http.StatusPartialContent || response.ContentLength != 32 || response.Headers.Get("Content-Range") != fmt.Sprintf("bytes 0-31/%d", len(f.plain)) {
+			t.Fatal("ordinary declared range contract changed", response.Status, response.ContentLength, response.Headers.Get("Content-Range"))
+		}
+		data := make([]byte, response.ContentLength)
+		n, e := io.ReadFull(response.Body, data)
 		closeErr := response.Close()
-		if e != nil || closeErr != nil || !bytes.Equal(data, f.plain[:32]) {
-			t.Fatal("actual per-owner provider path gained global shared gate", e, closeErr)
+		if e != nil || n != 32 || closeErr != nil || !bytes.Equal(data, f.plain[:32]) || f.pool.calls.Load() == 0 {
+			t.Fatal("actual per-owner provider path gained global shared gate", e, closeErr, n)
 		}
 		return
 	}
@@ -647,27 +656,132 @@ func (w *managedTestOutput) Write(p []byte) (int, error) {
 	return n, e
 }
 
+// This wrapper holds the return of a delegated REAL TCP deadline setter. It
+// cannot supply auth or source bytes. The outer owner has admitted the request,
+// while native policy/PG Capture has not started yet.
+type managedTestPreCaptureWriter struct {
+	*httptest.ResponseRecorder
+	connection net.Conn
+	entered    chan struct{}
+	released   <-chan struct{}
+	delegated  chan error
+	once       sync.Once
+}
+
+func (w *managedTestPreCaptureWriter) SetReadDeadline(at time.Time) error {
+	e := w.connection.SetReadDeadline(at)
+	w.once.Do(func() { w.delegated <- e; close(w.entered); <-w.released })
+	return e
+}
+func (w *managedTestPreCaptureWriter) SetWriteDeadline(at time.Time) error {
+	return w.connection.SetWriteDeadline(at)
+}
+
+// Observe genuine current-source PG acquisition, not successful-wait counters.
+// Stack snapshots are bounded DATA and never exposed in diagnostics or auth.
+func managedTestCurrentPGWaiters(buffer []byte) (int, bool) {
+	n := runtime.Stack(buffer, true)
+	if n == len(buffer) {
+		return 0, false
+	}
+	count := 0
+	for _, stack := range bytes.Split(buffer[:n], []byte("\n\n")) {
+		if bytes.Contains(stack, []byte("novastream/internal/datastore.(*deploymentWebDAVState).readCurrent")) && bytes.Contains(stack, []byte("github.com/jackc/pgx/v5/pgxpool.(*Pool).Acquire")) && bytes.Contains(stack, []byte("novastream/internal/webdav.(*ManagedHandler).ServeHTTP")) {
+			count++
+		}
+	}
+	return count, true
+}
 func managedTestEarlyAdmission(t *testing.T, f *managedTestFixture) {
 	t.Helper()
+	// The concrete coordinator has a distinct native-hold capacity8. Exercise
+	// those genuine original PG waits/cancellations separately from outer64.
 	held, e := f.store.Pool().Acquire(t.Context())
 	if e != nil {
 		t.Fatal(e)
 	}
-	var releaseOnce sync.Once
-	release := func() { releaseOnce.Do(held.Release) }
-	var cancelAll []context.CancelFunc
+	var releasePGOnce sync.Once
+	releasePG := func() { releasePGOnce.Do(held.Release) }
+	var cancels []context.CancelFunc
 	var ended []chan struct{}
+	listener, e := net.Listen("tcp4", "127.0.0.1:0")
+	if e != nil {
+		releasePG()
+		t.Fatal(e)
+	}
+	var sockets []net.Conn
+	released := make(chan struct{})
+	var releaseOnce sync.Once
+	releaseTransport := func() { releaseOnce.Do(func() { close(released) }) }
+	closeDone := make(chan struct{})
+	closeStarted, closeJoined := false, false
+	// Register before launching either actual PG waits or transport producers.
 	t.Cleanup(func() {
-		for _, cancel := range cancelAll {
+		for _, cancel := range cancels {
 			cancel()
 		}
-		release()
+		releasePG()
+		releaseTransport()
+		for _, c := range sockets {
+			_ = c.Close()
+		}
+		_ = listener.Close()
 		for _, done := range ended {
-			managedTestAwait(t, done, "early original Capture cleanup")
+			managedTestAwait(t, done, "original admission producer")
+		}
+		f.handler.Close()
+		if closeStarted && !closeJoined {
+			managedTestAwait(t, closeDone, "early runtime Close")
 		}
 	})
+	beforeCancelled := f.store.Pool().Stat().CanceledAcquireCount()
+	for n := 0; n < 8; n++ {
+		ctx, cancel := context.WithCancel(t.Context())
+		cancels = append(cancels, cancel)
+		r := managedTestRequest("PROPFIND", "/webdav/").WithContext(ctx)
+		r.RemoteAddr = fmt.Sprintf("127.0.0.1:%d", 25000+n)
+		done := make(chan struct{})
+		ended = append(ended, done)
+		go func() { defer close(done); f.handler.ServeHTTP(httptest.NewRecorder(), r) }()
+	}
+	until := time.Now().Add(4 * time.Second)
+	stackBuffer := make([]byte, 2<<20)
+	for {
+		pending, complete := managedTestCurrentPGWaiters(stackBuffer)
+		if !complete {
+			t.Fatal("actual goroutine snapshot exceeded bounded observer")
+		}
+		if pending == 8 {
+			break
+		}
+		if time.Now().After(until) {
+			t.Fatal("eight actual native/PG Acquire stacks missing", pending)
+		}
+		time.Sleep(time.Millisecond)
+	}
+	clear(stackBuffer)
+	mapped := managedTestRequest("PROPFIND", "/webdav/")
+	mapped.RemoteAddr = "[::ffff:127.0.0.1]:26000"
+	mapped.Header.Set("X-Forwarded-For", "203.0.113.99")
+	denied := httptest.NewRecorder()
+	f.handler.ServeHTTP(denied, mapped)
+	if denied.Code != 503 {
+		t.Fatal("canonical actual-peer cap bypassed", denied.Code)
+	}
+	for _, cancel := range cancels {
+		cancel()
+	}
+	for _, done := range ended {
+		managedTestAwait(t, done, "actual PG acquire cancellation")
+	}
+	if f.store.Pool().Stat().CanceledAcquireCount() < beforeCancelled+8 {
+		t.Fatal("actual original PG wait cancellation was not joined")
+	}
+	releasePG()
+	cancels = nil
+	ended = nil
 	waitCount := func(want int) {
-		deadline := time.Now().Add(4 * time.Second)
+		until := time.Now().Add(4 * time.Second)
 		for {
 			f.handler.mu.Lock()
 			n := len(f.handler.active)
@@ -675,54 +789,94 @@ func managedTestEarlyAdmission(t *testing.T, f *managedTestFixture) {
 			if n == want {
 				return
 			}
-			if time.Now().After(deadline) {
+			if time.Now().After(until) {
 				t.Fatal("early original admission missing", want, n)
 			}
 			time.Sleep(time.Millisecond)
 		}
 	}
+	waitCount(0)
+	pair := func(host string) (net.Conn, net.Conn) {
+		t.Helper()
+		dialer := net.Dialer{LocalAddr: &net.TCPAddr{IP: net.ParseIP(host)}}
+		client, e := dialer.DialContext(t.Context(), "tcp4", listener.Addr().String())
+		if e != nil {
+			t.Fatal(e)
+		}
+		sockets = append(sockets, client)
+		accepted, e := listener.Accept()
+		if e != nil {
+			t.Fatal(e)
+		}
+		sockets = append(sockets, accepted)
+		actual, _, e := net.SplitHostPort(accepted.RemoteAddr().String())
+		if e != nil || actual != host {
+			t.Fatal("actual TCP peer differs", actual, e)
+		}
+		return client, accepted
+	}
+	noNewPG := f.store.Pool().Stat().AcquireCount()
+	noNewSource := f.pool.calls.Load()
 	for host := 1; host <= 8; host++ {
-		for port := 0; port < 8; port++ {
+		for n := 0; n < 8; n++ {
+			_, accepted := pair(fmt.Sprintf("127.0.0.%d", host))
 			ctx, cancel := context.WithCancel(t.Context())
-			cancelAll = append(cancelAll, cancel)
+			cancels = append(cancels, cancel)
 			r := managedTestRequest("PROPFIND", "/webdav/").WithContext(ctx)
-			r.RemoteAddr = fmt.Sprintf("127.0.0.%d:%d", host, 25000+port)
+			r.RemoteAddr = accepted.RemoteAddr().String()
+			writer := &managedTestPreCaptureWriter{ResponseRecorder: httptest.NewRecorder(), connection: accepted, entered: make(chan struct{}), released: released, delegated: make(chan error, 1)}
 			done := make(chan struct{})
 			ended = append(ended, done)
-			go func() { defer close(done); f.handler.ServeHTTP(httptest.NewRecorder(), r) }()
+			go func() { defer close(done); f.handler.ServeHTTP(writer, r) }()
+			managedTestAwait(t, writer.entered, "actual pre-Capture delegated deadline")
+			if e := <-writer.delegated; e != nil {
+				t.Fatal("actual TCP deadline failed", e)
+			}
 		}
 		waitCount(host * 8)
 		if host == 1 {
+			_, accepted := pair("127.0.0.1")
 			r := managedTestRequest("PROPFIND", "/webdav/")
-			r.RemoteAddr = "[::ffff:127.0.0.1]:26000"
-			r.Header.Set("X-Forwarded-For", "203.0.113.99")
-			w := httptest.NewRecorder()
-			f.handler.ServeHTTP(w, r)
-			if w.Code != 503 {
-				t.Fatal("early canonical actual-peer cap bypassed")
+			r.RemoteAddr = accepted.RemoteAddr().String()
+			out := httptest.NewRecorder()
+			f.handler.ServeHTTP(out, r)
+			if out.Code != 503 {
+				t.Fatal("actual ninth peer connection bypassed early8", out.Code)
 			}
 		}
 	}
+	_, accepted := pair("127.0.0.99")
 	r := managedTestRequest("PROPFIND", "/webdav/")
-	r.RemoteAddr = "127.0.0.99:26000"
-	w := httptest.NewRecorder()
-	f.handler.ServeHTTP(w, r)
-	if w.Code != 503 {
-		t.Fatal("early global64 cap bypassed")
+	r.RemoteAddr = accepted.RemoteAddr().String()
+	out := httptest.NewRecorder()
+	f.handler.ServeHTTP(out, r)
+	if out.Code != 503 {
+		t.Fatal("actual65th connection bypassed early64", out.Code)
 	}
-	for _, cancel := range cancelAll {
+	if f.store.Pool().Stat().AcquireCount() != noNewPG || f.pool.calls.Load() != noNewSource {
+		t.Fatal("held pre-Capture transport unexpectedly reached PG/source")
+	}
+	closeStarted = true
+	go func() { f.handler.Close(); close(closeDone) }()
+	select {
+	case <-closeDone:
+		closeJoined = true
+		t.Fatal("early ownership refunded before actual deadline wrappers returned")
+	case <-time.After(40 * time.Millisecond):
+	}
+	for _, cancel := range cancels {
 		cancel()
 	}
-	release()
+	releaseTransport()
 	for _, done := range ended {
-		managedTestAwait(t, done, "actual early request join")
+		managedTestAwait(t, done, "actual early transport return")
 	}
-	f.handler.mu.Lock()
-	n := len(f.handler.active)
-	f.handler.mu.Unlock()
-	if n != 0 {
-		t.Fatal("joined early request admission leaked")
+	managedTestAwait(t, closeDone, "actual64 early ownership shutdown")
+	closeJoined = true
+	if f.store.Pool().Stat().AcquireCount() != noNewPG || f.pool.calls.Load() != noNewSource {
+		t.Fatal("cancelled pre-Capture ingress reached PG/source")
 	}
+	waitCount(0)
 }
 
 func managedTestSave(t *testing.T, manager *config.Manager, settings config.Settings) {
