@@ -1,7 +1,6 @@
 package handlers
 
 import (
-	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -576,29 +575,39 @@ func (w *shareMediaWriter) Flush() {
 	_ = http.NewResponseController(w.ResponseWriter).Flush()
 }
 
-// Secondary legacy managers have no genuine source/child completion actor yet.
-// Refuse only actual managed shares before any source or background job exists.
-func rejectShareAncillary(w http.ResponseWriter, r *http.Request) bool {
-	if shareMediaFrom(r.Context()) == nil {
-		return false
+// beginAncillaryOperation registers an actual producer before it starts. The
+// original guard cannot complete its lease while a child/descriptor is alive.
+func (g *shareMediaGuard) beginAncillaryOperation(ctx context.Context) (func(), error) {
+	if g == nil || ctx == nil || ctx.Err() != nil {
+		return nil, datastore.ErrSharePlaybackChanged
 	}
-	apierror.Write(w, http.StatusNotImplemented, "share_source_unsupported", "This shared playback capability is unavailable.")
-	return true
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if g.closed || g.ctx.Err() != nil {
+		return nil, datastore.ErrSharePlaybackChanged
+	}
+	g.operations.Add(1)
+	var once sync.Once
+	return func() { once.Do(g.operations.Done) }, nil
 }
 
 func (h *VideoHandler) runShareMetadataProbe(ctx context.Context, source string) (*ffprobeOutput, error) {
 	g := shareMediaFrom(ctx)
+	finish, operationErr := g.beginAncillaryOperation(ctx)
+	if operationErr != nil {
+		return nil, operationErr
+	}
+	defer finish()
 	if g == nil || g.handler != h || normalizeShareResource(source) != g.owner.Resource() {
 		return nil, datastore.ErrSharePlaybackChanged
 	}
 	var response *streaming.Response
 	var err error
 	if strings.HasPrefix(source, "http://") || strings.HasPrefix(source, "https://") {
-		request, e := http.NewRequestWithContext(ctx, http.MethodGet, source, nil)
+		request, e := h.shareHTTPInputRequest(ctx, source, http.MethodGet, "bytes=0-16777215")
 		if e != nil {
 			return nil, e
 		}
-		request.Header.Set("Range", "bytes=0-16777215")
 		result, e := h.vodHTTPDo(h.externalProxyHTTPClient, request)
 		if e != nil {
 			return nil, e
@@ -629,5 +638,5 @@ func (h *VideoHandler) runShareMetadataProbe(ctx context.Context, source string)
 	if err = g.current(ctx); err != nil {
 		return nil, err
 	}
-	return h.runFFProbe(ctx, "pipe:0", bytes.NewReader(sample))
+	return h.runShareSampleProbe(ctx, sample)
 }

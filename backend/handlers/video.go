@@ -115,18 +115,20 @@ func videoTracef(format string, args ...any) {
 
 // VideoHandler handles video streaming requests using the local stream provider.
 type VideoHandler struct {
-	transmux        bool
-	ffmpegPath      string
-	ffprobePath     string
-	streamer        streaming.Provider
-	hlsManager      *HLSManager
-	failures        *streamFailureRegistry
-	prequeueStore   *playback.PrequeueStore
-	prewarmSvc      PrewarmService
-	libraryAccess   *libraryaccess.Service
-	recordingAccess *RecordingStreamAccess
-	vodBoundary     *vodBoundary
-	sharePlayback   *sharePlaybackInstallation
+	transmux         bool
+	ffmpegPath       string
+	ffprobePath      string
+	streamer         streaming.Provider
+	hlsManager       *HLSManager
+	failures         *streamFailureRegistry
+	prequeueStore    *playback.PrequeueStore
+	prewarmSvc       PrewarmService
+	libraryAccess    *libraryaccess.Service
+	recordingAccess  *RecordingStreamAccess
+	vodBoundary      *vodBoundary
+	sharePlayback    *sharePlaybackInstallation
+	shareAncillaryMu sync.Mutex
+	shareAncillary   *shareAncillaryRegistry
 
 	// castCaps answers "what can this receiver actually decode" from cache.
 	// Never probes on this path: a cast start must not wait on a device.
@@ -902,7 +904,8 @@ func (h *VideoHandler) SetThumbnailCacheDir(baseDir string) {
 
 // DetectCredits triggers async credits detection for a video path.
 func (h *VideoHandler) DetectCredits(w http.ResponseWriter, r *http.Request) {
-	if rejectShareAncillary(w, r) {
+	if shareMediaFrom(r.Context()) != nil {
+		h.shareDetectCredits(w, r)
 		return
 	}
 	if r.Method == http.MethodOptions {
@@ -962,7 +965,8 @@ func (h *VideoHandler) DetectCredits(w http.ResponseWriter, r *http.Request) {
 
 // GetCreditsStatus returns the cached credits detection result for a video path.
 func (h *VideoHandler) GetCreditsStatus(w http.ResponseWriter, r *http.Request) {
-	if rejectShareAncillary(w, r) {
+	if shareMediaFrom(r.Context()) != nil {
+		h.shareCreditsStatus(w, r)
 		return
 	}
 	if r.Method == http.MethodOptions {
@@ -1228,7 +1232,8 @@ func (h *VideoHandler) StreamVideo(w http.ResponseWriter, r *http.Request) {
 		videoTracef("[video] SEEK REQUEST detected: range=%q path=%q method=%s", rangeHeader, cleanPath, r.Method)
 	}
 
-	if shouldTransmux && rejectShareAncillary(w, r) {
+	if shouldTransmux && shareMediaFrom(r.Context()) != nil {
+		_, _ = h.shareTransmux(w, r, cleanPath, forceAAC, outputContainer)
 		return
 	}
 	if shouldTransmux {
@@ -3414,6 +3419,12 @@ func (h *VideoHandler) dlnaEncodeCaps() HWAccelCaps {
 // buildMpegTsPlan produces the H.264/AC3 MPEG-TS transcode plan for legacy DLNA
 // renderers.
 func (h *VideoHandler) buildMpegTsPlan(meta *ffprobeOutput, inputSpecifier, fallbackReason string) transmuxPlan {
+	return buildMpegTsPlanWithCaps(meta, inputSpecifier, fallbackReason, h.dlnaEncodeCaps())
+}
+
+// buildMpegTsPlanWithCaps is pure recipe DATA selection. A caller may choose
+// conservative software encoding without running or borrowing a capability probe.
+func buildMpegTsPlanWithCaps(meta *ffprobeOutput, inputSpecifier, fallbackReason string, caps HWAccelCaps) transmuxPlan {
 	plan := transmuxPlan{
 		container: outputMpegTs,
 		videoMap:  "0:v:0",
@@ -3433,7 +3444,7 @@ func (h *VideoHandler) buildMpegTsPlan(meta *ffprobeOutput, inputSpecifier, fall
 		if reason := strings.TrimSpace(fallbackReason); reason != "" {
 			plan.audio.reason = reason
 		}
-		plan.args = buildMpegTsArgs(in, h.dlnaEncodeCaps())
+		plan.args = buildMpegTsArgs(in, caps)
 		return plan
 	}
 
@@ -3464,7 +3475,7 @@ func (h *VideoHandler) buildMpegTsPlan(meta *ffprobeOutput, inputSpecifier, fall
 		in.audioMap = ""
 	}
 
-	plan.args = buildMpegTsArgs(in, h.dlnaEncodeCaps())
+	plan.args = buildMpegTsArgs(in, caps)
 	return plan
 }
 
@@ -6080,6 +6091,7 @@ func (h *VideoHandler) SeekHLSSession(w http.ResponseWriter, r *http.Request) {
 
 // Shutdown gracefully shuts down the video handler and cleans up resources
 func (h *VideoHandler) Shutdown() {
+	h.shutdownShareAncillary()
 	if h.hlsManager != nil {
 		log.Printf("[video] shutting down HLS manager")
 		h.hlsManager.Shutdown()
@@ -7797,7 +7809,8 @@ var cropdetectRegex = regexp.MustCompile(`crop=(\d+):(\d+):(\d+):(\d+)`)
 
 // CropDetect runs ffmpeg cropdetect on a video to detect letterbox bars.
 func (h *VideoHandler) CropDetect(w http.ResponseWriter, r *http.Request) {
-	if rejectShareAncillary(w, r) {
+	if shareMediaFrom(r.Context()) != nil {
+		h.shareCrop(w, r)
 		return
 	}
 	if r.Method == http.MethodOptions {
