@@ -611,10 +611,11 @@ type HLSSession struct {
 	livePlaylistIndependentSegments bool
 
 	// Closed caption support (live TV EIA-608)
-	LiveCCExtractionEnabled bool         // Resolved playback.liveClosedCaptionExtraction setting
-	HasClosedCaptions       bool         // True if EIA-608 CC detected in stream
-	CCDetectionDone         bool         // True once CC detection has completed (regardless of result)
-	ccExtractor             *ccExtractor // Running extractor for this session (nil until first captions request)
+	LiveCCExtractionEnabled bool          // Resolved playback.liveClosedCaptionExtraction setting
+	HasClosedCaptions       bool          // True if EIA-608 CC detected in stream
+	CCDetectionDone         bool          // True once CC detection has completed (regardless of result)
+	ccExtractor             *ccExtractor  // Running extractor for this session (nil until first captions request)
+	ccStarting              chan struct{} // Actual original lazy constructor completion, published before launch.
 
 	// Prequeue tracking
 	PrequeueType   string // "", "details" (details page), or "next_episode" (auto-play next)
@@ -2911,9 +2912,30 @@ func (m *HLSManager) CreateLiveSession(ctx context.Context, liveURL, provider, b
 		return nil, errVODOwner
 	}
 
-	if err := ctx.Err(); err != nil {
+	if ctx == nil || ctx.Err() != nil {
+		return nil, errOrdinaryHLSClosed
+	}
+	ordinary, err := m.ordinaryControl().reserve(ctx)
+	if err != nil {
 		return nil, err
 	}
+	ctx = ordinary.setup
+	published := false
+	var claim *hlsDirectoryClaim
+	defer func() {
+		ordinary.finishSetup(published)
+		if !published {
+			m.discardHLSSessionDirectory(claim)
+			if ordinary.output == "" {
+				ordinary.releaseOutput()
+			} else if err := os.RemoveAll(ordinary.output); err == nil {
+				ordinary.releaseOutput()
+			} else {
+				ordinary.recordRemovalFailure(err)
+			}
+			ordinary.finishOperation()
+		}
+	}()
 	admission := tuning.Capacity
 	lease, err := admission.acquire(ctx, bucketKey, liveUpstreamShareKey(liveURL, tuning), tuning.MaxStreams)
 	tuning.Capacity = nil
@@ -2932,16 +2954,14 @@ func (m *HLSManager) CreateLiveSession(ctx context.Context, liveURL, provider, b
 	}()
 
 	sessionID := generateSessionID()
-	claim, err := m.claimHLSSessionDirectory(sessionID)
+	claim, err = m.claimHLSSessionDirectory(sessionID)
 	if err != nil {
 		lease.Release()
 		return nil, fmt.Errorf("create session directory: %w", err)
 	}
 
-	defer m.discardHLSSessionDirectory(claim)
+	ordinary.output = claim.path
 	outputDir := claim.path
-
-	bgCtx, cancel := context.WithCancel(context.Background())
 
 	now := time.Now()
 	session := &HLSSession{
@@ -2953,7 +2973,7 @@ func (m *HLSManager) CreateLiveSession(ctx context.Context, liveURL, provider, b
 		OutputDir:               outputDir,
 		CreatedAt:               now,
 		LastAccess:              now,
-		Cancel:                  cancel,
+		ordinary:                ordinary,
 		IsLive:                  true,
 		LiveProvider:            normalizeLiveProvider(provider),
 		LiveBucket:              strings.TrimSpace(bucketKey),
@@ -2980,6 +3000,8 @@ func (m *HLSManager) CreateLiveSession(ctx context.Context, liveURL, provider, b
 		LiveCCExtractionEnabled: liveCCExtractionEnabled,
 		subtitleExtractOffsets:  make(map[int]float64),
 	}
+	bgCtx := ordinary.attach(session)
+	session.Cancel = ordinary.current().cancel
 	if admission != nil {
 		session.liveCapacityOwner = admission.Owner
 		session.liveCapacityOwner.Stop = func(context.Context) error { revokeLiveSession(session); return nil }
@@ -2991,18 +3013,18 @@ func (m *HLSManager) CreateLiveSession(ctx context.Context, liveURL, provider, b
 	}
 
 	if err := ctx.Err(); err != nil {
-		cancel()
+		session.Cancel()
 		return nil, err
 	}
 	if !m.publishHLSSession(session) {
-		cancel()
+		session.Cancel()
 		return nil, errVODOwner
 	}
 
-	publishedLease = true
+	published = true
 
-	// Start live transcoding in background
-	go func() {
+	// The original generation owns the actual supervisor through its return.
+	if !ordinaryHLSGo(bgCtx, session, func() {
 		defer close(session.liveSupervisorDone)
 		// The supervisor joins FFmpeg and closes its upstream before releasing.
 		defer func() { session.mu.RLock(); last := session.liveCapacityLease; session.mu.RUnlock(); last.Release() }()
@@ -3024,7 +3046,12 @@ func (m *HLSManager) CreateLiveSession(ctx context.Context, liveURL, provider, b
 			}
 			session.mu.Unlock()
 		}
-	}()
+	}) {
+		close(session.liveSupervisorDone)
+		m.CleanupSession(session.ID)
+		return nil, errOrdinaryHLSClosed
+	}
+	publishedLease = true
 
 	// Detect closed captions in background when extraction is enabled.
 	// Continuous extraction is lazy — starts on first captions.srt request.
@@ -3128,6 +3155,13 @@ func (m *HLSManager) startLiveTranscoding(ctx context.Context, session *HLSSessi
 func (m *HLSManager) runLiveTranscoding(ctx context.Context, session *HLSSession, resumeFrom int, original *liveOriginalSource) error {
 	if m.hlsInputConfigured() {
 		return errVODOwner
+	}
+	ctx, run := newOrdinaryHLSCommand(ctx, session)
+	if session.ordinary != nil && run == nil {
+		return errOrdinaryHLSClosed
+	}
+	if run != nil {
+		defer run.finish()
 	}
 
 	// Cleanup marks Stopped under the same lock before removing the output.
@@ -3248,6 +3282,8 @@ func (m *HLSManager) runLiveTranscoding(ctx context.Context, session *HLSSession
 		if err != nil {
 			return fmt.Errorf("open proxied live stream: %w", err)
 		}
+		// The actual response is already ours, including any later pipe failure.
+		defer resp.Body.Close()
 		if resp.StatusCode >= http.StatusBadRequest {
 			resp.Body.Close()
 			return fmt.Errorf("proxied live stream returned status %d", resp.StatusCode)
@@ -3347,46 +3383,51 @@ func (m *HLSManager) runLiveTranscoding(ctx context.Context, session *HLSSession
 
 	cmd := exec.CommandContext(ctx, m.ffmpegPath, args...)
 	cmd.Dir = session.OutputDir
+	var pipe *shareHLSPipe
 	if proxyBody != nil {
-		// Own the copier so Cmd.Wait does not join a Read blocked on a silent
-		// source after the encoder exits or is killed by the watchdog. Close the
-		// body before joining, releasing the connection (or this session's share
-		// of it) before the supervisor restarts.
-		stdin, err := cmd.StdinPipe()
+		var err error
+		pipe, err = newShareHLSPipe(cmd, proxyBody, proxyBody)
 		if err != nil {
 			return fmt.Errorf("create live input pipe: %w", err)
 		}
-		inputDone := make(chan struct{})
-		go func() {
-			defer close(inputDone)
-			_, _ = io.Copy(stdin, proxyBody)
-			_ = stdin.Close()
-		}()
-		defer func() {
-			_ = proxyBody.Close()
-			_ = stdin.Close()
-			<-inputDone
-		}()
+		defer pipe.closeAndJoin()
 	}
-
-	// Capture stderr for logging
-	stderr, err := cmd.StderrPipe()
+	stderr, stderrWriter, err := ordinaryHLSStderr(cmd)
 	if err != nil {
 		return fmt.Errorf("create stderr pipe: %w", err)
 	}
+	defer stderr.Close()
+	defer stderrWriter.Close()
+	if run != nil {
+		if err := run.setCommand(cmd, proxyBody, stderr); err != nil {
+			return err
+		}
+	}
 
 	session.mu.Lock()
+	if session.Stopped || ctx.Err() != nil {
+		session.mu.Unlock()
+		return errOrdinaryHLSClosed
+	}
 	session.FFmpegCmd = cmd
-	startErr := cmd.Start()
+	var startErr error
+	if run != nil {
+		startErr = run.startCommand()
+	} else {
+		startErr = cmd.Start()
+	}
 	pid := 0
 	if startErr == nil {
 		pid = cmd.Process.Pid
 		session.FFmpegPID = pid
 	}
 	session.mu.Unlock()
-
+	_ = stderrWriter.Close()
 	if startErr != nil {
 		return fmt.Errorf("start ffmpeg: %w", startErr)
+	}
+	if pipe != nil {
+		pipe.start()
 	}
 
 	log.Printf("[hls] live session %s: FFmpeg started (PID=%d)", session.ID, pid)
@@ -3398,8 +3439,10 @@ func (m *HLSManager) runLiveTranscoding(ctx context.Context, session *HLSSession
 	damage := session.liveDamage
 	session.mu.Unlock()
 
-	// Log stderr in background
-	go func() {
+	// The command owns each monitor, including the actual terminal stderr EOF.
+	stderrDone := make(chan struct{})
+	if !ordinaryHLSGo(ctx, session, func() {
+		defer close(stderrDone)
 		buf := make([]byte, 4096)
 		var layout liveLayoutWatch
 		for {
@@ -3427,7 +3470,11 @@ func (m *HLSManager) runLiveTranscoding(ctx context.Context, session *HLSSession
 				break
 			}
 		}
-	}()
+	}) {
+		close(stderrDone)
+		_ = cmd.Process.Kill()
+		_ = stderr.Close()
+	}
 
 	// Closed when this FFmpeg run ends, so every watcher below dies with the process it was started
 	// for. Without it a restart leaves the previous run's goroutines polling: they hold a dead `cmd`,
@@ -3437,7 +3484,7 @@ func (m *HLSManager) runLiveTranscoding(ctx context.Context, session *HLSSession
 
 	// Start idle timeout goroutine - kills FFmpeg if no segments requested for hlsIdleTimeout
 	idleDone := make(chan struct{})
-	go func() {
+	if !ordinaryHLSGo(ctx, session, func() {
 		defer close(idleDone)
 		ticker := time.NewTicker(5 * time.Second)
 		defer ticker.Stop()
@@ -3486,7 +3533,10 @@ func (m *HLSManager) runLiveTranscoding(ctx context.Context, session *HLSSession
 				}
 			}
 		}
-	}()
+	}) {
+		close(idleDone)
+		_ = cmd.Process.Kill()
+	}
 
 	// Starvation watchdog. A provider that closes its connection leaves FFmpeg alive and reconnecting
 	// while its output falls behind realtime: segments arrive every 7-16s instead of every 2, and a
@@ -3495,7 +3545,9 @@ func (m *HLSManager) runLiveTranscoding(ctx context.Context, session *HLSSession
 	//
 	// Only while somebody is actually watching: a session nobody has requested a segment from yet is
 	// the startup timeout's business, and one nobody is reading any more is the idle timeout's.
-	go func() {
+	starvationDone := make(chan struct{})
+	if !ordinaryHLSGo(ctx, session, func() {
+		defer close(starvationDone)
 		ticker := time.NewTicker(2 * time.Second)
 		defer ticker.Stop()
 		lastSeen := nextLiveSegmentNumber(session.OutputDir)
@@ -3533,7 +3585,10 @@ func (m *HLSManager) runLiveTranscoding(ctx context.Context, session *HLSSession
 				return
 			}
 		}
-	}()
+	}) {
+		close(starvationDone)
+		_ = cmd.Process.Kill()
+	}
 
 	// Wait for FFmpeg to complete
 	err = cmd.Wait()
@@ -3541,6 +3596,13 @@ func (m *HLSManager) runLiveTranscoding(ctx context.Context, session *HLSSession
 	// restart starts its own, and two generations polling one session is how a stale one ends up
 	// killing a healthy process or flagging a deliberate stop that never happened.
 	close(processDone)
+	if ctx.Err() != nil {
+		_ = stderr.Close()
+	}
+	<-stderrDone
+	<-idleDone
+	<-starvationDone
+	_ = stderr.Close()
 	if err != nil {
 		if ctx.Err() != nil {
 			log.Printf("[hls] live session %s: FFmpeg stopped (context cancelled)", session.ID)
@@ -3597,18 +3659,17 @@ func (m *HLSManager) runLiveSupervisor(ctx context.Context, session *HLSSession,
 		}
 		attemptCtx := ctx
 		cancelAttempt := func() {}
-		stopStartup := func() bool { return false }
+		stopStartup := func() {}
 		if plan != nil {
 			attemptCtx, cancelAttempt = context.WithCancel(ctx)
 			candidate := plan.candidates[plan.index]
-			timer := time.AfterFunc(liveStationStartupTimeout, func() {
+			stopStartup = liveUpstreamAfterDelay(liveStationStartupTimeout, func() {
 				if nextLiveSegmentNumber(session.OutputDir) > resumeFrom {
 					plan.recordSuccess(candidate)
 				} else {
 					cancelAttempt()
 				}
 			})
-			stopStartup = timer.Stop
 		}
 		err := m.runLiveTranscoding(attemptCtx, session, resumeFrom, original)
 		stopStartup()
@@ -8299,12 +8360,13 @@ func (m *HLSManager) cleanupDetachedHLSSession(sessionID string, session *HLSSes
 
 	// Stop ccextractor if running (live TV CC extraction)
 	session.mu.Lock()
-	if session.ccExtractor != nil {
-		log.Printf("[hls] stopping ccextractor for session %s", sessionID)
-		session.ccExtractor.stop()
-		session.ccExtractor = nil
-	}
+	extractor := session.ccExtractor
+	session.ccExtractor = nil
 	session.mu.Unlock()
+	if extractor != nil {
+		log.Printf("[hls] stopping ccextractor for session %s", sessionID)
+		extractor.stop()
+	}
 
 	// Kill FFmpeg process first (more forceful than context cancellation)
 	session.mu.Lock()

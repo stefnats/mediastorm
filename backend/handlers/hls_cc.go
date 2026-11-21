@@ -3,6 +3,7 @@ package handlers
 import (
 	"bufio"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -16,6 +17,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"novastream/internal/settingscommit"
 )
 
 // CC (Closed Caption) support for live TV streams.
@@ -126,13 +129,16 @@ func detectClosedCaptionsInSegments(ctx context.Context, outputDir, ffmpegPath s
 		"-t", "3",
 		"-",
 	)
-	stderr, err := cmd.StderrPipe()
+	stderr, writer, err := ordinaryHLSStderr(cmd)
 	if err != nil {
 		return false
 	}
+	defer stderr.Close()
+	defer writer.Close()
 	if err := cmd.Start(); err != nil {
 		return false
 	}
+	_ = writer.Close()
 	scanner := bufio.NewScanner(stderr)
 	found := false
 	for scanner.Scan() {
@@ -144,9 +150,7 @@ func detectClosedCaptionsInSegments(ctx context.Context, outputDir, ffmpegPath s
 			break
 		}
 	}
-	if cmd.Process != nil {
-		_ = cmd.Process.Kill()
-	}
+	_ = cmd.Process.Kill()
 	_ = cmd.Wait()
 	return found
 }
@@ -155,84 +159,99 @@ func detectClosedCaptionsInSegments(ctx context.Context, outputDir, ffmpegPath s
 // (preferred) or a bounded ffmpeg sliding window (fallback).
 type ccExtractor struct {
 	mu          sync.Mutex
+	ctx         context.Context
 	cancel      context.CancelFunc
+	closed      bool
+	done        chan struct{}
+	processDone chan struct{}
+	stopSignal  func()
+	signalOnce  sync.Once
+	closeWork   sync.WaitGroup
+	files       map[*os.File]struct{}
 	outputPath  string
 	outputDir   string
 	ffmpegPath  string
 	ccPath      string // empty => ffmpeg fallback
 	cmd         *exec.Cmd
-	stdin       io.WriteCloser
+	stdin       *os.File
+	childInput  *os.File
 	running     bool
 	seenSegs    map[int]bool
 	lastMaxSeen int
 	mode        string // "ccextractor" or "ffmpeg"
 }
 
-// startCCExtraction starts background CC extraction for a live session directory.
+// startCCExtraction is called only inside the original generation's already
+// registered constructor actor. Its done joins the loop, actual Wait and IO.
 func startCCExtraction(ctx context.Context, outputDir string) (*ccExtractor, error) {
-	srtPath := filepath.Join(outputDir, "captions.srt")
-	extractCtx, cancel := context.WithCancel(ctx)
-
-	ext := &ccExtractor{
-		cancel:      cancel,
-		outputPath:  srtPath,
-		outputDir:   outputDir,
-		running:     true,
-		seenSegs:    make(map[int]bool),
-		lastMaxSeen: -1,
+	if ctx == nil || ctx.Err() != nil {
+		return nil, errOrdinaryHLSClosed
 	}
-
+	extractCtx, cancel := context.WithCancel(ctx)
+	ext := &ccExtractor{
+		ctx: extractCtx, cancel: cancel, done: make(chan struct{}), processDone: make(chan struct{}),
+		outputPath: filepath.Join(outputDir, "captions.srt"), outputDir: outputDir,
+		files: make(map[*os.File]struct{}), seenSegs: make(map[int]bool), lastMaxSeen: -1,
+	}
+	ext.stopSignal = familyMediaAfterFunc(extractCtx, ext.shutdownProcess)
+	fail := func(err error) (*ccExtractor, error) {
+		ext.shutdownProcess()
+		ext.stopSignal()
+		ext.closeWork.Wait()
+		close(ext.done)
+		return nil, err
+	}
 	if ccPath, err := exec.LookPath("ccextractor"); err == nil {
-		ext.ccPath = ccPath
-		ext.mode = "ccextractor"
+		ext.ccPath, ext.mode = ccPath, "ccextractor"
 		if err := ext.startCCExtractorProcess(extractCtx); err != nil {
-			cancel()
-			return nil, err
+			return fail(err)
 		}
 	} else {
 		ffmpegPath, err := exec.LookPath("ffmpeg")
 		if err != nil {
-			cancel()
-			return nil, fmt.Errorf("neither ccextractor nor ffmpeg found for live CC extraction")
+			return fail(fmt.Errorf("neither ccextractor nor ffmpeg found for live CC extraction"))
 		}
-		ext.ffmpegPath = ffmpegPath
-		ext.mode = "ffmpeg"
+		ext.ffmpegPath, ext.mode = ffmpegPath, "ffmpeg"
+		close(ext.processDone) // No persistent process exists in fallback mode.
 		log.Printf("[hls-cc] ccextractor not found; using bounded ffmpeg sliding-window fallback for %s", outputDir)
 	}
-
-	go ext.extractionLoop(extractCtx)
+	go func() {
+		defer close(ext.done)
+		ext.extractionLoop(extractCtx)
+		ext.shutdownProcess()
+		<-ext.processDone
+		ext.stopSignal()
+		ext.closeWork.Wait()
+	}()
 	return ext, nil
 }
 
 func (e *ccExtractor) startCCExtractorProcess(ctx context.Context) error {
-	// -s 120: treat stdin as a continuous live stream; exit if no data for 2m
-	// (session stop closes stdin / kills the process sooner).
-	// --forceflush / --koc: keep SRT readable while still growing.
 	cmd := exec.CommandContext(ctx, e.ccPath, // #nosec G204
-		"--stdin",
-		"-s", "120",
-		"--out", "srt",
-		"-o", e.outputPath,
-		"--forceflush",
-		"--koc",
-	)
+		"--stdin", "--input", "ts", "-s", "120", "--out", "srt", "-o", e.outputPath, "--forceflush", "--koc")
 	cmd.Dir = e.outputDir
-	stdin, err := cmd.StdinPipe()
+	childInput, stdin, err := os.Pipe()
 	if err != nil {
 		return fmt.Errorf("ccextractor stdin: %w", err)
 	}
-	// Discard noisy logs; failures still surface via process exit.
-	cmd.Stdout = io.Discard
-	cmd.Stderr = io.Discard
-	if err := cmd.Start(); err != nil {
+	cmd.Stdin, cmd.Stdout, cmd.Stderr = childInput, io.Discard, io.Discard
+	e.mu.Lock()
+	if e.closed || ctx.Err() != nil {
+		e.mu.Unlock()
+		_ = childInput.Close()
 		_ = stdin.Close()
+		return errOrdinaryHLSClosed
+	}
+	e.cmd, e.stdin, e.childInput = cmd, stdin, childInput
+	err = cmd.Start() // Same mutex as the actual Process capture on shutdown.
+	e.running = err == nil
+	e.mu.Unlock()
+	_ = childInput.Close() // Also close the parent endpoint after a failed Start.
+	if err != nil {
 		return fmt.Errorf("start ccextractor: %w", err)
 	}
-	e.cmd = cmd
-	e.stdin = stdin
-	log.Printf("[hls-cc] started ccextractor (PID=%d) for %s", cmd.Process.Pid, e.outputDir)
-
 	go func() {
+		defer close(e.processDone)
 		err := cmd.Wait()
 		e.mu.Lock()
 		e.running = false
@@ -244,18 +263,19 @@ func (e *ccExtractor) startCCExtractorProcess(ctx context.Context) error {
 	return nil
 }
 
-// extractionLoop periodically appends new TS segment bytes for CC extraction.
 func (e *ccExtractor) extractionLoop(ctx context.Context) {
 	log.Printf("[hls-cc] starting %s extraction loop for %s", e.mode, e.outputDir)
-
-	ticker := time.NewTicker(1 * time.Second)
+	ticker := time.NewTicker(time.Second)
 	defer ticker.Stop()
-
+	var persistentEnded <-chan struct{}
+	if e.mode == "ccextractor" {
+		persistentEnded = e.processDone
+	}
 	for {
 		select {
 		case <-ctx.Done():
-			e.shutdownProcess()
-			log.Printf("[hls-cc] extraction loop stopped for %s", e.outputDir)
+			return
+		case <-persistentEnded:
 			return
 		case <-ticker.C:
 			if e.mode == "ccextractor" {
@@ -267,194 +287,240 @@ func (e *ccExtractor) extractionLoop(ctx context.Context) {
 	}
 }
 
+// Each retained descriptor belongs to this actual loop, not to path DATA.
+// Cancellation starts every original Close before any external owner joins.
+func (e *ccExtractor) retainFile(file *os.File) error {
+	e.mu.Lock()
+	if e.closed || e.ctx.Err() != nil || len(e.files) >= 2 {
+		e.mu.Unlock()
+		_ = file.Close()
+		return errOrdinaryHLSClosed
+	}
+	e.files[file] = struct{}{}
+	e.mu.Unlock()
+	return nil
+}
+func (e *ccExtractor) closeFile(file *os.File) error {
+	err := file.Close()
+	e.mu.Lock()
+	delete(e.files, file)
+	e.mu.Unlock()
+	return err
+}
+func (e *ccExtractor) openSegment(path string) (*os.File, error) {
+	if e.ctx.Err() != nil {
+		return nil, errOrdinaryHLSClosed
+	}
+	file, err := settingscommit.OpenRegularGuardData(path)
+	if err != nil {
+		return nil, err
+	}
+	if err = e.retainFile(file); err != nil {
+		return nil, err
+	}
+	return file, nil
+}
+
 func (e *ccExtractor) feedNewSegmentsToCCExtractor() {
 	e.mu.Lock()
-	stdin := e.stdin
-	running := e.running
+	stdin, running := e.stdin, e.running && !e.closed
 	e.mu.Unlock()
 	if !running || stdin == nil {
 		return
 	}
-
-	entries, err := os.ReadDir(e.outputDir)
-	if err != nil {
-		return
+	paths := listLiveSegments(e.outputDir)
+	present := make(map[int]bool, len(paths))
+	for _, path := range paths {
+		match := segmentNumRe.FindStringSubmatch(filepath.Base(path))
+		number, _ := strconv.Atoi(match[1])
+		present[number] = true
 	}
-	type segInfo struct {
-		num  int
-		path string
-	}
-	var segments []segInfo
-	for _, entry := range entries {
-		if entry.IsDir() {
-			continue
-		}
-		m := segmentNumRe.FindStringSubmatch(entry.Name())
-		if m == nil {
-			continue
-		}
-		num, _ := strconv.Atoi(m[1])
-		segments = append(segments, segInfo{num: num, path: filepath.Join(e.outputDir, entry.Name())})
-	}
-	if len(segments) == 0 {
-		return
-	}
-	sort.Slice(segments, func(i, j int) bool { return segments[i].num < segments[j].num })
-
-	maxOnDisk := segments[len(segments)-1].num
+	// Keep only the current real on-disk window, not session-length history.
 	e.mu.Lock()
-	if maxOnDisk <= e.lastMaxSeen {
-		e.mu.Unlock()
-		return
-	}
-	e.lastMaxSeen = maxOnDisk
-	var newSegs []segInfo
-	for _, seg := range segments {
-		if !e.seenSegs[seg.num] {
-			newSegs = append(newSegs, seg)
+	for number := range e.seenSegs {
+		if !present[number] {
+			delete(e.seenSegs, number)
 		}
 	}
 	e.mu.Unlock()
-	if len(newSegs) == 0 {
-		return
-	}
-
-	var fed int
-	var fedBytes int64
-	for _, seg := range newSegs {
-		data, err := os.ReadFile(seg.path)
-		if err != nil {
+	for _, path := range paths {
+		match := segmentNumRe.FindStringSubmatch(filepath.Base(path))
+		number, _ := strconv.Atoi(match[1])
+		e.mu.Lock()
+		seen := e.seenSegs[number]
+		e.mu.Unlock()
+		if seen {
 			continue
 		}
-		e.mu.Lock()
-		stdin := e.stdin
-		e.mu.Unlock()
-		if stdin == nil {
+		file, err := e.openSegment(path)
+		if err != nil {
+			if e.ctx.Err() != nil {
+				return
+			}
+			continue
+		}
+		_, err = io.Copy(stdin, file)
+		closeErr := e.closeFile(file)
+		if err != nil || closeErr != nil || e.ctx.Err() != nil {
 			return
 		}
-		if _, err := stdin.Write(data); err != nil {
-			log.Printf("[hls-cc] ccextractor stdin write failed: %v", err)
-			return
-		}
-		fed++
-		fedBytes += int64(len(data))
 		e.mu.Lock()
-		e.seenSegs[seg.num] = true
+		e.seenSegs[number] = true
 		e.mu.Unlock()
-	}
-	if fed > 0 {
-		log.Printf("[hls-cc] fed %d new segment(s) (%.1fKB) to ccextractor", fed, float64(fedBytes)/1024)
 	}
 }
 
-// processFallbackWindow re-extracts CC from a small trailing window of segments
-// using ffmpeg. Cost stays O(window), not O(session length).
+// processFallbackWindow keeps the actual bytes copied under the existing cap,
+// even if a selected segment grows after its initial stat.
 func (e *ccExtractor) processFallbackWindow(ctx context.Context) {
 	paths := listLiveSegments(e.outputDir)
-	if len(paths) == 0 {
-		return
-	}
-
-	// Build a trailing window under the size cap.
 	var window []string
-	var total int64
+	var selected int64
 	for i := len(paths) - 1; i >= 0; i-- {
-		fi, err := os.Stat(paths[i])
-		if err != nil {
+		info, err := os.Stat(paths[i])
+		if err != nil || !info.Mode().IsRegular() {
 			continue
 		}
-		if total > 0 && total+fi.Size() > maxFallbackWindowBytes {
+		if info.Size() > maxFallbackWindowBytes-selected {
 			break
 		}
 		window = append([]string{paths[i]}, window...)
-		total += fi.Size()
+		selected += info.Size()
 	}
-	if len(window) == 0 {
+	if len(window) == 0 || ctx.Err() != nil {
 		return
 	}
-
-	// Skip work when the highest segment hasn't advanced.
-	lastName := filepath.Base(window[len(window)-1])
-	m := segmentNumRe.FindStringSubmatch(lastName)
-	maxNum := -1
-	if m != nil {
-		maxNum, _ = strconv.Atoi(m[1])
-	}
+	match := segmentNumRe.FindStringSubmatch(filepath.Base(window[len(window)-1]))
+	maxNum, _ := strconv.Atoi(match[1])
 	e.mu.Lock()
-	if maxNum >= 0 && maxNum <= e.lastMaxSeen {
+	if maxNum <= e.lastMaxSeen || e.closed {
 		e.mu.Unlock()
 		return
 	}
-	if maxNum >= 0 {
-		e.lastMaxSeen = maxNum
-	}
+	e.lastMaxSeen = maxNum
 	e.mu.Unlock()
 
 	concatPath := filepath.Join(e.outputDir, "cc_window.ts")
-	f, err := os.OpenFile(concatPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0644)
+	concat, err := os.OpenFile(concatPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0644)
 	if err != nil {
 		return
 	}
-	for _, p := range window {
-		data, err := os.ReadFile(p)
-		if err != nil {
-			continue
-		}
-		_, _ = f.Write(data)
+	if err = e.retainFile(concat); err != nil {
+		return
 	}
-	_ = f.Close()
-
+	defer os.Remove(concatPath)
+	var copied int64
+	for _, path := range window {
+		file, openErr := e.openSegment(path)
+		if openErr != nil {
+			err = openErr
+			break
+		}
+		var n int64
+		n, err = io.Copy(concat, io.LimitReader(file, maxFallbackWindowBytes-copied))
+		copied += n
+		var extra [1]byte
+		if err == nil {
+			count, readErr := file.Read(extra[:])
+			if count != 0 {
+				err = fmt.Errorf("live caption window exceeds actual byte limit")
+			} else if readErr != nil && !errors.Is(readErr, io.EOF) {
+				err = readErr
+			}
+		}
+		closeErr := e.closeFile(file)
+		if err == nil {
+			err = closeErr
+		}
+		if err != nil || ctx.Err() != nil {
+			break
+		}
+	}
+	closeErr := e.closeFile(concat)
+	if err != nil || closeErr != nil || ctx.Err() != nil {
+		return
+	}
 	tmpPath := e.outputPath + ".tmp"
-	movieSrc := fmt.Sprintf("movie=%s[out+subcc]", concatPath)
-	execCtx, execCancel := context.WithTimeout(ctx, 20*time.Second)
-	defer execCancel()
+	defer os.Remove(tmpPath)
+	execCtx, cancel := context.WithTimeout(ctx, 20*time.Second)
+	defer cancel()
 	cmd := exec.CommandContext(execCtx, e.ffmpegPath, // #nosec G204
-		"-y",
-		"-copyts",
-		"-f", "lavfi", "-i", movieSrc,
-		"-map", "0:s", "-c:s", "text",
-		"-f", "srt",
-		tmpPath,
-	)
-	output, err := cmd.CombinedOutput()
+		"-y", "-copyts", "-f", "lavfi", "-i", fmt.Sprintf("movie=%s[out+subcc]", concatPath),
+		"-map", "0:s", "-c:s", "text", "-f", "srt", tmpPath)
+	// Actual command Wait joins exec's own pipe/copier work. Diagnostics are
+	// discarded rather than accumulating unbounded CombinedOutput in memory.
+	cmd.Stdout, cmd.Stderr = io.Discard, io.Discard
+	e.mu.Lock()
+	if e.closed || execCtx.Err() != nil {
+		e.mu.Unlock()
+		return
+	}
+	e.cmd = cmd
+	err = cmd.Start()
+	e.mu.Unlock()
 	if err != nil {
-		if ctx.Err() != nil {
+		return
+	}
+	err = cmd.Wait()
+	e.mu.Lock()
+	if e.cmd == cmd {
+		e.cmd = nil
+	}
+	e.mu.Unlock()
+	if err != nil || execCtx.Err() != nil {
+		return
+	}
+	if data, readErr := os.ReadFile(tmpPath); readErr == nil {
+		if writeErr := os.WriteFile(tmpPath, []byte(strings.ReplaceAll(string(data), "\\h", " ")), 0644); writeErr != nil {
 			return
 		}
-		log.Printf("[hls-cc] ffmpeg fallback CC extraction failed: %v (output: %.300s)", err, string(output))
-		_ = os.Remove(tmpPath)
-		return
 	}
-	if srtData, err := os.ReadFile(tmpPath); err == nil {
-		content := strings.ReplaceAll(string(srtData), "\\h", " ")
-		_ = os.WriteFile(tmpPath, []byte(content), 0644)
-	}
-	_ = os.Rename(tmpPath, e.outputPath)
-	log.Printf("[hls-cc] ffmpeg fallback extracted CC (window=%d segs, %.1fMB)", len(window), float64(total)/(1024*1024))
-}
-
-func (e *ccExtractor) shutdownProcess() {
 	e.mu.Lock()
 	defer e.mu.Unlock()
-	e.running = false
-	if e.stdin != nil {
-		_ = e.stdin.Close()
-		e.stdin = nil
-	}
-	if e.cmd != nil && e.cmd.Process != nil {
-		_ = e.cmd.Process.Kill()
+	if !e.closed && ctx.Err() == nil {
+		_ = os.Rename(tmpPath, e.outputPath)
 	}
 }
 
-// stop terminates the extraction loop and any child process.
+// shutdownProcess only signals actual actors. It is safe inside the loop or
+// its cancellation callback and never waits for its own command/loop to return.
+func (e *ccExtractor) shutdownProcess() {
+	e.signalOnce.Do(func() {
+		e.mu.Lock()
+		e.closed, e.running = true, false
+		var process *os.Process
+		if e.cmd != nil {
+			process = e.cmd.Process
+		}
+		var files []*os.File
+		if e.stdin != nil {
+			files = append(files, e.stdin)
+		}
+		if e.childInput != nil {
+			files = append(files, e.childInput)
+		}
+		for file := range e.files {
+			files = append(files, file)
+		}
+		e.closeWork.Add(len(files))
+		e.mu.Unlock()
+		e.cancel()
+		if process != nil {
+			_ = process.Kill()
+		}
+		for _, file := range files {
+			go func(file *os.File) { defer e.closeWork.Done(); _ = file.Close() }(file)
+		}
+	})
+}
+
+// stop is external: after signaling all actors, join the exact loop/Wait/IO.
 func (e *ccExtractor) stop() {
-	e.mu.Lock()
-	cancel := e.cancel
-	e.mu.Unlock()
-	if cancel != nil {
-		cancel()
+	if e == nil {
+		return
 	}
 	e.shutdownProcess()
+	<-e.done
 }
 
 // srtTimestampRe matches SRT timestamp lines like "00:01:23,456 --> 00:01:25,789"
@@ -572,105 +638,177 @@ func formatSRTTimestamp(totalMs int) string {
 	return fmt.Sprintf("%02d:%02d:%02d,%03d", h, m, s, ms)
 }
 
-// ServeLiveCaptions serves SRT captions for a live session.
-// Extraction is started lazily on first request (when enabled and CC was detected).
-// Called on GET /video/hls/{sessionID}/captions.srt
+// ensureLiveCCExtractor reserves the one actual constructor before launch.
+// Its generation actor remains registered through the extractor's physical end.
+func (m *HLSManager) ensureLiveCCExtractor(ctx context.Context, session *HLSSession) (*ccExtractor, error) {
+	g := ordinaryGeneration(ctx, session)
+	if g == nil || g.owner.control.manager != m {
+		return nil, errOrdinaryHLSClosed
+	}
+	session.mu.Lock()
+	if session.Stopped || ctx.Err() != nil {
+		session.mu.Unlock()
+		return nil, errOrdinaryHLSClosed
+	}
+	if ext := session.ccExtractor; ext != nil {
+		session.mu.Unlock()
+		return ext, nil
+	}
+	pending := session.ccStarting
+	launch := pending == nil
+	if launch {
+		pending = make(chan struct{})
+		session.ccStarting = pending
+	}
+	outputDir := session.OutputDir
+	session.mu.Unlock()
+	if launch {
+		original := g.context()
+		if !g.spawn(original, func() {
+			var ext *ccExtractor
+			published := false
+			func() {
+				defer close(pending)
+				defer func() {
+					session.mu.Lock()
+					if session.ccStarting == pending {
+						session.ccStarting = nil
+					}
+					session.mu.Unlock()
+				}()
+				var err error
+				ext, err = startCCExtraction(original, outputDir)
+				if err != nil {
+					log.Printf("[hls-cc] original extraction startup failed: %v", err)
+					return
+				}
+				session.mu.Lock()
+				if !session.Stopped && original.Err() == nil {
+					session.ccExtractor = ext
+					published = true
+				}
+				session.mu.Unlock()
+			}()
+			if ext != nil {
+				if !published {
+					ext.stop()
+				} else {
+					<-ext.done
+				}
+			}
+		}) {
+			session.mu.Lock()
+			if session.ccStarting == pending {
+				session.ccStarting = nil
+			}
+			session.mu.Unlock()
+			close(pending)
+			return nil, errOrdinaryHLSClosed
+		}
+	}
+	select {
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	case <-g.ctx.Done():
+		return nil, errOrdinaryHLSClosed
+	case <-pending:
+	}
+	session.mu.RLock()
+	ext, stopped := session.ccExtractor, session.Stopped
+	session.mu.RUnlock()
+	if ext == nil || stopped || g.ctx.Err() != nil {
+		return nil, errOrdinaryHLSClosed
+	}
+	return ext, nil
+}
+
+// ServeLiveCaptions serves SRT captions for a live session. The original
+// generation owns both lazy extraction and this actual output descriptor.
 func (m *HLSManager) ServeLiveCaptions(w http.ResponseWriter, r *http.Request, sessionID string) {
 	session, exists := m.GetSession(sessionID)
 	if !exists {
 		http.Error(w, "session not found", http.StatusNotFound)
 		return
 	}
-
+	if session.ordinary != nil {
+		var finish func()
+		var ok bool
+		w, r, finish, ok = m.ordinaryHTTP(w, r, sessionID)
+		if !ok {
+			http.Error(w, "live captions unavailable", http.StatusServiceUnavailable)
+			return
+		}
+		defer finish()
+	}
 	session.mu.RLock()
-	isLive := session.IsLive
-	enabled := session.LiveCCExtractionEnabled
-	hasCaptions := session.HasClosedCaptions
-	outputDir := session.OutputDir
+	isLive, enabled, hasCaptions := session.IsLive, session.LiveCCExtractionEnabled, session.HasClosedCaptions
 	session.mu.RUnlock()
-
 	if !isLive {
 		http.Error(w, "captions only available for live sessions", http.StatusBadRequest)
 		return
 	}
-
 	emptySRT := func() {
 		w.Header().Set("Content-Type", "application/x-subrip; charset=utf-8")
 		w.Header().Set("Cache-Control", "no-cache")
 		w.Header().Set("Access-Control-Allow-Origin", "*")
-		w.Write([]byte(""))
+		_, _ = w.Write([]byte(""))
 	}
-
 	if !enabled || !hasCaptions {
 		emptySRT()
 		return
 	}
-
-	// Lazy start: only run ccextractor/ffmpeg once the player asks for captions.
-	session.mu.Lock()
-	if session.ccExtractor == nil {
-		ext, err := startCCExtraction(context.Background(), outputDir)
-		if err != nil {
-			session.mu.Unlock()
-			log.Printf("[hls-cc] failed to start CC extraction for session %s: %v", sessionID, err)
-			emptySRT()
-			return
-		}
-		session.ccExtractor = ext
-		log.Printf("[hls-cc] session %s: lazy-started %s CC extraction", sessionID, ext.mode)
-	}
-	srtPath := session.ccExtractor.outputPath
-	session.mu.Unlock()
-
-	srtData, err := os.ReadFile(srtPath)
+	ext, err := m.ensureLiveCCExtractor(r.Context(), session)
 	if err != nil {
 		emptySRT()
 		return
 	}
-
-	cleaned := cleanSRT(string(srtData))
-
+	file, err := settingscommit.OpenRegularGuardData(ext.outputPath)
+	if err != nil {
+		emptySRT()
+		return
+	}
+	defer file.Close()
+	data, err := io.ReadAll(file)
+	if err != nil {
+		emptySRT()
+		return
+	}
 	w.Header().Set("Content-Type", "application/x-subrip; charset=utf-8")
 	w.Header().Set("Cache-Control", "no-cache, no-store, must-revalidate")
 	w.Header().Set("Access-Control-Allow-Origin", "*")
-	w.Write([]byte(cleaned))
+	_, _ = w.Write([]byte(cleanSRT(string(data))))
 }
 
-// detectAndSetClosedCaptions sniffs local segments for CC and updates the session.
-// Does NOT start continuous extraction — that is lazy on ServeLiveCaptions.
+// The detector is an original generation child. No late result can renew a
+// retired session, and actual command/descriptor cleanup precedes child return.
 func (m *HLSManager) detectAndSetClosedCaptions(session *HLSSession) {
-	go func() {
-		ctx, cancel := context.WithTimeout(context.Background(), 25*time.Second)
+	if session == nil || session.ordinary == nil {
+		return
+	}
+	g := session.ordinary.current()
+	if g == nil {
+		return
+	}
+	original := g.context()
+	g.spawn(original, func() {
+		ctx, cancel := context.WithTimeout(original, 25*time.Second)
 		defer cancel()
-
 		session.mu.RLock()
-		sessionID := session.ID
-		outputDir := session.OutputDir
-		enabled := session.LiveCCExtractionEnabled
+		outputDir, enabled := session.OutputDir, session.LiveCCExtractionEnabled
 		session.mu.RUnlock()
-
-		if !enabled {
-			session.mu.Lock()
-			session.HasClosedCaptions = false
-			session.CCDetectionDone = true
-			session.mu.Unlock()
-			return
+		hasCC := false
+		if enabled {
+			hasCC = detectClosedCaptionsInSegments(ctx, outputDir, m.ffmpegPath)
 		}
-
-		log.Printf("[hls-cc] detecting closed captions for session %s", sessionID)
-		hasCC := detectClosedCaptionsInSegments(ctx, outputDir, m.ffmpegPath)
-
 		session.mu.Lock()
-		session.HasClosedCaptions = hasCC
-		session.CCDetectionDone = true
-		session.mu.Unlock()
-
-		if hasCC {
-			log.Printf("[hls-cc] session %s: closed captions DETECTED — extraction will start on first captions request", sessionID)
-		} else {
-			log.Printf("[hls-cc] session %s: no closed captions found", sessionID)
+		// Finishing the bounded sniff without captions is a completed detection,
+		// including its own deadline. Original runtime cancellation is terminal.
+		if !session.Stopped && original.Err() == nil {
+			session.HasClosedCaptions = hasCC
+			session.CCDetectionDone = true
 		}
-	}()
+		session.mu.Unlock()
+	})
 }
 
 // GetCCStatus returns the CC detection status for a live session
@@ -688,6 +826,16 @@ func (m *HLSManager) GetCCStatus(sessionID string) (hasCaptions bool, detectionD
 // ServeLiveCCStatus handles GET /video/hls/{sessionID}/cc-status
 // Returns the CC detection status so the frontend can poll for it
 func (m *HLSManager) ServeLiveCCStatus(w http.ResponseWriter, r *http.Request, sessionID string) {
+	if session, exists := m.GetSession(sessionID); exists && session.ordinary != nil {
+		var finish func()
+		var ok bool
+		w, r, finish, ok = m.ordinaryHTTP(w, r, sessionID)
+		if !ok {
+			http.Error(w, "live captions unavailable", http.StatusServiceUnavailable)
+			return
+		}
+		defer finish()
+	}
 	hasCaptions, detectionDone := m.GetCCStatus(sessionID)
 
 	w.Header().Set("Content-Type", "application/json")
