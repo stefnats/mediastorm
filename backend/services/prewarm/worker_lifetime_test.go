@@ -118,11 +118,11 @@ func prewarmLifeService(t *testing.T, g *prewarmHTTPGate, late bool) *Service {
 	s.SetUsersService(&mockUsersProvider{users: []models.User{{ID: "synthetic-user", Name: "Synthetic user"}}})
 	s.SetHistoryService(&mockHistoryProvider{continueWatching: map[string][]models.SeriesWatchState{"synthetic-user": {{SeriesID: "synthetic-title", SeriesTitle: "Synthetic movie", Year: 2026, UpdatedAt: time.Now().UTC()}}}})
 	s.SetScopedWorkerFunc(func(ctx context.Context, title, titleName, imdb, media string, year int, user, client, scope string, episode *models.EpisodeReference) (string, error) {
-		entry, e := s.prequeueStore.CreateScoped(title, titleName, user, media, year, episode, "prewarm", scope)
-		if e != nil {
-			return "", e
+		entry, created := s.prequeueStore.CreateScoped(title, titleName, user, media, year, episode, "prewarm", scope)
+		if !created || entry == nil {
+			return "", errors.New("actual prewarm fixture entry was not created")
 		}
-		e = g.read(ctx)
+		e := g.read(ctx)
 		if late {
 			s.prequeueStore.Update(entry.ID, func(p *playback.PrequeueEntry) {
 				p.Status = playback.PrequeueStatusReady

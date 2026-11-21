@@ -402,9 +402,9 @@ func prequeueActualOriginal(t *testing.T, kind string) {
 	gate := newPrequeueHTTPGate(t)
 	h := prequeueLifeHandler(t, gate)
 	h.vodBoundary = b
-	entry, e := h.store.CreateScoped("synthetic-movie", "Synthetic movie", f.profile.ID, "movie", 2026, nil, "synthetic", playback.DefaultPrequeueSettingsScopeKey)
-	if e != nil {
-		t.Fatal(e)
+	entry, created := h.store.CreateScoped("synthetic-movie", "Synthetic movie", f.profile.ID, "movie", 2026, nil, "synthetic", playback.DefaultPrequeueSettingsScopeKey)
+	if !created || entry == nil {
+		t.Fatal("actual original worker fixture entry was not created")
 	}
 	work, e := h.beginPrequeueWork(t.Context(), entry.ID)
 	if e != nil {
@@ -746,9 +746,9 @@ func prequeueActualHTTPHandoffCase(t *testing.T, f *publicPinCarrierFixture, ins
 	var reported *playback.PrequeueEntry
 	if mode == "report-retry" {
 		h.SetBadStreamsService(badstreams.New(filepath.Join(t.TempDir(), "synthetic-reports.json")))
-		initial, e := h.store.Create("synthetic-movie", "Synthetic movie", f.profile.ID, "movie", 2026, nil, "manual")
-		if e != nil {
-			t.Fatal(e)
+		initial, created := h.store.Create("synthetic-movie", "Synthetic movie", f.profile.ID, "movie", 2026, nil, "manual")
+		if !created || initial == nil {
+			t.Fatal("actual report fixture entry was not created")
 		}
 		h.store.Update(initial.ID, func(e *playback.PrequeueEntry) {
 			e.Status = playback.PrequeueStatusReady
