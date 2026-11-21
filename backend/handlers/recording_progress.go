@@ -276,7 +276,13 @@ func (h *RecordingProgressHandler) ServeHTTP(w http.ResponseWriter, r *http.Requ
 		writeRecordingProgressHTTPError(w, datastore.ErrRecordingProgressChanged)
 		return
 	}
-	descriptor, err := h.service.GetDerived(ctx, id, authorize)
+	var descriptor recordings.DerivedRecording
+	var history recordings.DerivedHistoryData
+	if r.Method == http.MethodPost {
+		descriptor, history, err = h.service.GetDerivedWithHistoryData(ctx, id, authorize)
+	} else {
+		descriptor, err = h.service.GetDerived(ctx, id, authorize)
+	}
 	if err != nil {
 		writeRecordingProgressHTTPError(w, err)
 		return
@@ -310,7 +316,18 @@ func (h *RecordingProgressHandler) ServeHTTP(w http.ResponseWriter, r *http.Requ
 			writeRecordingProgressHTTPError(w, datastore.ErrRecordingProgressChanged)
 			return
 		}
-		intent, err = h.core.Prepare(currentRequest, first, actual, command.Command)
+		if history.RecordingID != id || history.ArtifactID != descriptor.ID {
+			writeRecordingProgressHTTPError(w, datastore.ErrRecordingProgressChanged)
+			return
+		}
+		historical := datastore.RecordingProgressHistoryObservation{SourceStatus: string(descriptor.SourceStatus), SourceIncomplete: descriptor.SourceIncomplete, GapsOmitted: descriptor.GapsOmitted, OutputBytes: descriptor.Bytes, LedgerSHA256: history.LedgerSHA256, ToolSHA256: history.ToolSHA256, TransformSHA256: history.TransformSHA256, OutputSHA256: history.OutputSHA256}
+		for _, span := range descriptor.PartOffsets {
+			historical.Spans = append(historical.Spans, [3]int64{int64(span.PartIndex), span.StartMS, span.DurationMS})
+		}
+		for _, input := range history.Inputs {
+			historical.Inputs = append(historical.Inputs, datastore.RecordingProgressHistoryInput{PartIndex: int64(input.PartIndex), ByteLength: input.ByteLength, SHA256: input.SHA256})
+		}
+		intent, err = h.core.PrepareWithHistory(currentRequest, first, actual, command.Command, historical)
 		if err != nil {
 			writeRecordingProgressHTTPError(w, err)
 			return

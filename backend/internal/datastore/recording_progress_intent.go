@@ -2,6 +2,7 @@ package datastore
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -26,7 +27,7 @@ var (
 	ErrRecordingProgressUnknown     = errors.New("recording progress commit outcome unknown")
 )
 
-// These are DATA from a trusted future concrete GetDerived attachment. They
+// These are DATA from the concrete current GetDerived attachment. They
 // never authenticate a request or certify that files/cache are still current.
 // The existing twelve-element mapping digest and descriptor TTL are unchanged.
 type RecordingProgressObservation struct {
@@ -141,6 +142,7 @@ type recordingProgressIntentState struct {
 	original          models.Session
 	identity          RecordingTimelineIdentity
 	observation       RecordingProgressObservation
+	history           *recordingProgressHistoryData
 	command           RecordingProgressCommand
 	reader            bool
 	tuple             profilePinAccessTuple
@@ -242,6 +244,81 @@ func (c *RecordingProgressCore) Prepare(r *http.Request, identity RecordingTimel
 		return nil, ErrRecordingProgressChanged
 	}
 	return c.prepareOriginal(r, identity, observation, &command)
+}
+
+// RecordingProgressHistoryObservation is bounded historical DATA supplied by
+// the backend after observing its actual live artifact. It is never authority;
+// PrepareWithHistory retains every original request/session/policy/SQL check.
+type RecordingProgressHistoryInput struct {
+	PartIndex  int64
+	ByteLength int64
+	SHA256     string
+}
+type RecordingProgressHistoryObservation struct {
+	SourceStatus                              string
+	SourceIncomplete, GapsOmitted             bool
+	OutputBytes                               int64
+	Spans                                     [][3]int64
+	Inputs                                    []RecordingProgressHistoryInput
+	LedgerSHA256                              string
+	ToolSHA256, TransformSHA256, OutputSHA256 *string
+}
+
+func ownRecordingProgressHistory(identity RecordingTimelineIdentity, o RecordingProgressObservation, h RecordingProgressHistoryObservation) (*recordingProgressHistoryData, error) {
+	if !validProgressObservation(o, time.Now()) || !historySafeRecording(identity.recordingID) || !historyUUID(identity.incarnation.String()) || len(h.Spans) < 2 || len(h.Spans) > 256 || len(h.Inputs) != len(h.Spans) || h.OutputBytes <= 0 || h.OutputBytes > 16<<30 || h.GapsOmitted && !h.SourceIncomplete || !historyHex(h.LedgerSHA256, 64) || !(h.SourceStatus == "completed" || h.SourceStatus == "failed" || h.SourceStatus == "cancelled") || (h.ToolSHA256 == nil) != (h.TransformSHA256 == nil) {
+		return nil, ErrRecordingProgressChanged
+	}
+	for _, v := range []*string{h.ToolSHA256, h.TransformSHA256, h.OutputSHA256} {
+		if v != nil && !historyHex(*v, 64) {
+			return nil, ErrRecordingProgressChanged
+		}
+	}
+	var end, total int64
+	manifest := make([]recordingHistoryInput, 0, len(h.Inputs))
+	for i, span := range h.Spans {
+		input := h.Inputs[i]
+		if span[0] != int64(i+1) || span[1] != end || span[2] <= 0 || span[2] > 43200000-end || input.PartIndex != span[0] || input.ByteLength <= 0 || input.ByteLength > (8<<30)-total || !historyHex(input.SHA256, 64) {
+			return nil, ErrRecordingProgressChanged
+		}
+		end += span[2]
+		total += input.ByteLength
+		manifest = append(manifest, recordingHistoryInput{input.PartIndex, input.ByteLength, input.SHA256})
+	}
+	if end != o.DurationMS {
+		return nil, ErrRecordingProgressChanged
+	}
+	tuple := recordingHistoryTuple{identity.recordingID, identity.incarnation.String(), o.ArtifactID, o.DurationMS, h.OutputBytes, h.SourceStatus, h.SourceIncomplete, h.GapsOmitted, o.ObservedAt.UTC().Format(time.RFC3339Nano), o.ExpiresAt.UTC().Format(time.RFC3339Nano), append([][3]int64(nil), h.Spans...)}
+	raw, err := tuple.bytes()
+	if err != nil {
+		return nil, ErrRecordingProgressChanged
+	}
+	sum := sha256.Sum256(raw)
+	if hex.EncodeToString(sum[:]) != o.MappingSHA256 {
+		return nil, ErrRecordingProgressChanged
+	}
+	clone := func(p *string) *string {
+		if p == nil {
+			return nil
+		}
+		v := *p
+		return &v
+	}
+	envelope := recordingHistoryEnvelope{Version: 1, Timeline: raw, Mapping: o.MappingSHA256, Manifest: manifest, Ledger: h.LedgerSHA256, Tool: clone(h.ToolSHA256), Transform: clone(h.TransformSHA256), Output: clone(h.OutputSHA256)}
+	return &recordingProgressHistoryData{envelope: envelope, tuple: tuple, observed: o.ObservedAt, expires: o.ExpiresAt}, nil
+}
+func (c *RecordingProgressCore) PrepareWithHistory(r *http.Request, identity RecordingTimelineIdentity, observation RecordingProgressObservation, command RecordingProgressCommand, history RecordingProgressHistoryObservation) (*RecordingProgressIntent, error) {
+	// Bound and own DATA before any blocking admission/SQL. No caller slice or
+	// pointer can mutate the eventual sidecar after this method returns.
+	data, err := ownRecordingProgressHistory(identity, observation, history)
+	if err != nil {
+		return nil, err
+	}
+	intent, err := c.Prepare(r, identity, observation, command)
+	if err != nil {
+		return nil, err
+	}
+	intent.state.history = data
+	return intent, nil
 }
 
 // Only the fixed GET snapshot entry supplies nil. It neither fabricates a
