@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"log"
 	"net/http"
 	"os/exec"
@@ -217,7 +216,7 @@ func (m *HLSManager) probeAllMetadata(ctx context.Context, path string) (*Unifie
 		RangeHeader: "bytes=0-16777215", // 16MB
 	}
 
-	resp, err := m.streamer.Stream(ctx, request)
+	resp, err := m.ordinaryProviderStream(ctx, request)
 	if err != nil {
 		return nil, fmt.Errorf("provider stream: %w", err)
 	}
@@ -227,15 +226,10 @@ func (m *HLSManager) probeAllMetadata(ctx context.Context, path string) (*Unifie
 	}
 	defer resp.Close()
 
-	pr, pw := io.Pipe()
-	go func() {
-		defer pw.Close()
-		buf := make([]byte, 128*1024)
-		io.CopyBuffer(pw, resp.Body, buf)
-	}()
-
 	probeCtx, probeCancel := context.WithTimeout(ctx, 30*time.Second)
 	defer probeCancel()
+	pr, pw, finishPipe := ordinaryProbeCopier(probeCtx, resp.Body)
+	defer finishPipe()
 
 	args := []string{
 		"-v", "error",
@@ -480,7 +474,7 @@ func (m *HLSManager) probeAudioStreams(ctx context.Context, path string) (stream
 		RangeHeader: "bytes=0-16777215", // 16MB
 	}
 
-	resp, err := m.streamer.Stream(ctx, request)
+	resp, err := m.ordinaryProviderStream(ctx, request)
 	if err != nil {
 		log.Printf("[hls] failed to probe audio streams: %v", err)
 		return nil, false, true, nil // Assume compatible on error
@@ -491,20 +485,10 @@ func (m *HLSManager) probeAudioStreams(ctx context.Context, path string) (stream
 	}
 	defer resp.Close()
 
-	// Create pipe to feed data to ffprobe
-	pr, pw := io.Pipe()
-	copyDone := make(chan error, 1)
-
-	go func() {
-		defer pw.Close()
-		buf := make([]byte, 128*1024)
-		_, copyErr := io.CopyBuffer(pw, resp.Body, buf)
-		copyDone <- copyErr
-	}()
-
-	// Run ffprobe with timeout
 	probeCtx, probeCancel := context.WithTimeout(ctx, 15*time.Second)
 	defer probeCancel()
+	pr, pw, finishPipe := ordinaryProbeCopier(probeCtx, resp.Body)
+	defer finishPipe()
 
 	args := []string{
 		"-v", "error",
@@ -671,7 +655,7 @@ func (m *HLSManager) probeSubtitleStreams(ctx context.Context, path string) (str
 		RangeHeader: "bytes=0-16777215",
 	}
 
-	resp, err := m.streamer.Stream(ctx, request)
+	resp, err := m.ordinaryProviderStream(ctx, request)
 	if err != nil {
 		log.Printf("[hls] failed to probe subtitle streams: %v", err)
 		return nil, err
@@ -682,18 +666,10 @@ func (m *HLSManager) probeSubtitleStreams(ctx context.Context, path string) (str
 	}
 	defer resp.Close()
 
-	pr, pw := io.Pipe()
-	copyDone := make(chan error, 1)
-
-	go func() {
-		defer pw.Close()
-		buf := make([]byte, 128*1024)
-		_, copyErr := io.CopyBuffer(pw, resp.Body, buf)
-		copyDone <- copyErr
-	}()
-
 	probeCtx, probeCancel := context.WithTimeout(ctx, 15*time.Second)
 	defer probeCancel()
+	pr, pw, finishPipe := ordinaryProbeCopier(probeCtx, resp.Body)
+	defer finishPipe()
 
 	args := []string{
 		"-v", "error",
@@ -853,7 +829,7 @@ func (m *HLSManager) probeDuration(ctx context.Context, cleanPath string) (float
 		RangeHeader: "bytes=0-16777215", // 16MB
 	}
 
-	resp, err := m.streamer.Stream(ctx, request)
+	resp, err := m.ordinaryProviderStream(ctx, request)
 	if err != nil {
 		return 0, fmt.Errorf("provider stream: %w", err)
 	}
@@ -863,20 +839,10 @@ func (m *HLSManager) probeDuration(ctx context.Context, cleanPath string) (float
 	}
 	defer resp.Close()
 
-	// Create pipe to feed data to ffprobe
-	pr, pw := io.Pipe()
-	copyDone := make(chan error, 1)
-
-	go func() {
-		defer pw.Close()
-		buf := make([]byte, 128*1024)
-		_, copyErr := io.CopyBuffer(pw, resp.Body, buf)
-		copyDone <- copyErr
-	}()
-
-	// Run ffprobe with timeout
 	probeCtx, probeCancel := context.WithTimeout(ctx, 15*time.Second)
 	defer probeCancel()
+	pr, pw, finishPipe := ordinaryProbeCopier(probeCtx, resp.Body)
+	defer finishPipe()
 
 	args := []string{
 		"-v", "error",
@@ -969,7 +935,7 @@ func (m *HLSManager) probeColorMetadata(ctx context.Context, cleanPath string) (
 		RangeHeader: "bytes=0-16777215", // 16MB
 	}
 
-	resp, err := m.streamer.Stream(ctx, request)
+	resp, err := m.ordinaryProviderStream(ctx, request)
 	if err != nil {
 		return "", fmt.Errorf("provider stream: %w", err)
 	}
@@ -979,18 +945,10 @@ func (m *HLSManager) probeColorMetadata(ctx context.Context, cleanPath string) (
 	}
 	defer resp.Close()
 
-	// Create pipe to feed data to ffprobe
-	pr, pw := io.Pipe()
-
-	go func() {
-		defer pw.Close()
-		buf := make([]byte, 128*1024)
-		io.CopyBuffer(pw, resp.Body, buf)
-	}()
-
-	// Run ffprobe with timeout
 	probeCtx, probeCancel := context.WithTimeout(ctx, 15*time.Second)
 	defer probeCancel()
+	pr, pw, finishPipe := ordinaryProbeCopier(probeCtx, resp.Body)
+	defer finishPipe()
 
 	args := []string{
 		"-v", "error",

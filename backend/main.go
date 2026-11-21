@@ -2609,16 +2609,8 @@ func main() {
 	// Stop calendar service background refresh
 	calendarService.Stop()
 
-	// Retire original WebDAV source/body/query work before stopping its actual
-	// NZB workers or closing the original Startup/store during deferred cleanup.
-	managedWebDAV.Close()
-
-	// Stop NZB system workers first to cancel background processing
-	log.Println("🧹 Stopping NZB system workers...")
-	if err := nzbSystem.StopService(shutdownCtx); err != nil {
-		log.Printf("NZB system shutdown error: %v", err)
-	}
-
+	// Stop actual bridge/HLS process consumers while their original source
+	// dependencies are still available to signal and join physical cleanup.
 	if jellyfinBridge.Status().Running {
 		log.Println("🧹 Stopping Jellyfin bridge...")
 		jellyfinBridge.Shutdown(shutdownCtx)
@@ -2628,6 +2620,16 @@ func main() {
 	if videoHandler != nil {
 		log.Println("🧹 Cleaning up video handler...")
 		videoHandler.Shutdown()
+	}
+
+	// Retire original WebDAV source/body/query work before stopping its actual
+	// NZB workers or closing the original Startup/store during deferred cleanup.
+	managedWebDAV.Close()
+
+	// Stop NZB system workers first to cancel background processing
+	log.Println("🧹 Stopping NZB system workers...")
+	if err := nzbSystem.StopService(shutdownCtx); err != nil {
+		log.Printf("NZB system shutdown error: %v", err)
 	}
 
 	// Shutdown HTTP server gracefully

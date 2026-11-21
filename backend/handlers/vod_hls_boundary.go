@@ -97,6 +97,12 @@ func snapshotHLSLocked(m *HLSManager, s *HLSSession) hlsSessionSnapshot {
 }
 
 func (m *HLSManager) publishHLSSession(s *HLSSession) bool {
+	control := m.ordinaryControl()
+	control.mu.Lock()
+	defer control.mu.Unlock()
+	if control.closed || control.ctx.Err() != nil || s.ordinary != nil && s.ordinary.ctx.Err() != nil {
+		return false
+	}
 	m.sessionLifecycleMu.Lock()
 	defer m.sessionLifecycleMu.Unlock()
 	m.mu.Lock()
@@ -342,6 +348,13 @@ func hlsScope(r *http.Request) *vodHLSScope {
 	return s
 }
 func checkHLSSessionHTTP(w http.ResponseWriter, r *http.Request, id string) bool {
+	if ref := ordinaryHTTPRef(r); ref != nil {
+		if ref.owner.session == nil || ref.owner.session.ID != id || ref.check() != nil {
+			http.Error(w, "HLS operation unavailable", 503)
+			return false
+		}
+	}
+
 	if ref := shareHLSRef(r); ref != nil {
 		if ref.owner.id != id || ref.check(r.Context()) != nil {
 			shareMediaError(w, errVODOwner)
@@ -652,6 +665,19 @@ func (o *shareHLSOwned) check(ctx context.Context, mutation bool) error {
 	return nil
 }
 func shareHLSWorkerContext(ctx context.Context, session *HLSSession) (context.Context, context.CancelFunc) {
+	if session.ordinary != nil {
+		g := ordinaryGeneration(ctx, session)
+		if g == nil {
+			failed, cancel := context.WithCancel(session.ordinary.ctx)
+			cancel()
+			return failed, cancel
+		}
+		if run, _ := ctx.Value(ordinaryHLSCommandKey{}).(*ordinaryHLSCommand); run != nil && run.generation == g {
+			return context.WithCancel(ctx)
+		}
+		return context.WithCancel(g.context())
+	}
+
 	if session.shareOwned == nil {
 		return context.WithCancel(context.Background())
 	}
@@ -675,6 +701,14 @@ func shareHLSGo(session *HLSSession, work func()) {
 	o.workers.Add(1)
 	go func() { defer o.workers.Done(); work() }()
 }
+func shareHLSGoContext(ctx context.Context, session *HLSSession, work func()) bool {
+	if session.ordinary != nil {
+		return ordinaryHLSGo(ctx, session, work)
+	}
+	shareHLSGo(session, work)
+	return true
+}
+
 func (o *shareHLSOwned) beginChange(ctx context.Context) (context.Context, context.CancelFunc, func(), error) {
 	noop := func() {}
 	if o == nil || o.guard.current(ctx) != nil {
@@ -1084,39 +1118,52 @@ func (o *shareHLSOwned) openInput(ctx context.Context, method, rangeHeader strin
 }
 
 type shareHLSPipe struct {
-	source  io.ReadCloser
-	writer  io.WriteCloser
-	reader  io.Reader
-	mu      sync.Mutex
-	started bool
-	done    chan struct{}
-	once    sync.Once
-	err     error
+	source     io.ReadCloser
+	writer     io.WriteCloser
+	childInput *os.File
+	reader     io.Reader
+	mu         sync.Mutex
+	started    bool
+	closed     bool
+	done       chan struct{}
+	once       sync.Once
+	err        error
 }
 
 func newShareHLSPipe(cmd *exec.Cmd, source io.ReadCloser, reader io.Reader) (*shareHLSPipe, error) {
-	writer, err := cmd.StdinPipe()
+	childInput, writer, err := os.Pipe()
 	if err != nil {
 		return nil, err
 	}
-	return &shareHLSPipe{source: source, reader: reader, writer: writer, done: make(chan struct{})}, nil
+	cmd.Stdin = childInput
+	return &shareHLSPipe{source: source, reader: reader, writer: writer, childInput: childInput, done: make(chan struct{})}, nil
 }
 func (p *shareHLSPipe) start() {
 	p.mu.Lock()
+	if p.closed || p.started {
+		p.mu.Unlock()
+		return
+	}
 	p.started = true
-	p.mu.Unlock()
 	go func() { defer close(p.done); _, p.err = io.Copy(p.writer, p.reader); _ = p.writer.Close() }()
+	p.mu.Unlock()
+	// The actual child has already inherited stdin. The parent retains no
+	// inaccessible exec.Cmd endpoint, including when Start was never called.
+	_ = p.childInput.Close()
 }
 func (p *shareHLSPipe) closeAndJoin() {
 	if p == nil {
 		return
 	}
 	p.once.Do(func() {
-		_ = p.source.Close()
-		_ = p.writer.Close()
 		p.mu.Lock()
+		p.closed = true
 		started := p.started
 		p.mu.Unlock()
+		// Signal both real pipe ends before a source Close can block joining.
+		_ = p.childInput.Close()
+		_ = p.writer.Close()
+		_ = p.source.Close()
 		if started {
 			<-p.done
 		}
