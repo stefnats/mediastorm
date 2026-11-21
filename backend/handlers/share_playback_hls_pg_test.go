@@ -242,6 +242,132 @@ func shareHLSTestSubtitleMedia(t *testing.T) []byte {
 	return data
 }
 
+// Real buffered HTTP must finish while its interruption callback is still
+// owned. A recorder cannot observe SetWriteDeadline(now) dropping a tiny JSON
+// response before net/http has flushed its physical buffer.
+func shareHLSTestHealthyHTTP(t *testing.T, f *sharePlaybackHTTPFixture, s *HLSSession, segment string) {
+	t.Helper()
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		vars := map[string]string{"sessionID": s.ID, "segment": segment}
+		r = mux.SetURLVars(r, vars)
+		handler := http.HandlerFunc(f.video.ServeHLSSegment)
+		if strings.HasSuffix(r.URL.Path, "/status") {
+			handler = f.video.GetHLSSessionStatus
+		}
+		f.serve(t, w, r, handler)
+	}))
+	client := server.Client()
+	client.Timeout = 8 * time.Second
+	t.Cleanup(func() { client.CloseIdleConnections(); server.Close() })
+	for _, suffix := range []string{"/status", "/" + segment} {
+		response, err := client.Get(server.URL + "/api/video/hls/" + s.ID + suffix)
+		if err != nil {
+			t.Fatalf("actual healthy HTTP response unavailable: %v", err)
+		}
+		data, readErr := io.ReadAll(response.Body)
+		closeErr := response.Body.Close()
+		if readErr != nil || closeErr != nil || response.StatusCode != http.StatusOK || len(data) == 0 {
+			t.Fatalf("actual healthy HTTP was cut off before physical flush: status=%d bytes=%d read=%v close=%v", response.StatusCode, len(data), readErr, closeErr)
+		}
+		if suffix == "/status" {
+			var actual map[string]json.RawMessage
+			if json.Unmarshal(data, &actual) != nil || len(actual) == 0 {
+				t.Fatal("actual tiny buffered status JSON was not completely received")
+			}
+		} else {
+			expected, err := os.ReadFile(filepath.Join(s.OutputDir, segment))
+			if err != nil || !bytes.Equal(data, expected) {
+				t.Fatal("actual generated segment HTTP body was truncated or substituted", err)
+			}
+		}
+	}
+}
+
+// A genuine concurrent seek cancels the actual old continuation reference,
+// while the original source remains current. Denying that generation must not
+// later become an implicit 200 when borrowed source cleanup flushes headers.
+func shareHLSTestSeekPreheaderRetirement(t *testing.T, f *sharePlaybackHTTPFixture, s *HLSSession, p *shareHLSTestProvider) {
+	t.Helper()
+	for _, explicit := range []bool{true, false} {
+		ctx, cancel := context.WithCancel(t.Context())
+		entered, cancelled, allowReturn, oldDone, seekDone := make(chan struct{}), make(chan struct{}), make(chan struct{}), make(chan struct{}), make(chan struct{})
+		var releaseOnce sync.Once
+		release := func() { releaseOnce.Do(func() { close(allowReturn) }) }
+		oldStarted, seekStarted := false, false
+		var seekResponse *httptest.ResponseRecorder
+		var oldWriteN int
+		var oldWriteErr error
+		oldResponse := httptest.NewRecorder()
+		t.Cleanup(func() {
+			cancel()
+			release()
+			p.release()
+			if oldStarted {
+				shareHLSTestWait(t, oldDone, "actual retired continuation cleanup")
+			}
+			if seekStarted {
+				shareHLSTestWait(t, seekDone, "actual concurrent seek cleanup")
+			}
+		})
+		previous := shareHLSTestCommand(s)
+		request := mux.SetURLVars(httptest.NewRequestWithContext(ctx, "GET", "http://synthetic.test/api/video/hls/"+s.ID+"/status", nil), map[string]string{"sessionID": s.ID})
+		oldStarted = true
+		go func() {
+			defer close(oldDone)
+			f.serve(t, oldResponse, request, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				out, linked, finish, allowed := f.video.beginHLSVOD(w, r, s.ID, false)
+				if !allowed {
+					return
+				}
+				defer finish()
+				if !f.video.requireHLSSessionAccess(out, linked, s.ID) {
+					return
+				}
+				close(entered)
+				<-linked.Context().Done()
+				close(cancelled)
+				<-allowReturn
+				if explicit {
+					_ = http.NewResponseController(out).Flush()
+					out.WriteHeader(http.StatusOK)
+					oldWriteN, oldWriteErr = out.Write([]byte("SYNTHETIC-RETIRED-GENERATION"))
+				}
+			}))
+		}()
+		select {
+		case <-entered:
+		case <-oldDone:
+			t.Fatalf("genuine old continuation was not attached: %d", oldResponse.Code)
+		case <-time.After(12 * time.Second):
+			t.Fatal("actual old continuation entry timed out")
+		}
+		seekStarted = true
+		go func() {
+			defer close(seekDone)
+			seekResponse = shareHLSTestRequest(f, t, s, "POST", "/seek?time=0.125", f.video.SeekHLSSession)
+		}()
+		shareHLSTestWait(t, cancelled, "real seek cancellation of old ref")
+		if s.shareOwned.guard.ctx.Err() != nil {
+			t.Fatal("canary retired source owner instead of only old HLS reference")
+		}
+		shareHLSTestPending(t, seekDone, "seek joining actual old HTTP reference")
+		release()
+		shareHLSTestWait(t, oldDone, "actual old continuation return")
+		if oldResponse.Code != http.StatusForbidden || bytes.Contains(oldResponse.Body.Bytes(), []byte("SYNTHETIC-RETIRED-GENERATION")) || explicit && (oldWriteN != 0 || oldWriteErr == nil) {
+			t.Fatalf("retired HLS preheader falsely intended success: explicit=%t status=%d", explicit, oldResponse.Code)
+		}
+		shareHLSTestWait(t, seekDone, "actual same-owner replacement seek")
+		if seekResponse == nil || seekResponse.Code != http.StatusOK {
+			t.Fatalf("actual replacement seek failed: %v", seekResponse)
+		}
+		shareHLSTestPoll(t, "real replacement command after old ref join", func() bool { cmd := shareHLSTestCommand(s); return cmd != nil && cmd != previous })
+		if previous == nil || previous.ProcessState == nil {
+			t.Fatal("old actual child was not Waited before replacement")
+		}
+		cancel()
+	}
+}
+
 func TestSharePlaybackActualHLSOwnership(t *testing.T) {
 	media := managedHLSMedia(t)
 	for _, name := range []string{"initial-worker", "request-finished-owner-lives", "fresh-segment-request", "cross-binding-segment-denied", "current-source-revokes-worker", "current-household-revokes-worker", "native-policy-retires-worker", "seek-original-owner", "restart-original-owner", "audio-extract-original-owner", "old-child-joined-before-renewal", "stop-joins-exact-child", "runtime-close-joins-worker", "no-background-context-escape"} {
@@ -312,6 +438,7 @@ func TestSharePlaybackActualHLSOwnership(t *testing.T) {
 				if w.Code != http.StatusOK || w.Body.Len() == 0 {
 					t.Fatalf("real fresh segment request: %d %s", w.Code, w.Body.String())
 				}
+				shareHLSTestHealthyHTTP(t, f, s, segment)
 			case "cross-binding-segment-denied":
 				second, e := f.runtime.Redeem(httptest.NewRequest("GET", "http://synthetic.test/share/"+f.linkToken, nil), f.linkToken)
 				if e != nil {
@@ -355,6 +482,11 @@ func TestSharePlaybackActualHLSOwnership(t *testing.T) {
 				p.release()
 				shareHLSTestRetired(t, s, cmd, p)
 			case "seek-original-owner", "restart-original-owner", "old-child-joined-before-renewal":
+				if name == "seek-original-owner" {
+					shareHLSTestSeekPreheaderRetirement(t, f, s, p)
+					cmd = shareHLSTestCommand(s)
+					bodies, contexts = p.state()
+				}
 				beforeExpiry := expiry
 				finished := make(chan struct{})
 				var response *httptest.ResponseRecorder

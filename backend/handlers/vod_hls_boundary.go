@@ -772,7 +772,7 @@ func (h *VideoHandler) beginSharedHLS(w http.ResponseWriter, r *http.Request, sn
 		return w, r.WithContext(context.WithValue(r.Context(), shareHLSHTTPKey{}, ref)), noop, true
 	}
 	mutation := r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/seek")
-	out, request, finish, err := o.guard.borrowHTTP(w, r, o.profile, o.resource)
+	out, request, flushBorrowed, cleanupBorrowed, err := o.guard.borrowHTTP(w, r, o.profile, o.resource)
 	if err != nil {
 		shareMediaError(w, err)
 		return w, r, noop, false
@@ -782,9 +782,12 @@ func (h *VideoHandler) beginSharedHLS(w http.ResponseWriter, r *http.Request, sn
 	o.mu.Lock()
 	if o.closing || o.changing {
 		o.mu.Unlock()
+		// A registration race must intend denial before borrowed cleanup can
+		// flush an implicit successful response while the source stays current.
+		shareMediaError(out, errVODOwner)
+		flushBorrowed()
 		cancel()
-		finish()
-		shareMediaError(w, errVODOwner)
+		cleanupBorrowed()
 		return w, r, noop, false
 	}
 	if !mutation {
@@ -800,14 +803,20 @@ func (h *VideoHandler) beginSharedHLS(w http.ResponseWriter, r *http.Request, sn
 		_ = transport.SetReadDeadline(time.Now())
 		_ = transport.SetWriteDeadline(time.Now())
 	})
+	writer := &shareHLSWriter{ResponseWriter: out, ref: ref, ctx: ctx}
 	var once sync.Once
 	release := func() {
 		once.Do(func() {
-			cancel()
+			writer.finishHeaders()
+			// Both real interruption links remain armed through physical Flush.
+			// Disarm this child before the lower cleanup intentionally cancels
+			// its parent, so net/http can still send the final response chunk.
+			flushBorrowed()
 			if !stopIO() {
 				<-interrupted
 			}
-			finish()
+			cancel()
+			cleanupBorrowed()
 			if !mutation {
 				o.mu.Lock()
 				_, counted := o.refs[ref]
@@ -819,7 +828,7 @@ func (h *VideoHandler) beginSharedHLS(w http.ResponseWriter, r *http.Request, sn
 			}
 		})
 	}
-	return &shareHLSWriter{ResponseWriter: out, ref: ref, ctx: ctx}, request, release, true
+	return writer, request, release, true
 }
 func shareHLSRef(r *http.Request) *shareHLSHTTPRef {
 	ref, _ := r.Context().Value(shareHLSHTTPKey{}).(*shareHLSHTTPRef)
@@ -847,26 +856,65 @@ func (ref *shareHLSHTTPRef) check(ctx context.Context) error {
 
 type shareHLSWriter struct {
 	http.ResponseWriter
-	ref *shareHLSHTTPRef
-	ctx context.Context
+	ref             *shareHLSHTTPRef
+	ctx             context.Context
+	started, denied bool
 }
 
 func (w *shareHLSWriter) Unwrap() http.ResponseWriter { return w.ResponseWriter }
-func (w *shareHLSWriter) WriteHeader(status int) {
-	if w.ref.check(w.ctx) == nil {
-		w.ResponseWriter.WriteHeader(status)
+func (w *shareHLSWriter) deny(err error) {
+	if w.denied {
+		return
+	}
+	w.denied = true
+	if w.started {
+		return
+	}
+	w.started = true
+	for _, header := range []string{"Content-Length", "Content-Range", "Content-Encoding", "Accept-Ranges", "Location"} {
+		w.Header().Del(header)
+	}
+	shareMediaError(w.ResponseWriter, err)
+}
+func (w *shareHLSWriter) finishHeaders() {
+	if !w.started {
+		if err := w.ref.check(w.ctx); err != nil {
+			w.deny(err)
+		}
 	}
 }
-func (w *shareHLSWriter) Write(p []byte) (int, error) {
+func (w *shareHLSWriter) WriteHeader(status int) {
+	if w.denied {
+		return
+	}
 	if err := w.ref.check(w.ctx); err != nil {
+		w.deny(err)
+		return
+	}
+	w.started = true
+	w.ResponseWriter.WriteHeader(status)
+}
+func (w *shareHLSWriter) Write(p []byte) (int, error) {
+	if w.denied {
+		return 0, errVODOwner
+	}
+	if err := w.ref.check(w.ctx); err != nil {
+		w.deny(err)
 		return 0, err
 	}
+	w.started = true
 	return w.ResponseWriter.Write(p)
 }
 func (w *shareHLSWriter) Flush() {
-	if w.ref.check(w.ctx) == nil {
-		_ = http.NewResponseController(w.ResponseWriter).Flush()
+	if w.denied {
+		return
 	}
+	if err := w.ref.check(w.ctx); err != nil {
+		w.deny(err)
+		return
+	}
+	w.started = true
+	_ = http.NewResponseController(w.ResponseWriter).Flush()
 }
 
 type shareHLSBody struct {

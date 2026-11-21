@@ -356,15 +356,17 @@ func (g *shareMediaGuard) Close() {
 // borrowHTTP retains the exact original async source until this real request's
 // file/response IO ends. Cleanup/stop calls validate separately without a ref,
 // so the command that waits for cleanup cannot accidentally wait for itself.
-func (g *shareMediaGuard) borrowHTTP(w http.ResponseWriter, r *http.Request, profile, resource string) (http.ResponseWriter, *http.Request, func(), error) {
+// The sole HLS caller flushes, disarms its upper IO link, then invokes cleanup.
+// These private lifecycle callbacks never supply source permission.
+func (g *shareMediaGuard) borrowHTTP(w http.ResponseWriter, r *http.Request, profile, resource string) (http.ResponseWriter, *http.Request, func(), func(), error) {
 	noop := func() {}
 	if g == nil || profile == "" || resource == "" || g.owner.CheckRequest(r, profile, resource) != nil {
-		return w, r, noop, datastore.ErrSharePlaybackChanged
+		return w, r, noop, noop, datastore.ErrSharePlaybackChanged
 	}
 	g.mu.Lock()
 	if g.closed || g.ctx.Err() != nil {
 		g.mu.Unlock()
-		return w, r, noop, datastore.ErrSharePlaybackChanged
+		return w, r, noop, noop, datastore.ErrSharePlaybackChanged
 	}
 	g.operations.Add(1)
 	g.mu.Unlock()
@@ -391,12 +393,14 @@ func (g *shareMediaGuard) borrowHTTP(w http.ResponseWriter, r *http.Request, pro
 		})
 	}
 	writer := &shareMediaWriter{ResponseWriter: w, guard: g, request: request}
-	finish := func() { writer.finishHeaders(); _ = transport.Flush(); cleanup() }
+	// The caller must keep its upper interruption callback armed through Flush,
+	// then disarm/join it before this lower cleanup intentionally cancels ctx.
+	flush := func() { writer.finishHeaders(); _ = transport.Flush() }
 	if ctx.Err() != nil {
 		cleanup()
-		return w, r, noop, datastore.ErrSharePlaybackChanged
+		return w, r, noop, noop, datastore.ErrSharePlaybackChanged
 	}
-	return writer, request, finish, nil
+	return writer, request, flush, cleanup, nil
 }
 
 func (g *shareMediaGuard) wrapProviderBody(ctx context.Context, body io.ReadCloser, provider streaming.Provider, method string, status int) (io.ReadCloser, error) {
