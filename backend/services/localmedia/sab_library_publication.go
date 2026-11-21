@@ -195,6 +195,7 @@ func (r *SABLibraryPublicationResult) View() datastore.SABLibraryPublicationView
 		return datastore.SABLibraryPublicationView{}
 	}
 	out := r.view
+	out.Ordinals = append([]int(nil), out.Ordinals...)
 	out.Files = append([]datastore.SABLibraryPublicationFileView(nil), out.Files...)
 	return out
 }

@@ -48,22 +48,43 @@
     }
     return value;
   }
-  async function request(url, method, stamp) {
+  async function boundedJSON(reply) {
+    const reader = reply.body.getReader();
+    let used = 0;
+    const chunks = [];
+    try {
+      for (;;) {
+        const part = await reader.read();
+        if (part.done) break;
+        used += part.value.byteLength;
+        if (used > 524288) { await reader.cancel(); throw Error('shape'); }
+        chunks.push(part.value);
+      }
+    } finally { reader.releaseLock(); }
+    const bytes = new Uint8Array(used);
+    let offset = 0;
+    for (const chunk of chunks) { bytes.set(chunk, offset); offset += chunk.byteLength; }
+    return JSON.parse(new TextDecoder('utf-8', {fatal: true}).decode(bytes));
+  }
+  async function request(url, method, stamp, body) {
     const controller = new AbortController(); pending.add(controller);
     try {
-      const reply = await fetch(url, {method, credentials: 'same-origin', cache: 'no-store', redirect: 'error', headers: {Accept: 'application/json'}, signal: controller.signal});
+      const headers = {Accept: 'application/json'};
+      if (body !== undefined) headers['Content-Type'] = 'application/json';
+      const reply = await fetch(url, {method, credentials: 'same-origin', cache: 'no-store', redirect: 'error', headers, body: body === undefined ? undefined : JSON.stringify(body), signal: controller.signal});
       if (!isCurrent(stamp)) throw Error('stale');
       if (reply.status === 401 || reply.status === 403) { terminal(); throw Error('terminal'); }
       if (!reply.ok) {
         const error = Error('request');
+        error.status = reply.status;
         try {
-          const body = await reply.json();
+          const body = await boundedJSON(reply);
           if (body && ['copy_already_recorded', 'copy_budget_exceeded', 'copy_outcome_unknown', 'fallback_busy'].includes(body.code)) error.code = body.code;
         } catch (_) { /* Errors remain fixed local messages. */ }
         throw error;
       }
       if (!(reply.headers.get('content-type') || '').includes('application/json')) throw Error('shape');
-      const value = await reply.json();
+      const value = await boundedJSON(reply);
       if (!isCurrent(stamp)) throw Error('stale');
       return value;
     } finally { pending.delete(controller); }
@@ -81,7 +102,8 @@
     refresh.addEventListener('click', async () => {
       if (!isCurrent(stamp) || refresh.disabled) return;
       const intent = action(card);
-      for (const button of card.querySelectorAll('button')) button.disabled = true;
+      const paused = Array.from(card.querySelectorAll('button,input,select'), node => [node, node.disabled]);
+      for (const [node] of paused) node.disabled = true;
       status.textContent = 'Checking this existing handoff…';
       try {
         const value = observation(await request(endpoint.href + '/' + item.queueId + '/refresh', 'POST', stamp));
@@ -89,7 +111,7 @@
         if (owns(card, stamp, intent)) draw(value, card, stamp);
       } catch (_) {
         if (owns(card, stamp, intent)) status.textContent = 'Status could not be refreshed. Saved observation is unchanged; try Refresh status again.';
-      } finally { if (owns(card, stamp, intent)) for (const button of card.querySelectorAll('button')) button.disabled = false; }
+      } finally { if (owns(card, stamp, intent)) for (const [node, disabled] of paused) if (node.isConnected) node.disabled = disabled; }
     });
     card.append(refresh, status);
     if (panel.dataset.managedCopy === 'true') copyControls(item, card, stamp, refresh);
@@ -132,6 +154,8 @@
       view.disabled = waiting; refresh.disabled = waiting; copy.disabled = waiting || !eligible();
       const preview = card.querySelector('[data-sab-import-preview]');
       if (preview) preview.disabled = waiting;
+      const publication = card.querySelector('[data-sab-library-publication]');
+      if (publication) publication.inert = waiting;
     }
     function show(value) {
       current = value;
@@ -139,6 +163,7 @@
       state.textContent = value.reason === 'not_configured' ? 'Copy files is not set up.' : value.reason === 'configuration_changed' ? 'The download settings have changed. Saved copy status is unknown.' : labels[value.state];
       if (value.chargedBytes !== undefined) state.append(text('span', ' Counted toward the storage limit: ' + value.chargedBytes.toLocaleString() + ' bytes.'));
       hideCopy(!eligible()); controls(false);
+      if (panel.dataset.libraryPublication === 'true') publicationControls(item, card, stamp, value);
     }
     view.addEventListener('click', async () => {
       if (view.disabled || !isCurrent(stamp) || !card.isConnected) return;
@@ -161,6 +186,156 @@
     });
     card.append(view, copy, state);
   }
+  function publicationControls(item, card, stamp, saved) {
+    const old = card.querySelector('[data-sab-library-publication]');
+    if (old) old.remove();
+    if (saved.state !== 'copy_recorded' || saved.fileCount < 1) return;
+    const box = document.createElement('fieldset'); box.dataset.sabLibraryPublication = 'true'; box.style.minInlineSize = '0';
+    box.append(text('legend', 'Add saved files to a library'));
+    const load = text('button', 'Choose library'); load.type = 'button'; load.className = 'btn btn-secondary';
+    const check = text('button', 'Check library import'); check.type = 'button'; check.className = 'btn btn-secondary';
+    const label = text('label', 'Target library ');
+    const select = document.createElement('select'); select.setAttribute('aria-label', 'Target library'); select.style.maxWidth = '100%'; select.disabled = true; label.append(select);
+    const inspect = text('button', 'Inspect saved files'); inspect.type = 'button'; inspect.disabled = true; inspect.className = 'btn btn-secondary';
+    const files = document.createElement('div');
+    const publish = text('button', 'Add selected files'); publish.type = 'button'; publish.disabled = true; publish.className = 'btn btn-primary';
+    const reconcile = text('button', 'Verify recorded import'); reconcile.type = 'button'; reconcile.disabled = true; reconcile.className = 'btn btn-secondary';
+    const state = text('p', 'Choose a library and inspect the saved files before adding them.'); state.setAttribute('role', 'status'); state.setAttribute('aria-live', 'polite');
+    box.append(load, check, label, inspect, files, publish, reconcile, state); card.append(box);
+    const base = endpoint.href.replace(/\/$/, '') + '/' + item.queueId + '/publication';
+    const librariesURL = new URL(panel.dataset.libraryEndpoint, location.href);
+    if (librariesURL.origin !== location.origin || librariesURL.search || librariesURL.hash) { box.remove(); return; }
+    let libraries = [], record = null, knownEmpty = false, previewLibrary = '', eligible = [], working = false;
+    const all = Array.from({length: saved.fileCount}, (_, i) => i + 1);
+    function ordinals(value) {
+      if (!Array.isArray(value) || value.length < 1 || value.length > 128) throw Error('shape');
+      let previous = 0;
+      for (const ordinal of value) {
+        if (!Number.isSafeInteger(ordinal) || ordinal <= previous || ordinal > saved.fileCount) throw Error('shape');
+        previous = ordinal;
+      }
+      return value;
+    }
+    function publication(value) {
+      const allowed = ['reference', 'state', 'bytes', 'files', 'libraryId', 'ordinals'];
+      const states = ['claimed', 'files_prepared', 'files_durable', 'registration_unknown', 'reconciliation_required', 'registered'];
+      if (!keys(value, allowed) || typeof value.reference !== 'string' || !/^[0-9a-f]{32}$/.test(value.reference) || !states.includes(value.state) || typeof value.libraryId !== 'string' || !value.libraryId || value.libraryId.length > 256 || !Number.isSafeInteger(value.bytes) || value.bytes < 1 || value.bytes > 1099511627776) throw Error('shape');
+      ordinals(value.ordinals);
+      if (value.files !== undefined) {
+        if (!Array.isArray(value.files) || value.files.length !== value.ordinals.length) throw Error('shape');
+        let sum = 0;
+        value.files.forEach((file, i) => {
+          if (!keys(file, ['ordinal', 'itemId', 'bytes', 'container', 'matchStatus']) || file.ordinal !== value.ordinals[i] || typeof file.itemId !== 'string' || !file.itemId || file.itemId.length > 256 || !Number.isSafeInteger(file.bytes) || file.bytes < 1 || file.bytes > 8589934592 || file.container !== undefined && !['matroska', 'mov', 'mpegts'].includes(file.container) || !['unmatched', 'matched', 'manual', 'low_confidence'].includes(file.matchStatus)) throw Error('shape');
+          sum += file.bytes;
+        });
+        if (sum !== value.bytes) throw Error('shape');
+      }
+      if (value.state === 'registered' && !value.files) throw Error('shape');
+      return value;
+    }
+    function selected() {
+      return Array.from(files.querySelectorAll('input:checked'), input => Number(input.value)).sort((a, b) => a - b);
+    }
+    function sync() {
+      if (working) return;
+      select.disabled = libraries.length === 0 || record !== null;
+      inspect.disabled = !knownEmpty || !select.value;
+      publish.disabled = !knownEmpty || !previewLibrary || previewLibrary !== select.value || selected().length === 0;
+      reconcile.disabled = !record || !['files_durable', 'registration_unknown'].includes(record.state);
+    }
+    function resetPreview() { previewLibrary = ''; eligible = []; files.replaceChildren(); sync(); }
+    function paused() {
+      working = true;
+      const controls = Array.from(card.querySelectorAll('button,input,select'), node => [node, node.disabled]);
+      for (const [node] of controls) node.disabled = true;
+      return () => { working = false; for (const [node, disabled] of controls) if (node.isConnected) node.disabled = disabled; sync(); };
+    }
+    async function currentRecord(current) {
+      try { return publication(await request(base, 'GET', current)); }
+      catch (error) { if (error.status === 404) return null; throw error; }
+    }
+    function showRecord(value) {
+      record = value; knownEmpty = value === null; resetPreview();
+      if (!value) { state.textContent = 'No library import is recorded. Select a target and inspect the saved files.'; return; }
+      select.value = value.libraryId;
+      const labels = {claimed: 'An import is recorded, but the copied files are not confirmed. Check the recorded operation before taking further action.', files_prepared: 'Files were prepared, but their complete copy is not confirmed. Manual checking is required.', files_durable: 'The copied files are saved. Verify the recorded import to check and finish library registration.', registration_unknown: 'Library registration could not be confirmed. Verify the recorded import before taking further action.', reconciliation_required: 'This import needs manual checking.', registered: 'The files were added to the library. Review their title matches in Libraries.'};
+      state.textContent = labels[value.state];
+      if (value.files) for (const file of value.files) files.append(text('p', 'File ' + file.ordinal + ': ' + (file.matchStatus === 'unmatched' ? 'Added; title not matched.' : 'Added.')));
+      sync();
+    }
+    async function loadStatus(withLibraries) {
+      if (!isCurrent(stamp) || !box.isConnected) return;
+      const intent = action(card), restore = paused();
+      knownEmpty = false; resetPreview(); state.textContent = 'Checking the saved library import…';
+      try {
+        if (withLibraries) {
+          const value = await request(librariesURL, 'GET', stamp);
+          if (!Array.isArray(value) || value.length > 256) throw Error('shape');
+          const local = value.filter(library => library && library.sourceType === 'local');
+          const seen = new Set();
+          for (const library of local) {
+            if (typeof library.id !== 'string' || !library.id || library.id.length > 256 || seen.has(library.id) || typeof library.name !== 'string' || library.name.length > 4096) throw Error('shape');
+            seen.add(library.id);
+          }
+          if (!owns(card, stamp, intent)) return;
+          libraries = local; select.replaceChildren();
+          for (const library of local) { const option = text('option', library.name); option.value = library.id; select.append(option); }
+        }
+        const value = await currentRecord(stamp);
+        if (!owns(card, stamp, intent)) return;
+        showRecord(value);
+        if (!libraries.length && !record) state.textContent = 'Create a local library in Libraries, then choose it here.';
+      } catch (_) {
+        if (owns(card, stamp, intent)) { record = null; knownEmpty = false; state.textContent = 'The library import could not be checked. Use Check library import before taking further action.'; }
+      } finally { if (owns(card, stamp, intent)) restore(); }
+    }
+    load.addEventListener('click', () => { if (!load.disabled) loadStatus(true); });
+    check.addEventListener('click', () => { if (!check.disabled) loadStatus(libraries.length === 0); });
+    select.addEventListener('change', () => { action(card); resetPreview(); });
+    inspect.addEventListener('click', async () => {
+      if (inspect.disabled || !knownEmpty || !isCurrent(stamp)) return;
+      const libraryId = select.value, intent = action(card), restore = paused();
+      resetPreview(); state.textContent = 'Inspecting the current saved files…';
+      try {
+        const value = await request(base + '/preview', 'POST', stamp, {libraryId, ordinals: all});
+        if (!keys(value, ['queueId', 'libraryId', 'files']) || value.queueId !== item.queueId || value.libraryId !== libraryId || !Array.isArray(value.files) || value.files.length !== all.length) throw Error('shape');
+        value.files.forEach((file, i) => {
+          if (!keys(file, ['ordinal', 'bytes', 'container', 'eligible']) || file.ordinal !== all[i] || !Number.isSafeInteger(file.bytes) || file.bytes < 0 || file.bytes > 8589934592 || typeof file.eligible !== 'boolean' || file.eligible && !['matroska', 'mov', 'mpegts'].includes(file.container) || !file.eligible && file.container !== undefined) throw Error('shape');
+        });
+        if (!owns(card, stamp, intent)) return;
+        previewLibrary = libraryId; eligible = value.files.filter(file => file.eligible).map(file => file.ordinal);
+        for (const file of value.files) {
+          const row = document.createElement('label'), input = document.createElement('input');
+          input.type = 'checkbox'; input.value = String(file.ordinal); input.checked = file.eligible; input.disabled = !file.eligible;
+          input.addEventListener('change', sync);
+          row.append(input, document.createTextNode(' File ' + file.ordinal + ': ' + (file.eligible ? ({matroska: 'Matroska', mov: 'MP4', mpegts: 'MPEG-TS'})[file.container] : 'Format not recognized') + ', ' + file.bytes.toLocaleString() + ' bytes.'));
+          files.append(row, document.createElement('br'));
+        }
+        state.textContent = eligible.length ? 'Choose the files to add. Titles are not matched automatically.' : 'No supported video container was recognized in these saved files.';
+      } catch (_) {
+        if (owns(card, stamp, intent)) { resetPreview(); state.textContent = 'The saved files could not be inspected. No library import was requested.'; }
+      } finally { if (owns(card, stamp, intent)) restore(); }
+    });
+    async function mutate(recover) {
+      if (!isCurrent(stamp) || !box.isConnected || (recover ? reconcile.disabled : publish.disabled)) return;
+      const libraryId = recover ? record.libraryId : select.value;
+      const choice = recover ? record.ordinals.slice() : selected();
+      if (!recover && (previewLibrary !== libraryId || !choice.length || choice.some(ordinal => !eligible.includes(ordinal)))) return;
+      const name = libraries.find(library => library.id === libraryId)?.name || 'the recorded library';
+      if (!window.confirm(recover ? 'Verify the existing copied files and finish their recorded import into ' + name + '?' : 'Add ' + choice.length + ' selected file(s) to ' + name + '? Files start without a matched title.')) return;
+      const intent = action(card), restore = paused();
+      knownEmpty = false; state.textContent = recover ? 'Verifying the recorded import…' : 'Adding the selected saved files…';
+      try {
+        const value = publication(await request(base + (recover ? '/reconcile' : ''), 'POST', stamp, {libraryId, ordinals: choice}));
+        if (value.libraryId !== libraryId || JSON.stringify(value.ordinals) !== JSON.stringify(choice) || value.state !== 'registered') throw Error('shape');
+        if (owns(card, stamp, intent)) showRecord(value);
+      } catch (_) {
+        if (owns(card, stamp, intent)) { record = null; resetPreview(); knownEmpty = false; state.textContent = 'The import could not be confirmed and may have completed. Use Check library import before taking further action.'; }
+      } finally { if (owns(card, stamp, intent)) restore(); }
+    }
+    publish.addEventListener('click', () => mutate(false));
+    reconcile.addEventListener('click', () => mutate(true));
+  }
   function inventory(value, id) {
     if (!keys(value, ['queueId', 'state', 'observedAt', 'entryCount', 'observedBytes', 'files']) || value.queueId !== id || value.state !== 'local_inventory' || !copyTime(value.observedAt) || !Number.isSafeInteger(value.entryCount) || value.entryCount < 1 || value.entryCount > 128 || !Number.isSafeInteger(value.observedBytes) || value.observedBytes < 0 || value.observedBytes > 1099511627776 || !Array.isArray(value.files) || value.files.length !== value.entryCount) throw Error('shape');
     const kinds = {mkv: 'media_candidate', mp4: 'media_candidate', ts: 'media_candidate', m2ts: 'media_candidate', avi: 'media_candidate', nfo: 'other_regular', srt: 'other_regular', other: 'other_regular'};
@@ -179,7 +354,7 @@
     inspect.addEventListener('click', async () => {
       if (inspect.disabled || refresh.disabled || !isCurrent(stamp) || !card.isConnected) return;
       const intent = action(card);
-      const buttons = Array.from(card.querySelectorAll('button'), button => [button, button.disabled]);
+      const buttons = Array.from(card.querySelectorAll('button,input,select'), button => [button, button.disabled]);
       for (const [button] of buttons) button.disabled = true;
       result.replaceChildren(text('p', 'Inspecting file details…'));
       try {

@@ -3151,6 +3151,7 @@ func registerSABLibraryPublicationRoutes(router *mux.Router, admin *handlers.Adm
 		call         http.HandlerFunc
 	}{
 		{"/admin/api/usenet/fallback/{queueID}/publication", http.MethodPost, handler.Publish},
+		{"/admin/api/usenet/fallback/{queueID}/publication/preview", http.MethodPost, handler.Preview},
 		{"/admin/api/usenet/fallback/{queueID}/publication", http.MethodGet, handler.Status},
 		{"/admin/api/usenet/fallback/{queueID}/publication/reconcile", http.MethodPost, handler.Reconcile},
 	} {
