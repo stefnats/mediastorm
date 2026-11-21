@@ -423,14 +423,24 @@ func TestSharePlaybackActualHLSOwnership(t *testing.T) {
 			case "fresh-segment-request":
 				var segment string
 				shareHLSTestPoll(t, "actual generated segment", func() bool {
-					files, _ := filepath.Glob(filepath.Join(s.OutputDir, "*.ts"))
-					for _, file := range files {
-						if info, e := os.Stat(file); e == nil && info.Size() > 0 {
-							segment = filepath.Base(file)
-							return true
-						}
+					s.mu.RLock()
+					extension := s.SegmentExt
+					s.mu.RUnlock()
+					if extension == "" {
+						return false
 					}
-					return false
+					switch extension {
+					case ".ts", ".m4s", ".mp4":
+					default:
+						t.Fatalf("actual HLS plan selected unsupported segment extension %q", extension)
+					}
+					candidate := "segment0" + extension
+					info, err := os.Stat(filepath.Join(s.OutputDir, candidate))
+					if err != nil || !info.Mode().IsRegular() || info.Size() <= 0 {
+						return false
+					}
+					segment = candidate
+					return true
 				})
 				w := httptest.NewRecorder()
 				r := mux.SetURLVars(httptest.NewRequest("GET", "http://synthetic.test/api/video/hls/"+s.ID+"/"+segment, nil), map[string]string{"sessionID": s.ID, "segment": segment})

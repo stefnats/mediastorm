@@ -191,6 +191,10 @@ func TestSharePlaybackActualVideoBoundary(t *testing.T) {
 		t.Run(kind, func(t *testing.T) {
 			provider := &shareStaticProvider{data: shareWAV()}
 			resource := "synthetic:owned.wav"
+			if kind == "metadata" {
+				resource = "synthetic:owned.mkv"
+				provider.data = shareHLSTestSubtitleMedia(t)
+			}
 			if kind == "library-access-revoked" {
 				resource = "localmedia:share-item/synthetic.wav"
 			}
@@ -271,7 +275,7 @@ func TestSharePlaybackActualVideoBoundary(t *testing.T) {
 				path = "/api/video/direct-url?path=" + url.QueryEscape(resource) + "&profileId=" + f.profileID
 				handler = f.video.GetDirectURL
 			case "resource-placeholder":
-				path = "/api/video/stream?path=%40shared&profileId=" + f.profileID
+				path = "/api/video/stream?path=" + url.QueryEscape(models.SessionScopeResourcePlaceholder) + "&profileId=" + f.profileID
 			case "substituted-profile":
 				path = "/api/video/stream?path=" + url.QueryEscape(resource) + "&profileId=synthetic-wrong"
 			case "substituted-resource":
@@ -297,7 +301,7 @@ func TestSharePlaybackActualVideoBoundary(t *testing.T) {
 					t.Fatal(e)
 				}
 				u, e := url.Parse(v["url"])
-				if e != nil || u.IsAbs() || u.Path != "/api/video/stream" || u.Query().Get("path") != "@shared" || u.Query().Get("token") != f.token || u.Query().Get("profileId") != f.profileID || provider.calls.Load() != 0 {
+				if e != nil || u.IsAbs() || u.Path != "/api/video/stream" || u.Query().Get("path") != models.SessionScopeResourcePlaceholder || u.Query().Get("token") != f.token || u.Query().Get("profileId") != f.profileID || provider.calls.Load() != 0 {
 					t.Fatal("direct URL escaped genuine scoped proxy")
 				}
 				following := shareInvokeHTTP(t, f, u.RequestURI(), f.video.StreamVideo)
