@@ -38,6 +38,7 @@ import (
 	"novastream/internal/integration"
 	"novastream/internal/nzb/metadata"
 	metapb "novastream/internal/nzb/metadata/proto"
+	nzbutils "novastream/internal/nzb/utils"
 	"novastream/internal/nzbfilesystem"
 	"novastream/internal/settingsbootstrap"
 	"novastream/internal/settingscommit"
@@ -340,6 +341,37 @@ func managedTestPG(t *testing.T, hold bool, encryption string) *managedTestFixtu
 	})
 	return f
 }
+
+// The legacy adapter passes descriptive arguments alongside the stripped path.
+// This fixture retains a real filesystem and decodes that existing wire format;
+// the arguments neither authenticate the request nor supply file bytes.
+type managedTestLegacyFS struct {
+	afero.Fs
+	opens atomic.Int32
+}
+
+func (f *managedTestLegacyFS) OpenFileWithContext(ctx context.Context, raw string, flag int, perm os.FileMode) (afero.File, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	actual, err := nzbutils.NewPathWithArgsFromString(raw)
+	expected := nzbutils.NewPathWithArgs("/movie")
+	expected.SetOrigin("/webdav/movie")
+	if err != nil || actual.Path != "/movie" || actual.Origin() != "/webdav/movie" || raw != expected.String() {
+		return nil, os.ErrNotExist
+	}
+	f.opens.Add(1)
+	file, err := f.Fs.OpenFile(actual.Path, flag, perm)
+	if err != nil {
+		return nil, err
+	}
+	if err := ctx.Err(); err != nil {
+		_ = file.Close()
+		return nil, err
+	}
+	return file, nil
+}
+
 func managedTestRequest(method, target string) *http.Request {
 	r := httptest.NewRequest(method, "http://synthetic.test"+target, nil)
 	r.RequestURI = r.URL.RequestURI()
@@ -416,9 +448,12 @@ func TestManagedWebDAVRegisteredBasic(t *testing.T) {
 				if _, e := f.store.Pool().Exec(t.Context(), `UPDATE users SET is_kids_profile=true WHERE id='profile'`); e != nil {
 					t.Fatal(e)
 				}
-				fs := afero.NewMemMapFs()
+				fs := &managedTestLegacyFS{Fs: afero.NewMemMapFs()}
 				if e := afero.WriteFile(fs, "/movie", []byte("synthetic-legacy"), 0600); e != nil {
 					t.Fatal(e)
+				}
+				if info, e := fs.Stat("/movie"); e != nil || info.Size() != int64(len("synthetic-legacy")) {
+					t.Fatal("actual legacy plain-path Stat failed", e)
 				}
 				legacy, e := NewHandler(&Config{Prefix: "/webdav", User: "synthetic-basic", Pass: "synthetic-password"}, fs, nil, nil, nil)
 				if e != nil {
@@ -426,7 +461,7 @@ func TestManagedWebDAVRegisteredBasic(t *testing.T) {
 				}
 				w := httptest.NewRecorder()
 				legacy.GetHTTPHandler().ServeHTTP(w, managedTestRequest("GET", "/webdav/movie"))
-				if w.Code != 200 || w.Body.String() != "synthetic-legacy" {
+				if w.Code != 200 || w.Body.String() != "synthetic-legacy" || fs.opens.Load() != 1 {
 					t.Fatal("explicit legacy mode changed", w.Code)
 				}
 				w = httptest.NewRecorder()
