@@ -1,24 +1,34 @@
 package handlers
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/gorilla/mux"
 	"novastream/internal/auth"
+	"novastream/internal/datastore"
 	"novastream/models"
 	"novastream/services/watchrooms"
 )
 
-type WatchRoomsHandler struct{ service *watchrooms.Service }
+type WatchRoomsHandler struct {
+	service     *watchrooms.Service
+	managedRoom *managedWatchRoomEntry
+}
 
 func NewWatchRoomsHandler(service *watchrooms.Service) *WatchRoomsHandler {
 	return &WatchRoomsHandler{service: service}
 }
 
 func (h *WatchRoomsHandler) Create(w http.ResponseWriter, r *http.Request) {
+	if h.managedRoom != nil {
+		h.managedRoom.serve(w, r, http.HandlerFunc(h.createManagedRoom))
+		return
+	}
 	var in models.WatchRoomCreate
 	dec := json.NewDecoder(r.Body)
 	dec.DisallowUnknownFields()
@@ -216,4 +226,273 @@ func writeWatchRoomJSON(w http.ResponseWriter, status int, value any) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
 	_ = json.NewEncoder(w).Encode(value)
+}
+
+type managedWatchRoomEntry struct {
+	authority *datastore.WatchRoomAuthority
+	basePath  string
+}
+type watchRoomEntryKey struct{}
+type watchRoomBoundEntry struct {
+	entry   *managedWatchRoomEntry
+	lease   *datastore.WatchRoomHTTPEntry
+	initial *http.Request
+}
+
+func (h *WatchRoomsHandler) SetManagedWatchRoomAuthority(authority *datastore.WatchRoomAuthority, basePath string) {
+	h.managedRoom = &managedWatchRoomEntry{authority: authority, basePath: "/" + strings.Trim(basePath, "/")}
+	if h.managedRoom.basePath == "/" {
+		h.managedRoom.basePath = ""
+	}
+}
+func (h *WatchPartyHandler) SetManagedWatchRoomAuthority(authority *datastore.WatchRoomAuthority, basePath string) {
+	h.managedRoom = &managedWatchRoomEntry{authority: authority, basePath: "/" + strings.Trim(basePath, "/")}
+	if h.managedRoom.basePath == "/" {
+		h.managedRoom.basePath = ""
+	}
+}
+func (e *managedWatchRoomEntry) matches(r *http.Request) bool {
+	if r == nil || r.URL == nil {
+		return false
+	}
+	p := r.URL.Path
+	if e.basePath != "" && strings.HasPrefix(p, e.basePath+"/") {
+		p = strings.TrimPrefix(p, e.basePath)
+	}
+	const prefix = "/api/users/"
+	if !strings.HasPrefix(p, prefix) {
+		return false
+	}
+	parts := strings.Split(strings.TrimPrefix(p, prefix), "/")
+	if len(parts) == 2 && parts[0] != "" && parts[1] == "watch-rooms" {
+		return r.Method == http.MethodPost
+	}
+	if len(parts) == 4 && parts[0] != "" && parts[1] == "watch-rooms" && parts[2] != "" {
+		return parts[3] == "external-invite" && (r.Method == http.MethodPost || r.Method == http.MethodDelete) || parts[3] == "external-source" && r.Method == http.MethodPost
+	}
+	return false
+}
+func (h *WatchRoomsHandler) BoundedManagedEntry(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if h.managedRoom != nil && h.managedRoom.matches(r) {
+			h.managedRoom.serve(w, r, next)
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+func (h *WatchPartyHandler) BoundedManagedEntry(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if h.managedRoom != nil && h.managedRoom.matches(r) {
+			h.managedRoom.serve(w, r, next)
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+func watchRoomStopSignal(ctx context.Context, cancel context.CancelFunc) func() {
+	done := make(chan struct{})
+	stop := context.AfterFunc(ctx, func() { defer close(done); cancel() })
+	return func() {
+		if !stop() {
+			<-done
+		}
+	}
+}
+func watchRoomIO(w http.ResponseWriter, r *http.Request, next http.Handler, authority *datastore.WatchRoomAuthority) {
+	transport := http.NewResponseController(w)
+	deadline := time.Now().Add(30 * time.Second)
+	if at, ok := r.Context().Deadline(); ok && at.Before(deadline) {
+		deadline = at
+	}
+	_ = transport.SetReadDeadline(deadline)
+	_ = transport.SetWriteDeadline(deadline)
+	ended := make(chan struct{})
+	stop := context.AfterFunc(r.Context(), func() {
+		defer close(ended)
+		_ = transport.SetReadDeadline(time.Now())
+		_ = transport.SetWriteDeadline(time.Now())
+	})
+	writer := &watchRoomHTTPWriter{ResponseWriter: w, request: r, authority: authority}
+	defer func() {
+		if !writer.started && writer.unavailable() {
+			writer.deny()
+		}
+		// Keep real interruption hooks armed until the actual buffered transport
+		// flush ends; retire/join them before any intentional local cancellation.
+		_ = transport.Flush()
+		if !stop() {
+			<-ended
+		}
+	}()
+	next.ServeHTTP(writer, r)
+}
+func (e *managedWatchRoomEntry) serve(w http.ResponseWriter, r *http.Request, next http.Handler) {
+	if e == nil || e.authority == nil || e.authority.Context().Err() != nil {
+		_ = http.NewResponseController(w).SetReadDeadline(time.Now())
+		_ = http.NewResponseController(w).SetWriteDeadline(time.Now().Add(2 * time.Second))
+		writeJSONError(w, "watch room operation unavailable", http.StatusServiceUnavailable)
+		return
+	}
+	if bound, _ := r.Context().Value(watchRoomEntryKey{}).(*watchRoomBoundEntry); bound != nil && bound.entry.authority == e.authority {
+		if bound.lease.Context().Err() != nil {
+			writeJSONError(w, "watch room operation unavailable", http.StatusServiceUnavailable)
+			return
+		}
+		if r == bound.initial {
+			next.ServeHTTP(w, r)
+			return
+		}
+		// The post-auth wrapper retains the SAME genuine framed request. Its actual
+		// earlier auth deadline must interrupt upstream ownership/body readers, and
+		// its physical Flush ends before intentional Authenticate release.
+		watchRoomIO(w, r, next, e.authority)
+		return
+	}
+	lease, err := e.authority.OpenHTTPEntry(r)
+	if err != nil {
+		writeManagedRoomError(w, err)
+		return
+	}
+	ctx, cancel := context.WithDeadline(r.Context(), lease.ExpiresAt())
+	stopSource := watchRoomStopSignal(lease.Context(), cancel)
+	bounded := r.WithContext(ctx)
+	state := &watchRoomBoundEntry{entry: e, lease: lease, initial: bounded}
+	bounded = bounded.WithContext(context.WithValue(bounded.Context(), watchRoomEntryKey{}, state))
+	state.initial = bounded
+	defer func() { stopSource(); cancel(); lease.Close() }()
+	watchRoomIO(w, bounded, next, e.authority)
+}
+
+type watchRoomHTTPWriter struct {
+	http.ResponseWriter
+	request         *http.Request
+	authority       *datastore.WatchRoomAuthority
+	started, denied bool
+}
+
+func (w *watchRoomHTTPWriter) Unwrap() http.ResponseWriter { return w.ResponseWriter }
+func (w *watchRoomHTTPWriter) unavailable() bool {
+	return w.request.Context().Err() != nil || w.authority == nil || w.authority.Context().Err() != nil
+}
+func (w *watchRoomHTTPWriter) deny() {
+	if w.denied {
+		return
+	}
+	w.denied = true
+	if w.started {
+		return
+	}
+	w.started = true
+	for _, h := range []string{"Content-Length", "Content-Range", "Content-Encoding", "Location"} {
+		w.Header().Del(h)
+	}
+	writeJSONError(w.ResponseWriter, "watch room operation unavailable", http.StatusServiceUnavailable)
+}
+func (w *watchRoomHTTPWriter) WriteHeader(status int) {
+	if w.denied {
+		return
+	}
+	if w.unavailable() {
+		w.deny()
+		return
+	}
+	w.started = true
+	w.ResponseWriter.WriteHeader(status)
+}
+func (w *watchRoomHTTPWriter) Write(data []byte) (int, error) {
+	if w.denied {
+		return 0, datastore.ErrWatchRoomUnavailable
+	}
+	if w.unavailable() {
+		w.deny()
+		return 0, datastore.ErrWatchRoomUnavailable
+	}
+	w.started = true
+	return w.ResponseWriter.Write(data)
+}
+func (w *watchRoomHTTPWriter) Flush() {
+	if w.denied {
+		return
+	}
+	if w.unavailable() {
+		w.deny()
+		return
+	}
+	w.started = true
+	_ = http.NewResponseController(w.ResponseWriter).Flush()
+}
+func writeManagedRoomError(w http.ResponseWriter, err error) {
+	status := http.StatusForbidden
+	switch {
+	case errors.Is(err, datastore.ErrWatchRoomUnavailable), errors.Is(err, datastore.ErrWatchRoomBusy), errors.Is(err, datastore.ErrWatchRoomUnknown):
+		status = http.StatusServiceUnavailable
+	case errors.Is(err, datastore.ErrWatchRoomRecreate), errors.Is(err, datastore.ErrWatchRoomChanged):
+		status = http.StatusGone
+	case errors.Is(err, datastore.ErrWatchRoomConflict):
+		status = http.StatusConflict
+	case errors.Is(err, datastore.ErrWatchRoomInvalid):
+		status = http.StatusBadRequest
+	}
+	writeJSONError(w, "watch room operation unavailable", status)
+}
+func writeManagedRoomResult(w http.ResponseWriter, r *http.Request, entry *managedWatchRoomEntry, status int, value any, until time.Time) {
+	valid := func() bool {
+		return r.Context().Err() == nil && entry != nil && entry.authority != nil && entry.authority.Context().Err() == nil && until.After(time.Now())
+	}
+	deadline := time.Now().Add(30 * time.Second)
+	if at, ok := r.Context().Deadline(); ok && at.Before(deadline) {
+		deadline = at
+	}
+	if until.IsZero() || deadline.Before(until) {
+		until = deadline
+	}
+	raw, err := json.Marshal(value)
+	if err != nil || len(raw) > 1<<20 || !valid() {
+		writeJSONError(w, "watch room operation unavailable", 503)
+		return
+	}
+	output, cancel := context.WithDeadline(r.Context(), until)
+	transport := http.NewResponseController(w)
+	_ = transport.SetWriteDeadline(until)
+	ended := make(chan struct{})
+	stop := context.AfterFunc(output, func() { defer close(ended); _ = transport.SetWriteDeadline(time.Now()) })
+	defer func() {
+		if !stop() {
+			<-ended
+		}
+		cancel()
+	}()
+	if output.Err() != nil || !valid() {
+		writeJSONError(w, "watch room operation unavailable", 503)
+		return
+	}
+	w.Header().Set("Cache-Control", "private, no-store")
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	if status != http.StatusNoContent {
+		if _, err = w.Write(raw); err != nil {
+			return
+		}
+	}
+	_ = transport.Flush()
+}
+func (h *WatchRoomsHandler) createManagedRoom(w http.ResponseWriter, r *http.Request) {
+	var in models.WatchRoomCreate
+	decoder := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20))
+	decoder.DisallowUnknownFields()
+	if e := decoder.Decode(&in); e != nil {
+		if r.Context().Err() != nil {
+			writeManagedRoomError(w, datastore.ErrWatchRoomUnavailable)
+		} else {
+			writeManagedRoomError(w, datastore.ErrWatchRoomInvalid)
+		}
+		return
+	}
+	room, e := h.managedRoom.authority.CreateRoom(r, mux.Vars(r)["userID"], in)
+	if e != nil {
+		writeManagedRoomError(w, e)
+		return
+	}
+	writeManagedRoomResult(w, r, h.managedRoom, http.StatusCreated, room, room.ExpiresAt)
 }
