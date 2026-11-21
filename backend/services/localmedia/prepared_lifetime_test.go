@@ -77,6 +77,7 @@ type preparedMetadataGate struct {
 	url          string
 	client       *http.Client
 	entered      chan struct{}
+	received     chan struct{}
 	closeEntered chan struct{}
 	release      chan struct{}
 	closeOnce    sync.Once
@@ -111,7 +112,7 @@ func (b *preparedMetadataBody) Close() error {
 }
 func preparedMetadata(t *testing.T, hold bool) *preparedMetadataGate {
 	t.Helper()
-	g := &preparedMetadataGate{entered: make(chan struct{}, 16), closeEntered: make(chan struct{}, 16), release: make(chan struct{}), hold: hold}
+	g := &preparedMetadataGate{entered: make(chan struct{}, 16), received: make(chan struct{}, 16), closeEntered: make(chan struct{}, 16), release: make(chan struct{}), hold: hold}
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(200)
 		_ = http.NewResponseController(w).Flush()
@@ -133,7 +134,11 @@ func (g *preparedMetadataGate) request(ctx context.Context) error {
 	if e != nil {
 		return e
 	}
+	if response == nil || response.Body == nil {
+		return fmt.Errorf("actual metadata response body unavailable")
+	}
 	defer response.Body.Close()
+	g.received <- struct{}{}
 	_, e = io.ReadAll(response.Body)
 	return e
 }
@@ -289,6 +294,7 @@ func TestPreparedLocalMediaLifecycle(t *testing.T) {
 			}
 		}
 		preparedLocalSignal(t, g.entered)
+		preparedLocalSignal(t, g.received)
 		if synchronous {
 			stopCaller()
 			preparedLocalSignal(t, g.closeEntered)

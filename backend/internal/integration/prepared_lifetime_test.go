@@ -1,6 +1,6 @@
 //go:build linux
 
-package integration
+package integration_test
 
 import (
 	"context"
@@ -17,6 +17,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	"novastream/config"
 	"novastream/internal/database"
+	"novastream/internal/integration"
 	"novastream/internal/nzb/metadata"
 	metapb "novastream/internal/nzb/metadata/proto"
 	"novastream/internal/nzbfilesystem"
@@ -24,21 +25,21 @@ import (
 	"novastream/services/streaming"
 )
 
-func preparedNzbConfig(t *testing.T) NzbConfig {
+func preparedNzbConfig(t *testing.T) integration.NzbConfig {
 	t.Helper()
 	root := t.TempDir()
-	return NzbConfig{QueueDatabasePath: filepath.Join(root, "queue.db"), MetadataRootPath: filepath.Join(root, "metadata"), MaxProcessorWorkers: 1}
+	return integration.NzbConfig{QueueDatabasePath: filepath.Join(root, "queue.db"), MetadataRootPath: filepath.Join(root, "metadata"), MaxProcessorWorkers: 1}
 }
-func preparedNzbFixture(t *testing.T, legacy bool) (*NzbSystem, context.CancelFunc) {
+func preparedNzbFixture(t *testing.T, legacy bool) (*integration.NzbSystem, context.CancelFunc) {
 	t.Helper()
 	cfg := preparedNzbConfig(t)
 	ctx, cancel := context.WithCancel(t.Context())
-	var ns *NzbSystem
+	var ns *integration.NzbSystem
 	var e error
 	if legacy {
-		ns, e = NewNzbSystem(cfg, nil, func() *config.AltMountConfig { return &config.AltMountConfig{} })
+		ns, e = integration.NewNzbSystem(cfg, nil, func() *config.AltMountConfig { return &config.AltMountConfig{} })
 	} else {
-		ns, e = PrepareNzbSystem(ctx, cfg, nil, func() *config.AltMountConfig { return &config.AltMountConfig{} })
+		ns, e = integration.PrepareNzbSystem(ctx, cfg, nil, func() *config.AltMountConfig { return &config.AltMountConfig{} })
 	}
 	if e != nil {
 		cancel()
@@ -63,7 +64,7 @@ func preparedNzbWait(t *testing.T, done <-chan struct{}) {
 
 // This is the actual original startup factory, not a readiness mock. Its
 // importer remains inactive throughout construction and denied file opening.
-func preparedNzbPublicationInstall(t *testing.T, ns *NzbSystem) {
+func preparedNzbPublicationInstall(t *testing.T, ns *integration.NzbSystem) {
 	t.Helper()
 	raw := os.Getenv("SETTINGS_COMMIT_TEST_DATABASE_URL")
 	if raw == "" {
@@ -125,30 +126,30 @@ func preparedNzbPublicationInstall(t *testing.T, ns *NzbSystem) {
 	if e = startup.Finish(); e != nil {
 		t.Fatal(e)
 	}
-	issuer, e := startup.NewSABLibraryPublicationIssuer(store, ns.service)
+	issuer, e := startup.NewSABLibraryPublicationIssuer(store, ns.ImporterService())
 	if e != nil || issuer == nil {
 		t.Fatal("original prepared source could not be installed before activation", e)
 	}
 	defer issuer.Close()
-	if ns.service.IsRunning() {
+	if ns.ImporterService().IsRunning() {
 		t.Fatal("factory activated importer")
 	}
-	ns.database.Connection().SetMaxOpenConns(1)
-	holder, e := ns.database.Connection().Conn(t.Context())
+	ns.Database().Connection().SetMaxOpenConns(1)
+	holder, e := ns.Database().Connection().Conn(t.Context())
 	if e != nil {
 		t.Fatal(e)
 	}
 	defer holder.Close()
-	before := ns.database.Connection().Stats().WaitCount
+	before := ns.Database().Connection().Stats().WaitCount
 	bounded, cancelOpen := context.WithTimeout(t.Context(), 10*time.Second)
 	defer cancelOpen()
 	stage, target := t.TempDir(), t.TempDir()
 	policy := config.SABPublicationPolicyValues{StageRoot: stage, MaxBytes: 32 << 20, SourceFingerprint: strings.Repeat("a", 64)}
-	actual, e := ns.service.OpenSABStagedPublication(bounded, 1, policy, target, []int{1})
+	actual, e := ns.ImporterService().OpenSABStagedPublication(bounded, 1, policy, target, []int{1})
 	if actual != nil {
 		actual.Close()
 	}
-	if e == nil || actual != nil || ns.database.Connection().Stats().WaitCount != before {
+	if e == nil || actual != nil || ns.Database().Connection().Stats().WaitCount != before {
 		t.Fatal("inactive publication source performed actual SQLite/file work", e)
 	}
 }
@@ -165,12 +166,12 @@ func TestPreparedNzbSystemLifecycle(t *testing.T) {
 			t.Fatal(e)
 		}
 		_ = db.Close()
-		ns, e := PrepareNzbSystem(t.Context(), cfg, nil, nil)
+		ns, e := integration.PrepareNzbSystem(t.Context(), cfg, nil, nil)
 		if e != nil {
 			t.Fatal(e)
 		}
 		t.Cleanup(func() { _ = ns.Close() })
-		record, e := ns.health.GetFileHealth("synthetic.mkv")
+		record, e := database.NewHealthRepository(ns.Database().Connection()).GetFileHealth("synthetic.mkv")
 		if e != nil || record == nil || record.Status != database.HealthStatusChecking {
 			t.Fatal("preparation reset health", e)
 		}
@@ -178,21 +179,21 @@ func TestPreparedNzbSystemLifecycle(t *testing.T) {
 	t.Run("prepare-no-import-start", func(t *testing.T) {
 		ns, _ := preparedNzbFixture(t, false)
 		preparedNzbPublicationInstall(t, ns)
-		if ns.service.IsRunning() {
+		if ns.ImporterService().IsRunning() {
 			t.Fatal("preparation started import workers")
 		}
-		if _, e := ns.database.Connection().Exec(`INSERT INTO import_queue(nzb_path,status,priority,retry_count,max_retries)VALUES('synthetic.nzb','processing',0,0,3)`); e != nil {
+		if _, e := ns.Database().Connection().Exec(`INSERT INTO import_queue(nzb_path,status,priority,retry_count,max_retries)VALUES('synthetic.nzb','processing',0,0,3)`); e != nil {
 			t.Fatal(e)
 		}
 		var status string
-		if e := ns.database.Connection().QueryRow(`SELECT status FROM import_queue`).Scan(&status); e != nil || status != "processing" {
+		if e := ns.Database().Connection().QueryRow(`SELECT status FROM import_queue`).Scan(&status); e != nil || status != "processing" {
 			t.Fatal("inactive queue was reset", e)
 		}
 	})
 	t.Run("prepared-stream-denied-before-open", func(t *testing.T) {
 		ns, _ := preparedNzbFixture(t, false)
 		response, e := ns.Stream(t.Context(), streaming.Request{Method: http.MethodGet, Path: "/webdav/not-present.mkv"})
-		if response != nil || e != ErrNzbSystemUnavailable {
+		if response != nil || e != integration.ErrNzbSystemUnavailable {
 			if response != nil {
 				_ = response.Close()
 			}
@@ -201,23 +202,23 @@ func TestPreparedNzbSystemLifecycle(t *testing.T) {
 	})
 	t.Run("activate-health-and-queue-once", func(t *testing.T) {
 		ns, _ := preparedNzbFixture(t, false)
-		if e := ns.health.UpdateFileHealth("synthetic.mkv", database.HealthStatusChecking, nil, nil, nil); e != nil {
+		if e := database.NewHealthRepository(ns.Database().Connection()).UpdateFileHealth("synthetic.mkv", database.HealthStatusChecking, nil, nil, nil); e != nil {
 			t.Fatal(e)
 		}
 		if e := ns.Activate(t.Context()); e != nil {
 			t.Fatal(e)
 		}
-		record, e := ns.health.GetFileHealth("synthetic.mkv")
-		if e != nil || record == nil || record.Status != database.HealthStatusPending || !ns.service.IsRunning() {
+		record, e := database.NewHealthRepository(ns.Database().Connection()).GetFileHealth("synthetic.mkv")
+		if e != nil || record == nil || record.Status != database.HealthStatusPending || !ns.ImporterService().IsRunning() {
 			t.Fatal("actual activation did not initialize dependencies", e)
 		}
-		if e = ns.health.UpdateFileHealth("synthetic.mkv", database.HealthStatusChecking, nil, nil, nil); e != nil {
+		if e = database.NewHealthRepository(ns.Database().Connection()).UpdateFileHealth("synthetic.mkv", database.HealthStatusChecking, nil, nil, nil); e != nil {
 			t.Fatal(e)
 		}
 		if ns.Activate(t.Context()) == nil {
 			t.Fatal("second activation accepted")
 		}
-		record, e = ns.health.GetFileHealth("synthetic.mkv")
+		record, e = database.NewHealthRepository(ns.Database().Connection()).GetFileHealth("synthetic.mkv")
 		if e != nil || record.Status != database.HealthStatusChecking {
 			t.Fatal("rejected activation repeated health mutation", e)
 		}
@@ -225,19 +226,19 @@ func TestPreparedNzbSystemLifecycle(t *testing.T) {
 	t.Run("cancel-before-activation", func(t *testing.T) {
 		ns, cancel := preparedNzbFixture(t, false)
 		cancel()
-		if ns.Activate(t.Context()) == nil || ns.service.IsRunning() {
+		if ns.Activate(t.Context()) == nil || ns.ImporterService().IsRunning() {
 			t.Fatal("cancelled NZB system activated")
 		}
 	})
 	t.Run("activation-failure-no-source", func(t *testing.T) {
 		ns, _ := preparedNzbFixture(t, false)
-		if _, e := ns.database.Connection().Exec(`DROP TABLE file_health`); e != nil {
+		if _, e := ns.Database().Connection().Exec(`DROP TABLE file_health`); e != nil {
 			t.Fatal(e)
 		}
 		if ns.Activate(t.Context()) == nil {
 			t.Fatal("failed health reset activated source")
 		}
-		if r, e := ns.Stream(t.Context(), streaming.Request{Method: http.MethodGet, Path: "/webdav/synthetic.mkv"}); e != ErrNzbSystemUnavailable || r != nil {
+		if r, e := ns.Stream(t.Context(), streaming.Request{Method: http.MethodGet, Path: "/webdav/synthetic.mkv"}); e != integration.ErrNzbSystemUnavailable || r != nil {
 			if r != nil {
 				_ = r.Close()
 			}
@@ -247,7 +248,7 @@ func TestPreparedNzbSystemLifecycle(t *testing.T) {
 	t.Run("partial-constructor-closes-database", func(t *testing.T) {
 		cfg := preparedNzbConfig(t)
 		cfg.MaxProcessorWorkers = 33
-		ns, e := PrepareNzbSystem(t.Context(), cfg, nil, nil)
+		ns, e := integration.PrepareNzbSystem(t.Context(), cfg, nil, nil)
 		if e == nil || ns != nil {
 			if ns != nil {
 				_ = ns.Close()
@@ -267,7 +268,7 @@ func TestPreparedNzbSystemLifecycle(t *testing.T) {
 	})
 	t.Run("source-operation-close-joins", func(t *testing.T) {
 		cfg := preparedNzbConfig(t)
-		ns, e := PrepareNzbSystem(t.Context(), cfg, nil, func() *config.AltMountConfig { return &config.AltMountConfig{} })
+		ns, e := integration.PrepareNzbSystem(t.Context(), cfg, nil, func() *config.AltMountConfig { return &config.AltMountConfig{} })
 		if e != nil {
 			t.Fatal(e)
 		}
@@ -297,7 +298,7 @@ func TestPreparedNzbSystemLifecycle(t *testing.T) {
 		default:
 			t.Fatal("dependency closed before actual source cleanup")
 		}
-		if ns.database.Connection().Ping() == nil {
+		if ns.Database().Connection().Ping() == nil {
 			t.Fatal("actual SQLite dependency survived Close")
 		}
 	})
@@ -306,13 +307,20 @@ func TestPreparedNzbSystemLifecycle(t *testing.T) {
 		if e := ns.Close(); e != nil {
 			t.Fatal(e)
 		}
-		if ns.database.Connection().Ping() == nil || ns.life.Err() == nil {
-			t.Fatal("unstarted dependencies remained live")
+		if ns.Database().Connection().Ping() == nil || ns.Activate(t.Context()) == nil || ns.ImporterService().Start(t.Context()) == nil {
+			t.Fatal("unstarted original dependencies remained live or restarted")
+		}
+		response, e := ns.Stream(t.Context(), streaming.Request{Method: http.MethodGet, Path: "/webdav/synthetic.mkv"})
+		if response != nil {
+			_ = response.Close()
+		}
+		if response != nil || e != integration.ErrNzbSystemUnavailable {
+			t.Fatal("closed original source accepted a stream", e)
 		}
 	})
 	t.Run("legacy-constructor-starts", func(t *testing.T) {
 		ns, _ := preparedNzbFixture(t, true)
-		if !ns.service.IsRunning() {
+		if !ns.ImporterService().IsRunning() {
 			t.Fatal("legacy constructor no longer starts queue workers")
 		}
 	})
