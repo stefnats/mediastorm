@@ -360,12 +360,18 @@ func TestLiveEncoderActualAttemptJoin(t *testing.T) {
 	})
 	t.Run("isolated-legacy-process-fixtures-preserved", func(t *testing.T) {
 		ff, _ := ordinaryLifeTools(t)
-		source := filepath.Join(t.TempDir(), "synthetic-legacy.ts")
-		if err := os.WriteFile(source, ccLifeGolden(t, true), 0600); err != nil {
-			t.Fatal(err)
-		}
+		data := ccLifeGolden(t, true)
+		var requests, active atomic.Int32
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			requests.Add(1)
+			active.Add(1)
+			defer active.Add(-1)
+			w.Header().Set("Content-Type", "video/mp2t")
+			_, _ = w.Write(data) // A real finite HTTP input, with natural body EOF.
+		}))
+		t.Cleanup(server.Close)
 		output := filepath.Join(t.TempDir(), "actual-output")
-		session := &HLSSession{ID: "isolated-original", Path: source, OutputDir: output, PlaybackTarget: "native", IsLive: true, LastSegmentRequest: time.Now(), LiveTuning: LiveTuningSettings{ProbeSizeMB: 1, AnalyzeDurationSec: 1}}
+		session := &HLSSession{ID: "isolated-original", Path: server.URL + "/synthetic-legacy.ts", OutputDir: output, PlaybackTarget: "native", IsLive: true, LastSegmentRequest: time.Now(), LiveTuning: LiveTuningSettings{ProbeSizeMB: 1, AnalyzeDurationSec: 1}}
 		manager := &HLSManager{ffmpegPath: ff}
 		ctx, cancel := context.WithTimeout(t.Context(), 15*time.Second)
 		done := make(chan struct{})
@@ -380,13 +386,27 @@ func TestLiveEncoderActualAttemptJoin(t *testing.T) {
 		started = true
 		go func() { defer close(done); err = manager.startLiveTranscoding(ctx, session, 0) }()
 		command := ordinaryLifeCommand(t, session)
+		key := liveUpstreamShareKey(session.Path, session.LiveTuning)
+		var original *liveUpstream
+		ordinaryLifeWait(t, "actual isolated HTTP source/reader not observed", func() bool {
+			sharedLiveUpstreams.mu.Lock()
+			original = sharedLiveUpstreams.streams[key]
+			sharedLiveUpstreams.mu.Unlock()
+			return original != nil
+		})
 		ordinaryLifeChannel(t, done, "finite isolated original process did not return")
 		if err != nil || command.ProcessState == nil {
 			t.Fatal("isolated actual legacy process failed", err)
 		}
 		ordinaryLifeGone(t, command)
-		if _, statErr := os.Stat(filepath.Join(output, "stream.m3u8")); statErr != nil {
-			t.Fatal("actual legacy output absent", statErr)
+		liveLifeOriginalDone(t, original) // Actual body, pump, watchdog and reader end.
+		server.Close()                    // Join the real local producer's accepted HTTP handlers too.
+		if requests.Load() == 0 || active.Load() != 0 {
+			t.Fatal("actual finite HTTP producer was not consumed/joined")
+		}
+		path := liveLifeOutput(t, session)
+		if info, statErr := os.Stat(path); statErr != nil || !info.Mode().IsRegular() || info.Size() == 0 {
+			t.Fatal("actual nonempty legacy output absent", statErr)
 		}
 		if session.ordinary != nil {
 			t.Fatal("isolated fixture manufactured original media permission")
@@ -399,7 +419,7 @@ func encoderLifeStartupJoin(t *testing.T) {
 	data := ccLifeGolden(t, true)
 	state, media := liveLifeHTTPServer(t, data, false)
 	catalog := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		fmt.Fprintf(w, "#EXTM3U\n#EXTINF:-1 tvg-id=\"synthetic.station\",Synthetic A\n%s/original.ts\n#EXTINF:-1 tvg-id=\"synthetic.station\",Synthetic B\n%s/alternative.ts\n", media.URL, media.URL)
+		fmt.Fprintf(w, "#EXTM3U\n#EXTINF:-1 tvg-id=\"Synthetic.de\" tvg-country=\"DE\",Synthetic HD\n%s/original.ts\n#EXTINF:-1 tvg-id=\"Synthetic.de\" tvg-country=\"DE\",Synthetic FHD\n%s/alternative.ts\n", media.URL, media.URL)
 	}))
 	t.Cleanup(catalog.Close)
 	cfg := config.NewManager(filepath.Join(t.TempDir(), "settings.json"))
@@ -412,6 +432,10 @@ func encoderLifeStartupJoin(t *testing.T) {
 	h.SetConfigManager(cfg)
 	h.SetLiveChannelProvider(live)
 	request := httptest.NewRequest(http.MethodGet, "/api/live/hls/start?sourceId=synthetic&profileId=synthetic-profile&url="+url.QueryEscape(media.URL+"/original.ts"), nil)
+	channels, err := live.FetchFilteredChannelsForRequest(request)
+	if err != nil || len(channels) != 2 || channels[0].StationID == "" || channels[0].StationID != channels[1].StationID || channels[0].URL == channels[1].URL {
+		t.Fatal("actual filtered catalog is not two interchangeable quality variants", err)
+	}
 	plan := h.liveStationPlan(request, media.URL+"/original.ts")
 	if plan == nil {
 		t.Fatal("actual configured catalog did not produce original failover plan")
