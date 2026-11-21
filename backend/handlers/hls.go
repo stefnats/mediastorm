@@ -125,6 +125,7 @@ func (d *debugReader) Read(p []byte) (n int, err error) {
 // generating segments faster than the player is consuming them.
 // This prevents excessive disk usage from buffered segments.
 type throttledReader struct {
+	ctx           context.Context
 	r             io.Reader
 	session       *HLSSession
 	lastThrottle  time.Time
@@ -141,13 +142,30 @@ type throttlingProxy struct {
 	applyAuth      func(*http.Request)
 	server         *http.Server
 	port           int
+	ctx            context.Context
+	cancel         context.CancelFunc
+	mu             sync.Mutex
+	closed         bool
+	requests       sync.WaitGroup
+	connections    sync.WaitGroup
+	active         int
+	serveDone      chan struct{}
+	warmDone       chan struct{}
+	closeOnce      sync.Once
+	closeDone      chan struct{}
 }
 
 // newThrottlingProxy creates a new throttling proxy for the given URL.
 // Returns the proxy and the local URL that FFmpeg should use.
-func newThrottlingProxy(targetURL string, session *HLSSession, applyAuth func(*http.Request)) (*throttlingProxy, string, error) {
+func newThrottlingProxy(targetURL string, session *HLSSession, applyAuth func(*http.Request), parents ...context.Context) (*throttlingProxy, string, error) {
 	targetURL, requestHeaders := streamheaders.Extract(targetURL)
+	parent := context.Background()
+	if len(parents) == 1 && parents[0] != nil {
+		parent = parents[0]
+	}
+	ctx, cancel := context.WithCancel(parent)
 	proxy := &throttlingProxy{
+		ctx: ctx, cancel: cancel, serveDone: make(chan struct{}), warmDone: make(chan struct{}), closeDone: make(chan struct{}),
 		targetURL:      targetURL,
 		requestHeaders: requestHeaders,
 		session:        session,
@@ -157,6 +175,7 @@ func newThrottlingProxy(targetURL string, session *HLSSession, applyAuth func(*h
 	// Find a free port
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
+		cancel()
 		return nil, "", fmt.Errorf("failed to find free port: %w", err)
 	}
 	proxy.port = listener.Addr().(*net.TCPAddr).Port
@@ -165,10 +184,22 @@ func newThrottlingProxy(targetURL string, session *HLSSession, applyAuth func(*h
 	mux.HandleFunc("/stream", proxy.handleStream)
 
 	proxy.server = &http.Server{
-		Handler: mux,
+		Handler:           mux,
+		BaseContext:       func(net.Listener) context.Context { return proxy.ctx },
+		ReadHeaderTimeout: 5 * time.Second,
+		ReadTimeout:       30 * time.Second,
+		ConnState: func(_ net.Conn, state http.ConnState) {
+			if state == http.StateNew {
+				proxy.connections.Add(1)
+			}
+			if state == http.StateClosed {
+				proxy.connections.Done()
+			}
+		},
 	}
 
 	go func() {
+		defer close(proxy.serveDone)
 		if err := proxy.server.Serve(listener); err != nil && err != http.ErrServerClosed {
 			log.Printf("[hls] session %s: proxy server error: %v", session.ID, err)
 		}
@@ -181,7 +212,8 @@ func newThrottlingProxy(targetURL string, session *HLSSession, applyAuth func(*h
 	// This establishes TCP + TLS before FFmpeg needs it, reducing seek latency
 	// Uses cdnClient for connection pooling - the connection will be reused by handleStream
 	go func() {
-		warmCtx, warmCancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer close(proxy.warmDone)
+		warmCtx, warmCancel := context.WithTimeout(proxy.ctx, 5*time.Second)
 		defer warmCancel()
 		req, err := http.NewRequestWithContext(warmCtx, http.MethodHead, targetURL, nil)
 		if err != nil {
@@ -201,6 +233,19 @@ func newThrottlingProxy(targetURL string, session *HLSSession, applyAuth func(*h
 }
 
 func (p *throttlingProxy) handleStream(w http.ResponseWriter, r *http.Request) {
+	p.mu.Lock()
+	if p.closed || p.ctx.Err() != nil || p.active >= ordinaryHLSChildLimit {
+		p.mu.Unlock()
+		http.Error(w, "HLS source unavailable", 503)
+		return
+	}
+	p.active++
+	p.requests.Add(1)
+	p.mu.Unlock()
+	defer func() { p.mu.Lock(); p.active--; p.mu.Unlock(); p.requests.Done() }()
+	transport := http.NewResponseController(w)
+	stopIO := familyMediaAfterFunc(r.Context(), func() { _ = transport.SetWriteDeadline(time.Now()) })
+	defer func() { _ = transport.Flush(); stopIO() }()
 	// Encode URL properly (handles spaces and special characters)
 	encodedURL, err := utils.EncodeURLWithSpaces(p.targetURL)
 	if err != nil {
@@ -249,7 +294,7 @@ func (p *throttlingProxy) handleStream(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(resp.StatusCode)
 
 	// Wrap with throttled reader and copy to response
-	throttled := newThrottledReader(resp.Body, p.session)
+	throttled := newThrottledReader(resp.Body, p.session, r.Context())
 	_, err = io.Copy(w, throttled)
 	if err != nil && err != context.Canceled {
 		log.Printf("[hls] session %s: proxy copy error: %v", p.session.ID, err)
@@ -272,22 +317,45 @@ func (p *throttlingProxy) applyRequestAuth(req *http.Request) {
 }
 
 func (p *throttlingProxy) Close() {
-	if p.server != nil {
-		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-		defer cancel()
-		p.server.Shutdown(ctx)
-		log.Printf("[hls] session %s: stopped throttling proxy on port %d", p.session.ID, p.port)
+	if p == nil {
+		return
 	}
+	p.closeOnce.Do(func() {
+		p.mu.Lock()
+		p.closed = true
+		p.cancel()
+		p.mu.Unlock()
+		// Graceful shutdown closes admission and waits for the original HTTP
+		// handlers. Context cancellation interrupts their actual source and output.
+		// No timeout, Kill or socket-close flag substitutes for a physical join.
+		if p.server != nil {
+			_ = p.server.Shutdown(context.Background())
+		}
+		<-p.serveDone
+		p.requests.Wait()
+		p.connections.Wait()
+		<-p.warmDone
+		close(p.closeDone)
+	})
+	<-p.closeDone
 }
 
-func newThrottledReader(r io.Reader, session *HLSSession) *throttledReader {
+func newThrottledReader(r io.Reader, session *HLSSession, contexts ...context.Context) *throttledReader {
+	var ctx context.Context
+	if len(contexts) == 1 {
+		ctx = contexts[0]
+	}
 	return &throttledReader{
+		ctx:     ctx,
 		r:       r,
 		session: session,
 	}
 }
 
 func (t *throttledReader) Read(p []byte) (n int, err error) {
+	if t.ctx != nil && t.ctx.Err() != nil {
+		return 0, t.ctx.Err()
+	}
 	if t.session.shareOwned != nil && t.session.shareOwned.guard.current(t.session.shareOwned.guard.ctx) != nil {
 		return 0, errVODOwner
 	}
@@ -355,6 +423,14 @@ func (t *throttledReader) Read(p []byte) (n int, err error) {
 					return 0, current.Err()
 				case <-timer.C:
 				}
+			} else if t.ctx != nil {
+				timer := time.NewTimer(time.Duration(delayMs) * time.Millisecond)
+				select {
+				case <-t.ctx.Done():
+					timer.Stop()
+					return 0, t.ctx.Err()
+				case <-timer.C:
+				}
 			} else {
 				time.Sleep(time.Duration(delayMs) * time.Millisecond)
 			}
@@ -374,6 +450,7 @@ func (t *throttledReader) Read(p []byte) (n int, err error) {
 
 // HLSSession represents an active HLS transcoding session
 type HLSSession struct {
+	ordinary     *ordinaryHLSSession
 	shareOwned   *shareHLSOwned
 	vodInput     *vodHLSInput
 	vodIdentity  *hlsSessionIdentity
@@ -1447,6 +1524,10 @@ func waitForSubtitleFile(vttPath string, requireCue bool, maxWait time.Duration)
 
 // HLSManager manages HLS transcoding sessions
 type HLSManager struct {
+	ordinary           *ordinaryHLSManager
+	cleanupExited      chan struct{}
+	shutdownOnce       sync.Once
+	shutdownFinished   chan struct{}
 	vodInputMu         sync.Mutex
 	vodInputHandler    *VideoHandler
 	vodInputs          map[*vodHLSInput]bool
@@ -1641,14 +1722,18 @@ func NewHLSManager(baseDir, ffmpegPath, ffprobePath string, streamer streaming.P
 	}
 
 	manager := &HLSManager{
-		sessions:    make(map[string]*HLSSession),
-		baseDir:     baseDir,
-		ffmpegPath:  ffmpegPath,
-		ffprobePath: ffprobePath,
-		streamer:    streamer,
-		cleanupDone: make(chan struct{}),
-		probeCache:  make(map[string]*cachedProbeEntry),
+		sessions:         make(map[string]*HLSSession),
+		baseDir:          baseDir,
+		ffmpegPath:       ffmpegPath,
+		ffprobePath:      ffprobePath,
+		streamer:         streamer,
+		cleanupDone:      make(chan struct{}),
+		cleanupExited:    make(chan struct{}),
+		shutdownFinished: make(chan struct{}),
+		probeCache:       make(map[string]*cachedProbeEntry),
 	}
+
+	manager.ordinary = newOrdinaryHLSManager(manager)
 
 	// Clean up any orphaned directories from previous runs
 	manager.cleanupOrphanedDirectories()
@@ -1984,13 +2069,43 @@ func (m *HLSManager) CreateSession(ctx context.Context, path string, originalPat
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
+	var ordinary *ordinaryHLSSession
+	var ordinaryPublished bool
+	if shareMediaFrom(ctx) == nil {
+		var admissionErr error
+		ordinary, admissionErr = m.ordinaryControl().reserve(ctx)
+		if admissionErr != nil {
+			return nil, admissionErr
+		}
+		ctx = ordinary.setup
+	}
 	sessionID := generateSessionID()
 	claim, err := m.claimHLSSessionDirectory(sessionID)
 	if err != nil {
+		if ordinary != nil {
+			ordinary.finishSetup(false)
+			ordinary.releaseOutput()
+			ordinary.finishOperation()
+		}
 		return nil, fmt.Errorf("create session directory: %w", err)
 	}
-
-	defer m.discardHLSSessionDirectory(claim)
+	if ordinary != nil {
+		ordinary.output = claim.path
+	}
+	defer func() {
+		if ordinary != nil {
+			ordinary.finishSetup(ordinaryPublished)
+		}
+		m.discardHLSSessionDirectory(claim)
+		if ordinary != nil && !ordinaryPublished {
+			if removeErr := os.RemoveAll(claim.path); removeErr == nil {
+				ordinary.releaseOutput()
+			} else {
+				ordinary.recordRemovalFailure(removeErr)
+			}
+			ordinary.finishOperation()
+		}
+	}()
 	outputDir := claim.path
 
 	// Use background context so transcoding continues after HTTP response
@@ -1998,6 +2113,10 @@ func (m *HLSManager) CreateSession(ctx context.Context, path string, originalPat
 	bgCtx, cancel, owned, prepareErr := m.prepareSharedHLS(ctx, path, originalPath, profileID)
 	if prepareErr != nil {
 		return nil, prepareErr
+	}
+	if ordinary != nil {
+		cancel()
+		bgCtx, cancel = ordinary.ctx, ordinary.cancel
 	}
 	prepared := false
 	if owned != nil {
@@ -2239,6 +2358,11 @@ func (m *HLSManager) CreateSession(ctx context.Context, path string, originalPat
 		GrowingSource:           growingSource,
 		SourceGrowing:           growingSource,
 	}
+	if ordinary != nil {
+		session.ordinary = ordinary
+		bgCtx = ordinary.attach(session)
+		session.Cancel = ordinary.current().cancel
+	}
 	if owned != nil {
 		session.shareOwned = owned
 		session.RequestedSource = owned.resource
@@ -2264,11 +2388,12 @@ func (m *HLSManager) CreateSession(ctx context.Context, path string, originalPat
 		return nil, errVODOwner
 	}
 
+	ordinaryPublished = ordinary != nil
 	if owned != nil {
 		owned.watch()
 	}
 	// Start FFmpeg transcoding in background with background context
-	shareHLSGo(session, func() {
+	shareHLSGoContext(bgCtx, session, func() {
 		if err := m.startTranscoding(bgCtx, session, forceAAC); err != nil {
 			log.Printf("[hls] session %s transcoding failed: %v", sessionID, err)
 			session.mu.Lock()
@@ -2286,7 +2411,7 @@ func (m *HLSManager) CreateSession(ctx context.Context, path string, originalPat
 	// for web create-with-offset. Cold starts (offset 0) and native clients still return
 	// immediately so startup latency stays low.
 	if actualTranscodingOffset > 0 && isWebBrowserPlaybackTarget(normalizedPlaybackTarget) {
-		if waited, size := m.waitForPlaylistReady(session, 10*time.Second); waited {
+		if waited, size := m.waitForPlaylistReady(session, 10*time.Second, ctx); waited {
 			log.Printf("[hls] session %s: web warm-start playlist ready (%d bytes)", sessionID, size)
 		} else {
 			log.Printf("[hls] session %s: web warm-start timed out waiting for playlist; returning anyway", sessionID)
@@ -2303,13 +2428,18 @@ func (m *HLSManager) CreateSession(ctx context.Context, path string, originalPat
 	if owned != nil && owned.check(bgCtx, false) != nil {
 		return nil, errVODOwner
 	}
+	if ordinary != nil && ordinary.setup.Err() != nil {
+		ordinaryPublished = false
+		m.CleanupSession(session.ID)
+		return nil, ordinary.setup.Err()
+	}
 	prepared = true
 	return session, nil
 }
 
 // waitForPlaylistReady blocks until stream.m3u8 exists with media content, or maxWait elapses.
 // Returns whether the playlist was ready and its size in bytes.
-func (m *HLSManager) waitForPlaylistReady(session *HLSSession, maxWait time.Duration) (bool, int) {
+func (m *HLSManager) waitForPlaylistReady(session *HLSSession, maxWait time.Duration, callers ...context.Context) (bool, int) {
 	if session == nil || maxWait <= 0 {
 		return false, 0
 	}
@@ -2320,6 +2450,12 @@ func (m *HLSManager) waitForPlaylistReady(session *HLSSession, maxWait time.Dura
 	pollInterval := 25 * time.Millisecond
 	waitStart := time.Now()
 	for {
+		if len(callers) == 1 && callers[0] != nil && callers[0].Err() != nil {
+			return false, 0
+		}
+		if session.ordinary != nil && session.ordinary.ctx.Err() != nil {
+			return false, 0
+		}
 		if session.shareOwned != nil {
 			session.shareOwned.mu.Lock()
 			current := session.shareOwned.run
@@ -3745,6 +3881,12 @@ func (m *HLSManager) startTranscoding(ctx context.Context, session *HLSSession, 
 	if session.shareOwned != nil && session.shareOwned.checkSource(ctx) != nil {
 		return errVODOwner
 	}
+	if ctx == nil || ctx.Err() != nil {
+		return errOrdinaryHLSClosed
+	}
+	var ordinaryRun *ordinaryHLSCommand
+	ctx, ordinaryRun = newOrdinaryHLSCommand(ctx, session)
+	defer ordinaryRun.finish()
 	startTime := time.Now()
 	session.disableUnsafeDirectCast(m.castCapabilities(session))
 	stableCastMode := session.usesStableCastTimeline()
@@ -3884,6 +4026,11 @@ func (m *HLSManager) startTranscoding(ctx context.Context, session *HLSSession, 
 	var directInputPath string
 
 	var proxy *throttlingProxy // proxy server to close when done
+	defer func() {
+		if proxy != nil {
+			proxy.Close()
+		}
+	}()
 
 	// For remote direct URLs, use a throttling proxy so FFmpeg can use HTTP Range requests for
 	// seeking while we still control the download speed. Local providers return filesystem paths;
@@ -3893,7 +4040,7 @@ func (m *HLSManager) startTranscoding(ctx context.Context, session *HLSSession, 
 			videoTracef("[hls] session %s: setting up throttling proxy for direct URL", session.ID)
 
 			var err error
-			proxy, proxyURL, err = newThrottlingProxy(directURL, session, m.applyExternalUsenetWebDAVAuth)
+			proxy, proxyURL, err = newThrottlingProxy(directURL, session, m.applyExternalUsenetWebDAVAuth, ctx)
 			if err != nil {
 				log.Printf("[hls] session %s: failed to create throttling proxy: %v, falling back to pipe", session.ID, err)
 				hasDirectURL = false // Fall through to pipe handling
@@ -3928,7 +4075,7 @@ func (m *HLSManager) startTranscoding(ctx context.Context, session *HLSSession, 
 		var rangeHeader string
 		if session.shareOwned == nil && session.TranscodingOffset > 0 && session.Duration > 0 {
 			// Get file size for byte offset calculation
-			headResp, err := m.streamer.Stream(ctx, streaming.Request{
+			headResp, err := m.ordinaryProviderStream(ctx, streaming.Request{
 				Path:   session.Path,
 				Method: http.MethodHead,
 			})
@@ -3999,7 +4146,7 @@ func (m *HLSManager) startTranscoding(ctx context.Context, session *HLSSession, 
 		if session.shareOwned != nil {
 			streamResp, err = session.shareOwned.openInput(ctx, http.MethodGet, "")
 		} else {
-			streamResp, err = m.streamer.Stream(ctx, streaming.Request{Path: session.Path, Method: http.MethodGet, RangeHeader: rangeHeader})
+			streamResp, err = m.ordinaryProviderStream(ctx, streaming.Request{Path: session.Path, Method: http.MethodGet, RangeHeader: rangeHeader})
 		}
 		if err != nil {
 			log.Printf("[hls] session %s: provider stream failed after %v: %v",
@@ -4007,7 +4154,12 @@ func (m *HLSManager) startTranscoding(ctx context.Context, session *HLSSession, 
 			return fmt.Errorf("provider stream: %w", err)
 		}
 		resp = streamResp
-		defer resp.Close()
+		defer func() {
+			if ordinaryRun != nil {
+				ordinaryRun.cancel()
+			}
+			_ = resp.Close()
+		}()
 		usingPipe = true
 
 		log.Printf("[hls] session %s: provider stream established in %v", session.ID, time.Since(providerStartTime))
@@ -4850,33 +5002,69 @@ func (m *HLSManager) startTranscoding(ctx context.Context, session *HLSSession, 
 
 		// Wrap with throttled reader to slow down input when buffer gets too far ahead
 		// This prevents excessive disk usage from segments generated faster than playback
-		throttledPipe := newThrottledReader(pipeReader, session)
+		throttledPipe := newThrottledReader(pipeReader, session, ctx)
 
 		// Wrap with debug reader to track bytes read and detect when source stream ends
 		debugPipe := newDebugReader(throttledPipe, session.ID)
-		if session.shareOwned != nil {
+		if session.shareOwned != nil || session.ordinary != nil {
 			var pipeErr error
 			sharedPipe, pipeErr = newShareHLSPipe(cmd, resp.Body, debugPipe)
 			if pipeErr != nil {
 				return pipeErr
 			}
-			defer sharedPipe.closeAndJoin()
+			defer func() {
+				if ordinaryRun != nil {
+					ordinaryRun.cancel()
+				}
+				sharedPipe.closeAndJoin()
+			}()
 		} else {
 			cmd.Stdin = debugPipe
 		}
 		log.Printf("[hls] session %s: SOURCE_STREAM started (with throttling and debug reader)", session.ID)
 	}
 
-	stderr, err := cmd.StderrPipe()
-	if err != nil {
-		log.Printf("[hls] session %s: failed to create stderr pipe: %v", session.ID, err)
-		return fmt.Errorf("stderr pipe: %w", err)
+	var stderr io.ReadCloser
+	var ordinaryStderrWriter *os.File
+	var stderrErr error
+	if ordinaryRun != nil {
+		var reader *os.File
+		reader, ordinaryStderrWriter, stderrErr = ordinaryHLSStderr(cmd)
+		stderr = reader
+	} else {
+		stderr, stderrErr = cmd.StderrPipe()
+	}
+	if stderrErr != nil {
+		log.Printf("[hls] session %s: failed to create stderr pipe: %v", session.ID, stderrErr)
+		return fmt.Errorf("stderr pipe: %w", stderrErr)
+	}
+	if ordinaryRun != nil {
+		defer stderr.Close()
+		defer ordinaryStderrWriter.Close()
 	}
 
+	if ordinaryRun != nil {
+		var input io.Closer
+		if resp != nil {
+			input = resp.Body
+		}
+		if ordinaryRun.setCommand(cmd, input, stderr) != nil {
+			return errOrdinaryHLSClosed
+		}
+	}
 	log.Printf("[hls] session %s: starting FFmpeg process", session.ID)
-	if err := cmd.Start(); err != nil {
-		log.Printf("[hls] session %s: FFmpeg start failed: %v", session.ID, err)
-		return fmt.Errorf("ffmpeg start: %w", err)
+	var startErr error
+	if ordinaryRun != nil {
+		startErr = ordinaryRun.startCommand()
+	} else {
+		startErr = cmd.Start()
+	}
+	if ordinaryStderrWriter != nil {
+		_ = ordinaryStderrWriter.Close()
+	}
+	if startErr != nil {
+		log.Printf("[hls] session %s: FFmpeg start failed: %v", session.ID, startErr)
+		return fmt.Errorf("ffmpeg start: %w", startErr)
 	}
 	if sharedPipe != nil {
 		sharedPipe.start()
@@ -4903,7 +5091,9 @@ func (m *HLSManager) startTranscoding(ctx context.Context, session *HLSSession, 
 	inputErrorDetected := false
 
 	// Log FFmpeg errors with timing
-	shareHLSGo(session, func() {
+	stderrDone := make(chan struct{})
+	stderrStarted := shareHLSGoContext(ctx, session, func() {
+		defer close(stderrDone)
 		buf := make([]byte, 4096)
 		lastLog := time.Now()
 		dvErrorCount := 0
@@ -5053,8 +5243,15 @@ func (m *HLSManager) startTranscoding(ctx context.Context, session *HLSSession, 
 
 	})
 
+	if !stderrStarted {
+		_ = cmd.Process.Kill()
+		_ = cmd.Wait()
+		_ = stderr.Close()
+		return errOrdinaryHLSClosed
+	}
+
 	// Monitor for DV errors and kill FFmpeg if detected
-	shareHLSGo(session, func() {
+	shareHLSGoContext(ctx, session, func() {
 		select {
 		case <-dvErrorCh:
 			dvErrorDetected = true
@@ -5066,13 +5263,22 @@ func (m *HLSManager) startTranscoding(ctx context.Context, session *HLSSession, 
 				_ = cmd.Process.Kill()
 			}
 		case <-ctx.Done():
-			// Context cancelled, no action needed
+			if ordinaryRun != nil {
+				select {
+				case <-dvErrorCh:
+					dvErrorDetected = true
+					session.mu.Lock()
+					session.DVDisabled = true
+					session.mu.Unlock()
+				default:
+				}
+			}
 		}
 
 	})
 
 	// Monitor for hevc_metadata errors and kill FFmpeg if detected
-	shareHLSGo(session, func() {
+	shareHLSGoContext(ctx, session, func() {
 		select {
 		case <-hdrMetadataErrorCh:
 			hdrMetadataErrorDetected = true
@@ -5084,13 +5290,22 @@ func (m *HLSManager) startTranscoding(ctx context.Context, session *HLSSession, 
 				_ = cmd.Process.Kill()
 			}
 		case <-ctx.Done():
-			// Context cancelled, no action needed
+			if ordinaryRun != nil {
+				select {
+				case <-hdrMetadataErrorCh:
+					hdrMetadataErrorDetected = true
+					session.mu.Lock()
+					session.HDRMetadataDisabled = true
+					session.mu.Unlock()
+				default:
+				}
+			}
 		}
 
 	})
 
 	// Monitor for input stream errors and kill FFmpeg for recovery
-	shareHLSGo(session, func() {
+	shareHLSGoContext(ctx, session, func() {
 		select {
 		case <-inputErrorCh:
 			inputErrorDetected = true
@@ -5102,14 +5317,23 @@ func (m *HLSManager) startTranscoding(ctx context.Context, session *HLSSession, 
 				_ = cmd.Process.Kill()
 			}
 		case <-ctx.Done():
-			// Context cancelled, no action needed
+			if ordinaryRun != nil {
+				select {
+				case <-inputErrorCh:
+					inputErrorDetected = true
+					session.mu.Lock()
+					session.InputErrorDetected = true
+					session.mu.Unlock()
+				default:
+				}
+			}
 		}
 
 	})
 
 	// Start a goroutine to periodically log performance metrics
 	perfDone := make(chan struct{})
-	shareHLSGo(session, func() {
+	shareHLSGoContext(ctx, session, func() {
 		ticker := time.NewTicker(10 * time.Second)
 		defer ticker.Stop()
 
@@ -5148,7 +5372,7 @@ func (m *HLSManager) startTranscoding(ctx context.Context, session *HLSSession, 
 		idleTimeout = hlsGrowingIdleTimeout
 	}
 	idleDone := make(chan struct{})
-	shareHLSGo(session, func() {
+	shareHLSGoContext(ctx, session, func() {
 		ticker := time.NewTicker(5 * time.Second) // Check every 5 seconds
 		defer ticker.Stop()
 
@@ -5250,7 +5474,7 @@ func (m *HLSManager) startTranscoding(ctx context.Context, session *HLSSession, 
 
 	// Start rate limiting goroutine to pause FFmpeg when too far ahead of player
 	rateLimitDone := make(chan struct{})
-	shareHLSGo(session, func() {
+	shareHLSGoContext(ctx, session, func() {
 		ticker := time.NewTicker(2 * time.Second) // Check every 2 seconds
 		defer ticker.Stop()
 		var lastSkipLog time.Time
@@ -5335,7 +5559,16 @@ func (m *HLSManager) startTranscoding(ctx context.Context, session *HLSSession, 
 	// Wait for FFmpeg to complete
 	log.Printf("[hls] session %s: waiting for FFmpeg to complete", session.ID)
 	waitStart := time.Now()
-	err = cmd.Wait()
+	err := cmd.Wait()
+	if ordinaryRun != nil {
+		if ctx.Err() == nil {
+			// Both actual writers are closed after Wait. Drain their real EOF
+			// before closing the reader, preserving terminal recovery errors.
+			<-stderrDone
+		}
+		_ = stderr.Close()
+		ordinaryRun.cancel()
+	}
 	if sharedPipe != nil {
 		sharedPipe.closeAndJoin()
 	}
@@ -5362,6 +5595,10 @@ func (m *HLSManager) startTranscoding(ctx context.Context, session *HLSSession, 
 	close(perfDone)
 	close(idleDone)
 	close(rateLimitDone)
+	ctx = ordinaryAfterCommand(ctx, ordinaryRun)
+	if ordinaryRun != nil && ctx.Err() != nil {
+		return ctx.Err()
+	}
 
 	// Check if this FFmpeg instance is still the current one for this session
 	// If not, a seek has replaced this FFmpeg with a new one - just exit quietly
@@ -5520,7 +5757,11 @@ func (m *HLSManager) startTranscoding(ctx context.Context, session *HLSSession, 
 
 		// Brief delay before reconnecting to allow usenet connection to stabilize
 		log.Printf("[hls] session %s: waiting 2 seconds before recovery restart", session.ID)
-		time.Sleep(2 * time.Second)
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(2 * time.Second):
+		}
 
 		// Restart transcoding from the new offset
 		// Subtitles will be re-extracted from TranscodingOffset (same as seek behavior)
@@ -5664,7 +5905,11 @@ func (m *HLSManager) startTranscoding(ctx context.Context, session *HLSSession, 
 
 			// Brief delay before reconnecting
 			log.Printf("[hls] session %s: waiting 2 seconds before recovery restart", session.ID)
-			time.Sleep(2 * time.Second)
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			case <-time.After(2 * time.Second):
+			}
 
 			// Restart transcoding from the new offset
 			// Subtitles will be re-extracted from TranscodingOffset (same as seek behavior)
@@ -5936,6 +6181,15 @@ type SeekResponse struct {
 // This is faster than creating a new session since it reuses the existing session structure
 // Query param: time=<seconds> specifies the target seek position in absolute media time
 func (m *HLSManager) Seek(w http.ResponseWriter, r *http.Request, sessionID string) {
+	var finishOrdinary func()
+	var ordinaryOK bool
+	w, r, finishOrdinary, ordinaryOK = m.ordinaryHTTP(w, r, sessionID)
+	if !ordinaryOK {
+		http.Error(w, "HLS operation unavailable", http.StatusServiceUnavailable)
+		return
+	}
+	defer finishOrdinary()
+
 	if m.hlsInputConfigured() && shareHLSRef(r) == nil {
 		vodDeny(w, kidsvod.CodeUnsupportedSource)
 		return
@@ -5988,6 +6242,28 @@ func (m *HLSManager) Seek(w http.ResponseWriter, r *http.Request, sessionID stri
 
 	var sharedContext context.Context
 	var sharedCancel context.CancelFunc
+	var ordinaryFinish func()
+	if session.ordinary != nil {
+		ref := ordinaryHTTPRef(r)
+		if ref == nil || ref.suspend() != nil {
+			http.Error(w, "HLS seek unavailable", 503)
+			return
+		}
+		next, finish, e := session.ordinary.beginChange(r.Context())
+		if e != nil {
+			http.Error(w, "HLS seek unavailable", 503)
+			return
+		}
+		ordinaryFinish = finish
+		defer finish()
+		sharedContext = next
+		sharedCancel = session.ordinary.current().cancel
+		if ref.resume(session.ordinary.current()) != nil {
+			sharedCancel()
+			http.Error(w, "HLS seek unavailable", 503)
+			return
+		}
+	}
 	if session.shareOwned != nil {
 		next, cancel, finish, changeErr := session.shareOwned.beginChange(r.Context())
 		if changeErr != nil {
@@ -6009,7 +6285,7 @@ func (m *HLSManager) Seek(w http.ResponseWriter, r *http.Request, sessionID stri
 	session.mu.Unlock()
 
 	// Wait briefly for FFmpeg to stop (reduced from 50ms)
-	if session.shareOwned == nil {
+	if session.shareOwned == nil && session.ordinary == nil {
 		time.Sleep(25 * time.Millisecond)
 	}
 
@@ -6060,9 +6336,12 @@ func (m *HLSManager) Seek(w http.ResponseWriter, r *http.Request, sessionID stri
 	if session.shareOwned != nil {
 		session.shareOwned.endChange()
 	}
+	if ordinaryFinish != nil {
+		ordinaryFinish()
+	}
 	// Start transcoding from the new offset in background.
 	if playbackTarget == "youtube" && youtubeVideoURL != "" && youtubeAudioURL != "" {
-		shareHLSGo(session, func() {
+		shareHLSGoContext(newCtx, session, func() {
 			if err := m.startYouTubeTranscoding(newCtx, session, youtubeVideoURL, youtubeAudioURL, youtubeProxyURL); err != nil {
 				if errors.Is(err, context.Canceled) {
 					log.Printf("[hls-youtube] session %s: seek transcoding cancelled", sessionID)
@@ -6078,7 +6357,7 @@ func (m *HLSManager) Seek(w http.ResponseWriter, r *http.Request, sessionID stri
 
 		})
 	} else {
-		shareHLSGo(session, func() {
+		shareHLSGoContext(newCtx, session, func() {
 			if err := m.startTranscoding(newCtx, session, cachedForceAAC); err != nil {
 				log.Printf("[hls] session %s: seek transcoding failed: %v", sessionID, err)
 				session.mu.Lock()
@@ -6106,8 +6385,8 @@ func (m *HLSManager) Seek(w http.ResponseWriter, r *http.Request, sessionID stri
 	if session.shareOwned != nil || shouldUseAccurateRequestedSeekForWebSubtitle(probePlaybackTarget, probeData, probeSubtitleStreams, probeSubtitleTrack) {
 		log.Printf("[hls] session %s: skipping background keyframe probe for accurate web video+subtitle seek", sessionID)
 	} else {
-		shareHLSGo(session, func() {
-			probeCtx, probeCancel := context.WithTimeout(context.Background(), 15*time.Second)
+		shareHLSGoContext(newCtx, session, func() {
+			probeCtx, probeCancel := context.WithTimeout(newCtx, 15*time.Second)
 			defer probeCancel()
 
 			keyframePos := m.probeKeyframePosition(probeCtx, sessionPath, targetTime)
@@ -6126,7 +6405,7 @@ func (m *HLSManager) Seek(w http.ResponseWriter, r *http.Request, sessionID stri
 	// Wait for the playlist file to be created before returning
 	// This prevents the player from trying to load a non-existent playlist
 	waitStart := time.Now()
-	if ready, size := m.waitForPlaylistReady(session, 10*time.Second); ready {
+	if ready, size := m.waitForPlaylistReady(session, 10*time.Second, r.Context()); ready {
 		log.Printf("[hls] session %s: playlist ready after %v (%d bytes)", sessionID, time.Since(waitStart), size)
 	} else {
 		log.Printf("[hls] session %s: warning: timed out waiting for playlist after %v", sessionID, time.Since(waitStart))
@@ -6230,6 +6509,15 @@ type HLSSessionStatus struct {
 
 // GetSessionStatus returns the current status of an HLS session
 func (m *HLSManager) GetSessionStatus(w http.ResponseWriter, r *http.Request, sessionID string) {
+	var finishOrdinary func()
+	var ordinaryOK bool
+	w, r, finishOrdinary, ordinaryOK = m.ordinaryHTTP(w, r, sessionID)
+	if !ordinaryOK {
+		http.Error(w, "HLS operation unavailable", http.StatusServiceUnavailable)
+		return
+	}
+	defer finishOrdinary()
+
 	session, exists := m.sessionForHTTP(w, r, sessionID)
 	if !exists {
 		http.Error(w, "session not found", http.StatusNotFound)
@@ -6299,6 +6587,15 @@ func resolveSegmentExt(session *HLSSession, playlistLines []string) string {
 
 // ServePlaylist serves the HLS playlist file with API key in segment URLs
 func (m *HLSManager) ServePlaylist(w http.ResponseWriter, r *http.Request, sessionID string) {
+	var finishOrdinary func()
+	var ordinaryOK bool
+	w, r, finishOrdinary, ordinaryOK = m.ordinaryHTTP(w, r, sessionID)
+	if !ordinaryOK {
+		http.Error(w, "HLS operation unavailable", http.StatusServiceUnavailable)
+		return
+	}
+	defer finishOrdinary()
+
 	session, exists := m.sessionForHTTP(w, r, sessionID)
 	if !exists {
 		http.Error(w, "session not found", http.StatusNotFound)
@@ -6606,6 +6903,15 @@ func buildStableCastPlaylist(session *HLSSession) string {
 }
 
 func (m *HLSManager) ServeMasterPlaylist(w http.ResponseWriter, r *http.Request, sessionID string) {
+	var finishOrdinary func()
+	var ordinaryOK bool
+	w, r, finishOrdinary, ordinaryOK = m.ordinaryHTTP(w, r, sessionID)
+	if !ordinaryOK {
+		http.Error(w, "HLS operation unavailable", http.StatusServiceUnavailable)
+		return
+	}
+	defer finishOrdinary()
+
 	session, exists := m.sessionForHTTP(w, r, sessionID)
 	if !exists {
 		http.Error(w, "session not found", http.StatusNotFound)
@@ -6700,6 +7006,15 @@ func (m *HLSManager) ServeMasterPlaylist(w http.ResponseWriter, r *http.Request,
 }
 
 func (m *HLSManager) ServeSubtitlePlaylist(w http.ResponseWriter, r *http.Request, sessionID string, subtitleTrack int) {
+	var finishOrdinary func()
+	var ordinaryOK bool
+	w, r, finishOrdinary, ordinaryOK = m.ordinaryHTTP(w, r, sessionID)
+	if !ordinaryOK {
+		http.Error(w, "HLS operation unavailable", http.StatusServiceUnavailable)
+		return
+	}
+	defer finishOrdinary()
+
 	session, exists := m.sessionForHTTP(w, r, sessionID)
 	if !exists {
 		http.Error(w, "session not found", http.StatusNotFound)
@@ -6824,6 +7139,28 @@ func (m *HLSManager) restartCastTranscodingAt(session *HLSSession, plan castSegm
 	}
 	var sharedContext context.Context
 	var sharedCancel context.CancelFunc
+	var ordinaryFinish func()
+	if session.ordinary != nil {
+		if len(callers) != 1 {
+			return
+		}
+		ref := ordinaryHTTPRef(callers[0])
+		if ref == nil || ref.suspend() != nil {
+			return
+		}
+		next, finish, e := session.ordinary.beginChange(callers[0].Context())
+		if e != nil {
+			return
+		}
+		ordinaryFinish = finish
+		defer finish()
+		sharedContext = next
+		sharedCancel = session.ordinary.current().cancel
+		if ref.resume(session.ordinary.current()) != nil {
+			sharedCancel()
+			return
+		}
+	}
 	if session.shareOwned != nil {
 		next, cancel, finish, err := session.shareOwned.beginChange(session.shareOwned.guard.ctx)
 		if err != nil {
@@ -6862,7 +7199,7 @@ func (m *HLSManager) restartCastTranscodingAt(session *HLSSession, plan castSegm
 
 	// Let the cancelled process release its output files before the replacement
 	// process writes the same stable playlist.
-	if session.shareOwned == nil {
+	if session.shareOwned == nil && session.ordinary == nil {
 		time.Sleep(25 * time.Millisecond)
 	}
 	if session.usesStableCopyTimeline() {
@@ -6889,7 +7226,10 @@ func (m *HLSManager) restartCastTranscodingAt(session *HLSSession, plan castSegm
 			return
 		}
 	}
-	shareHLSGo(session, func() {
+	if ordinaryFinish != nil {
+		ordinaryFinish()
+	}
+	shareHLSGoContext(newCtx, session, func() {
 		func(segmentStart int) {
 			var err error
 			if youtubeVideoURL != "" && youtubeAudioURL != "" {
@@ -6978,6 +7318,15 @@ func (m *HLSManager) noteCastSegmentDelivery(session *HLSSession, r *http.Reques
 
 // ServeSegment serves an HLS segment file
 func (m *HLSManager) ServeSegment(w http.ResponseWriter, r *http.Request, sessionID, segmentName string) {
+	var finishOrdinary func()
+	var ordinaryOK bool
+	w, r, finishOrdinary, ordinaryOK = m.ordinaryHTTP(w, r, sessionID)
+	if !ordinaryOK {
+		http.Error(w, "HLS operation unavailable", http.StatusServiceUnavailable)
+		return
+	}
+	defer finishOrdinary()
+
 	requestStart := time.Now()
 	log.Printf("[hls] segment request: session=%s segment=%s", sessionID, segmentName)
 
@@ -7237,17 +7586,17 @@ func (m *HLSManager) ServeSegment(w http.ResponseWriter, r *http.Request, sessio
 		return // Background pruning has no captured HTTP owner until P3B.
 	}
 	if session.isTimeshiftSession() {
-		shareHLSGo(session, func() { m.pruneTimeshiftSegments(session) })
+		shareHLSGoContext(r.Context(), session, func() { m.pruneTimeshiftSegments(session) })
 	} else if session.IsLive {
 		if !checkHLSSessionHTTP(w, r, sessionID) {
 			return
 		}
-		shareHLSGo(session, func() { m.deleteOldLiveTransmuxSegments(session, servedSegmentNum) })
+		shareHLSGoContext(r.Context(), session, func() { m.deleteOldLiveTransmuxSegments(session, servedSegmentNum) })
 	} else {
 		if !checkHLSSessionHTTP(w, r, sessionID) {
 			return
 		}
-		shareHLSGo(session, func() { m.deleteOldSegments(session, segmentName) })
+		shareHLSGoContext(r.Context(), session, func() { m.deleteOldSegments(session, segmentName) })
 	}
 }
 
@@ -7256,6 +7605,15 @@ func (m *HLSManager) ServeSegment(w http.ResponseWriter, r *http.Request, sessio
 // Supports ?track=N query parameter to serve a different subtitle track than the one selected when creating the session
 
 func (m *HLSManager) ServeSubtitles(w http.ResponseWriter, r *http.Request, sessionID string) {
+	var finishOrdinary func()
+	var ordinaryOK bool
+	w, r, finishOrdinary, ordinaryOK = m.ordinaryHTTP(w, r, sessionID)
+	if !ordinaryOK {
+		http.Error(w, "HLS operation unavailable", http.StatusServiceUnavailable)
+		return
+	}
+	defer finishOrdinary()
+
 	session, exists := m.sessionForHTTP(w, r, sessionID)
 	if !exists {
 		http.Error(w, "session not found", http.StatusNotFound)
@@ -7277,6 +7635,15 @@ func (m *HLSManager) ServeSubtitles(w http.ResponseWriter, r *http.Request, sess
 }
 
 func (m *HLSManager) ServeSubtitleTrack(w http.ResponseWriter, r *http.Request, sessionID string, requestedTrack int, waitForCue bool) {
+	var finishOrdinary func()
+	var ordinaryOK bool
+	w, r, finishOrdinary, ordinaryOK = m.ordinaryHTTP(w, r, sessionID)
+	if !ordinaryOK {
+		http.Error(w, "HLS operation unavailable", http.StatusServiceUnavailable)
+		return
+	}
+	defer finishOrdinary()
+
 	session, exists := m.sessionForHTTP(w, r, sessionID)
 	if !exists {
 		http.Error(w, "session not found", http.StatusNotFound)
@@ -7335,7 +7702,7 @@ func (m *HLSManager) ServeSubtitleTrack(w http.ResponseWriter, r *http.Request, 
 				session.subtitleExtractSeq++
 				extractID = session.subtitleExtractSeq
 				session.subtitleExtracting[requestedTrack] = true
-				extractCtx, extractCancel = context.WithCancel(context.Background())
+				extractCtx, extractCancel = shareHLSWorkerContext(r.Context(), session)
 				if session.shareOwned != nil {
 					extractCancel()
 					session.shareOwned.mu.Lock()
@@ -7355,7 +7722,7 @@ func (m *HLSManager) ServeSubtitleTrack(w http.ResponseWriter, r *http.Request, 
 			log.Printf("[hls] subtitle track %d extraction already in progress for session %s, waiting", requestedTrack, sessionID)
 		} else if startExtract {
 			log.Printf("[hls] starting subtitle track %d extraction on demand for session %s", requestedTrack, sessionID)
-			shareHLSGo(session, func() {
+			shareHLSGoContext(extractCtx, session, func() {
 				extractErr := m.extractSubtitleTrackToVTT(extractCtx, session, requestedTrack, vttPath)
 				session.subtitleExtractionMu.Lock()
 				if session.subtitleExtractIDs != nil && session.subtitleExtractIDs[requestedTrack] == extractID {
@@ -7712,7 +8079,7 @@ func (m *HLSManager) fetchHeaderPrefix(ctx context.Context, path string, length 
 		return nil, nil
 	}
 
-	resp, err := m.streamer.Stream(ctx, streaming.Request{
+	resp, err := m.ordinaryProviderStream(ctx, streaming.Request{
 		Path:        path,
 		Method:      http.MethodGet,
 		RangeHeader: fmt.Sprintf("bytes=0-%d", length-1),
@@ -7778,6 +8145,7 @@ func (m *HLSManager) CleanupSession(sessionID string) {
 		m.mu.Unlock()
 		m.sessionLifecycleMu.Unlock()
 		log.Printf("[hls] CleanupSession: session %s not found, already cleaned up", sessionID)
+		m.ordinaryControl().retryRemovedOutputs(sessionID)
 		return
 	}
 	delete(m.sessions, sessionID)
@@ -7794,6 +8162,14 @@ func (m *HLSManager) cleanupDetachedHLSSession(sessionID string, session *HLSSes
 	if session.shareOwned != nil {
 		session.shareOwned.close()
 		return
+	}
+	if session.ordinary != nil {
+		session.mu.Lock()
+		session.Stopped = true
+		session.mu.Unlock()
+		session.ordinary.closeAndJoin()
+		defer session.ordinary.finishOperation()
+		outputDir = session.ordinary.output
 	}
 	if session.vodInput != nil && !session.vodInput.stopAndWait() {
 		log.Printf("[hls] input cleanup still pending; preserving owned output")
@@ -7842,7 +8218,7 @@ func (m *HLSManager) cleanupDetachedHLSSession(sessionID string, session *HLSSes
 	ffmpegCmd := session.FFmpegCmd
 	session.mu.Unlock()
 
-	if ffmpegCmd != nil && ffmpegCmd.Process != nil {
+	if session.ordinary == nil && ffmpegCmd != nil && ffmpegCmd.Process != nil {
 		log.Printf("[hls] killing FFmpeg process for session %s (PID=%d)", sessionID, ffmpegCmd.Process.Pid)
 		// Use Kill() for immediate termination
 		if err := ffmpegCmd.Process.Kill(); err != nil {
@@ -7860,8 +8236,11 @@ func (m *HLSManager) cleanupDetachedHLSSession(sessionID string, session *HLSSes
 
 	// Remove session directory with retry logic
 	maxRetries := 3
+	removed := false
+	var lastRemovalErr error
 	for i := 0; i < maxRetries; i++ {
 		if err := os.RemoveAll(outputDir); err != nil {
+			lastRemovalErr = err
 			if i < maxRetries-1 {
 				log.Printf("[hls] failed to remove session directory %q (attempt %d/%d): %v", outputDir, i+1, maxRetries, err)
 				time.Sleep(100 * time.Millisecond)
@@ -7870,10 +8249,16 @@ func (m *HLSManager) cleanupDetachedHLSSession(sessionID string, session *HLSSes
 			log.Printf("[hls] failed to remove session directory %q after %d attempts: %v", outputDir, maxRetries, err)
 		} else {
 			log.Printf("[hls] removed session directory: %s", outputDir)
+			removed = true
 			break
 		}
 	}
 
+	if session.ordinary != nil && removed {
+		session.ordinary.releaseOutput()
+	} else if session.ordinary != nil {
+		session.ordinary.recordRemovalFailure(lastRemovalErr)
+	}
 	log.Printf("[hls] cleaned up session %s", sessionID)
 }
 
@@ -7898,6 +8283,9 @@ func (m *HLSManager) SampleThroughput() {
 }
 
 func (m *HLSManager) cleanupLoop() {
+	if m.cleanupExited != nil {
+		defer close(m.cleanupExited)
+	}
 	// Run cleanup every 30 seconds for more aggressive cleanup
 	ticker := time.NewTicker(30 * time.Second)
 	defer ticker.Stop()
@@ -7950,31 +8338,51 @@ func (m *HLSManager) cleanupOldSessions() {
 
 // Shutdown stops the cleanup loop and cleans up all sessions
 func (m *HLSManager) Shutdown() {
-	m.shutdownHLSInputs()
-	log.Printf("[hls] shutting down HLS manager, cleaning up all sessions")
-
-	close(m.cleanupDone)
-
-	m.mu.Lock()
-	sessionIDs := make([]string, 0, len(m.sessions))
-	for id := range m.sessions {
-		sessionIDs = append(sessionIDs, id)
+	control := m.ordinaryControl()
+	m.sessionLifecycleMu.Lock()
+	if m.shutdownFinished == nil {
+		m.shutdownFinished = make(chan struct{})
 	}
-	m.mu.Unlock()
+	finished := m.shutdownFinished
+	m.sessionLifecycleMu.Unlock()
+	m.shutdownOnce.Do(func() {
+		control.closeAdmission()
+		defer close(finished)
+		m.shutdownHLSInputs()
+		log.Printf("[hls] shutting down HLS manager, cleaning up all sessions")
 
-	log.Printf("[hls] cleaning up %d active sessions", len(sessionIDs))
-	for _, id := range sessionIDs {
-		m.CleanupSession(id)
-	}
-
-	// Final cleanup: remove base directory if empty
-	if entries, err := os.ReadDir(m.baseDir); err == nil && len(entries) == 0 {
-		if err := os.Remove(m.baseDir); err == nil {
-			log.Printf("[hls] removed empty base directory: %s", m.baseDir)
+		if m.cleanupDone != nil {
+			close(m.cleanupDone)
 		}
-	}
 
-	log.Printf("[hls] shutdown complete")
+		m.mu.Lock()
+		sessionIDs := make([]string, 0, len(m.sessions))
+		for id := range m.sessions {
+			sessionIDs = append(sessionIDs, id)
+		}
+		m.mu.Unlock()
+
+		log.Printf("[hls] cleaning up %d active sessions", len(sessionIDs))
+		for _, id := range sessionIDs {
+			m.CleanupSession(id)
+		}
+
+		if m.cleanupExited != nil {
+			<-m.cleanupExited
+		}
+		control.operations.Wait()
+		control.retryRemovedOutputs("")
+
+		// Final cleanup: remove base directory if empty
+		if entries, err := os.ReadDir(m.baseDir); err == nil && len(entries) == 0 {
+			if err := os.Remove(m.baseDir); err == nil {
+				log.Printf("[hls] removed empty base directory: %s", m.baseDir)
+			}
+		}
+
+		log.Printf("[hls] shutdown complete")
+	})
+	<-finished
 }
 
 // summarizeLiveSegmentDir reports which segmentN.ts files currently exist under a
