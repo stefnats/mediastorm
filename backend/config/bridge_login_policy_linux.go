@@ -111,6 +111,12 @@ func decodeBridgeLoginPolicy(raw []byte) (out bridgeLoginPolicyRead, err error) 
 	if out.values.BridgeEnabled, valid = readBool(bridge, "enabled"); !valid {
 		return bridgeLoginPolicyRead{}, ErrSecurityCoordinator
 	}
+	// Quick Connect is a distinct policy consumer. An absent or malformed
+	// flag cannot authorize that flow, while the original password policy's
+	// three-value decoding and compatibility remain unchanged.
+	if managedCanonicalKeys(bridge, "quickConnect") {
+		out.quickConnect, out.quickConnectValid = readBool(bridge, "quickConnect")
+	}
 	if databaseRaw, exists := root["database"]; exists {
 		database, objectErr := managedObject(databaseRaw)
 		if objectErr != nil || !managedCanonicalKeys(database, "url") {
