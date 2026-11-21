@@ -71,6 +71,9 @@ type familyMediaOwnerState struct {
 	setupFrame     *pgRequestFrame
 	setupStop      func() bool
 	setupDone      chan struct{}
+	captureDone    chan struct{}
+	captured       bool
+	checks         sync.WaitGroup
 	handed, closed bool
 	once           sync.Once
 	source         familyMediaOwnedSource
@@ -88,6 +91,8 @@ func (o *FamilyMediaOwner) Context() context.Context {
 	if !o.valid() {
 		return familyMediaClosedContext()
 	}
+	o.mu.Lock()
+	defer o.mu.Unlock()
 	return o.ctx
 }
 func familyMediaClosedContext() context.Context {
@@ -99,10 +104,17 @@ func (o *FamilyMediaOwner) ExpiresAt() time.Time {
 	if !o.valid() {
 		return time.Time{}
 	}
+	o.mu.Lock()
+	defer o.mu.Unlock()
 	return o.snapshot.expires
 }
 func (o *FamilyMediaOwner) Mode() FamilyMediaMode {
-	if !o.valid() || o.ctx == nil || o.ctx.Err() != nil {
+	if !o.valid() {
+		return FamilyMediaUnknown
+	}
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	if !o.captured || o.closed || o.ctx == nil || o.ctx.Err() != nil {
 		return FamilyMediaUnknown
 	}
 	return o.snapshot.mode
@@ -144,18 +156,20 @@ func (ds *DataStore) CaptureFamilyMediaOwner(r *http.Request, target string, tok
 	}
 	expiry := parentMutationMin(frame.session.ExpiresAt, frame.actorExpiry)
 	life, cancel := context.WithDeadline(context.Background(), expiry)
-	o := &FamilyMediaOwner{familyMediaOwnerState: &familyMediaOwnerState{store: ds, original: frame.session, target: target, hashes: hashes, ctx: life, cancel: cancel, setupFrame: frame, setupDone: make(chan struct{})}}
+	o := &FamilyMediaOwner{familyMediaOwnerState: &familyMediaOwnerState{store: ds, original: frame.session, target: target, hashes: hashes, ctx: life, cancel: cancel, setupFrame: frame, setupDone: make(chan struct{}), captureDone: make(chan struct{})}}
 	o.self = o
 	familyMediaAdmission.Lock()
 	account := frame.session.AccountID
+	if ds.familyMediaRetired {
+		familyMediaAdmission.Unlock()
+		cancel()
+		return nil, ErrFamilyMediaUnavailable
+	}
 	if len(familyMediaAdmission.owners) >= 512 || familyMediaAdmission.accounts[account] >= 32 {
 		familyMediaAdmission.Unlock()
 		cancel()
 		return nil, ErrFamilyMediaBusy
 	}
-	familyMediaAdmission.owners[o] = account
-	familyMediaAdmission.accounts[account]++
-	familyMediaAdmission.Unlock()
 	o.setupStop = context.AfterFunc(r.Context(), func() {
 		defer close(o.setupDone)
 		o.mu.Lock()
@@ -164,13 +178,20 @@ func (ds *DataStore) CaptureFamilyMediaOwner(r *http.Request, target string, tok
 		}
 		o.mu.Unlock()
 	})
+	familyMediaAdmission.owners[o] = account
+	familyMediaAdmission.accounts[account]++
+	familyMediaAdmission.Unlock()
 	defer func() {
+		// Capture owns this completion; failure cleanup must not wait on itself.
+		close(o.captureDone)
 		if owner == nil {
 			o.Close()
 		}
 	}()
 	ctx, stop := context.WithTimeout(r.Context(), familyMediaCheckBudget)
 	defer stop()
+	joinLife := familyMediaAfterFunc(life, stop)
+	defer joinLife()
 	if ds.CheckProfilePinRequestFrame(r.WithContext(ctx)) != nil {
 		return nil, ErrFamilyMediaChanged
 	}
@@ -182,9 +203,16 @@ func (ds *DataStore) CaptureFamilyMediaOwner(r *http.Request, target string, tok
 		return nil, ErrFamilyMediaChanged
 	}
 	bounded, finish := context.WithDeadline(life, snapshot.expires)
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	if o.closed || ctx.Err() != nil || bounded.Err() != nil {
+		finish()
+		return nil, ErrFamilyMediaChanged
+	}
 	o.ctx = bounded
 	o.cancel = func() { finish(); cancel() }
 	o.snapshot = snapshot
+	o.captured = true
 	if bounded.Err() != nil {
 		return nil, ErrFamilyMediaChanged
 	}
@@ -269,15 +297,19 @@ func (ds *DataStore) readFamilyMediaSnapshot(ctx context.Context, original model
 // Check reuses only captured original hashes/outcome/rows/expiry. It signals
 // denial but never synchronously joins an IO worker from its own watcher.
 func (o *FamilyMediaOwner) Check(ctx context.Context) error {
-	if !o.valid() || o.store == nil || ctx == nil || ctx.Err() != nil || o.ctx.Err() != nil {
+	if !o.valid() || o.store == nil || ctx == nil || ctx.Err() != nil {
 		return ErrFamilyMediaChanged
 	}
 	o.mu.Lock()
-	closed := o.closed
-	o.mu.Unlock()
-	if closed {
+	if !o.captured || o.closed || o.ctx.Err() != nil {
+		o.mu.Unlock()
 		return ErrFamilyMediaChanged
 	}
+	// Add and the closed gate are serialized; Close joins the complete PG
+	// operation and its cancellation callbacks outside this mutex.
+	o.checks.Add(1)
+	o.mu.Unlock()
+	defer o.checks.Done()
 	bounded, cancel := context.WithTimeout(ctx, familyMediaCheckBudget)
 	defer cancel()
 	stop := familyMediaAfterFunc(o.ctx, cancel)
@@ -301,14 +333,26 @@ func (o *FamilyMediaOwner) CheckRequest(r *http.Request, target string) error {
 	if !o.valid() || r == nil || target != o.target || !familyMediaClient(r, o.original) {
 		return ErrFamilyMediaChanged
 	}
-	if o.store.CheckProfilePinRequestFrame(r) != nil {
+	o.mu.Lock()
+	if !o.captured || o.closed || o.ctx.Err() != nil {
+		o.mu.Unlock()
+		return ErrFamilyMediaChanged
+	}
+	o.checks.Add(1)
+	o.mu.Unlock()
+	defer o.checks.Done()
+	bounded, cancel := context.WithTimeout(r.Context(), familyMediaCheckBudget)
+	defer cancel()
+	join := familyMediaAfterFunc(o.ctx, cancel)
+	defer join()
+	if o.store.CheckProfilePinRequestFrame(r.WithContext(bounded)) != nil {
 		return ErrFamilyMediaChanged
 	}
 	frame, _ := r.Context().Value(pgRequestFrameKey{}).(*pgRequestFrame)
 	if frame == nil || frame.session != o.original || !sameParentMutationRow(frame.sessionRow, o.snapshot.tuple.session) || !sameParentMutationRow(frame.actorRow, o.snapshot.tuple.actor) {
 		return ErrFamilyMediaChanged
 	}
-	return o.Check(r.Context())
+	return o.Check(bounded)
 }
 func (o *FamilyMediaOwner) Handoff(r *http.Request) error {
 	if !o.valid() || r == nil || o.CheckRequest(r, o.target) != nil {
@@ -347,19 +391,33 @@ func familyMediaAfterFunc(ctx context.Context, callback func()) func() {
 		<-done
 	}
 }
+
+// signalRetirement closes admission without waiting on any original operation.
+func (o *FamilyMediaOwner) signalRetirement() {
+	if !o.valid() {
+		return
+	}
+	o.mu.Lock()
+	o.closed = true
+	o.cancel()
+	o.mu.Unlock()
+}
+
 func (o *FamilyMediaOwner) Close() {
 	if !o.valid() {
 		return
 	}
 	o.once.Do(func() {
+		o.signalRetirement()
+		// setupDone is only the caller callback. captureDone observes the
+		// actual original SQL acquisition and publication stack instead.
+		<-o.captureDone
+		o.checks.Wait()
 		o.mu.Lock()
-		o.closed = true
-		o.cancel()
 		stop := o.setupStop
 		o.setupStop = nil
 		o.setupFrame = nil
 		source := o.source
-		o.source = nil
 		o.mu.Unlock()
 		if source != nil {
 			source.Close()
@@ -381,4 +439,41 @@ func (o *FamilyMediaOwner) Close() {
 		}
 		familyMediaAdmission.Unlock()
 	})
+}
+
+// The existing bounded admission table is the sole set of original owners.
+// Closing one store never adopts or retires another store's originals.
+func (ds *DataStore) retireFamilyMediaOwners() {
+	familyMediaAdmission.Lock()
+	if ds.familyMediaRetired {
+		done := ds.familyMediaRetireDone
+		familyMediaAdmission.Unlock()
+		<-done
+		return
+	}
+	ds.familyMediaRetired = true
+	ds.familyMediaRetireDone = make(chan struct{})
+	done := ds.familyMediaRetireDone
+	owners := make([]*FamilyMediaOwner, 0)
+	for owner := range familyMediaAdmission.owners {
+		if owner.store == ds {
+			owners = append(owners, owner)
+		}
+	}
+	familyMediaAdmission.Unlock()
+	// Signal every original before joining even one held source. Each task
+	// is bounded by the existing 512-owner admission retained until its end.
+	for _, owner := range owners {
+		owner.signalRetirement()
+	}
+	var joined sync.WaitGroup
+	for _, owner := range owners {
+		joined.Add(1)
+		go func(owner *FamilyMediaOwner) {
+			defer joined.Done()
+			owner.Close()
+		}(owner)
+	}
+	joined.Wait()
+	close(done)
 }

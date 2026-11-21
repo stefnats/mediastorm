@@ -53,6 +53,7 @@ type familyLocalSourceState struct {
 	retire         func()
 	retired        <-chan struct{}
 	once           sync.Once
+	checks         sync.WaitGroup
 }
 
 func (FamilyLocalSource) MarshalJSON() ([]byte, error) { return []byte("null"), nil }
@@ -130,6 +131,14 @@ func (s *FamilyLocalSource) Check(ctx context.Context) error {
 	if !s.valid() || ctx == nil || ctx.Err() != nil || s.ctx.Err() != nil {
 		return ErrFamilyMediaChanged
 	}
+	s.mu.Lock()
+	if s.closed || s.ctx.Err() != nil {
+		s.mu.Unlock()
+		return ErrFamilyMediaChanged
+	}
+	s.checks.Add(1)
+	s.mu.Unlock()
+	defer s.checks.Done()
 	if s.owner.Check(ctx) != nil {
 		return ErrFamilyMediaChanged
 	}
@@ -208,6 +217,7 @@ func (s *FamilyLocalSource) Close() {
 		openDone := s.openDone
 		s.mu.Unlock()
 		<-s.ready
+		s.checks.Wait()
 		if openDone != nil {
 			<-openDone
 		}
