@@ -2170,18 +2170,28 @@ func main() {
 	// sign in with a mediastorm profile, browse and play. It only runs while
 	// enabled (admin Integrations page), which starts and stops it live.
 	{
+		var managedBridgePassword *jellyfinbridge.ManagedPasswordLogin
+		if store != nil {
+			managedBridgePassword, err = managedStartup.NewBridgePasswordLogin(store, currentProfilePins)
+			if err != nil {
+				// Keep the database route fail-closed; never substitute cached
+				// credentials or legacy scoped session creation.
+				log.Printf("[jellyfin-bridge] managed password login unavailable: %v", err)
+			}
+		}
 		jellyfinBridge.Configure(jellyfinbridge.Deps{
-			CacheDir:     settings.Cache.Directory,
-			Accounts:     accountsService,
-			Users:        userService,
-			Sessions:     sessionsService,
-			Metadata:     metadataService,
-			History:      historyService,
-			Watchlist:    watchlistService,
-			CustomLists:  customListsService,
-			EPG:          epgService,
-			Calendar:     calendarService,
-			SubtitleDone: videoHandler.SubtitleExtractionDone,
+			CacheDir:        settings.Cache.Directory,
+			Accounts:        accountsService,
+			Users:           userService,
+			Sessions:        sessionsService,
+			ManagedPassword: managedBridgePassword,
+			Metadata:        metadataService,
+			History:         historyService,
+			Watchlist:       watchlistService,
+			CustomLists:     customListsService,
+			EPG:             epgService,
+			Calendar:        calendarService,
+			SubtitleDone:    videoHandler.SubtitleExtractionDone,
 			Settings: func() (config.JellyfinBridgeSettings, error) {
 				current, err := cfgManager.Load()
 				return current.JellyfinBridge, err

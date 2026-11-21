@@ -169,6 +169,29 @@ func (s *bridgeSelectedPasswordState) claim(i *BridgeLoginSessionIssuer, r *http
 // VerifySelectedPassword checks every matching candidate, retaining rejected
 // receipts as well as the single success. It never tries a mint to pick one.
 func (i *BridgeLoginSessionIssuer) VerifySelectedPassword(r *http.Request, username, client, raw string, original *config.BridgeLoginPolicyObservation) (proof *BridgeSelectedPasswordProof, err error) {
+	return i.verifySelectedPassword(r, username, client, raw, original, nil)
+}
+
+// VerifySelectedPasswordForCandidates uses selectors only as a denial
+// constraint for profiles already charged by the public login limiter. Its own
+// complete fresh snapshot and original credential checks remain authoritative.
+func (i *BridgeLoginSessionIssuer) VerifySelectedPasswordForCandidates(r *http.Request, username, client, raw string, original *config.BridgeLoginPolicyObservation, expected []BridgeLoginCandidate) (*BridgeSelectedPasswordProof, error) {
+	if len(expected) == 0 || len(expected) > 3 {
+		return nil, ErrBridgeCredentialChanged
+	}
+	copyOfExpected := make([]BridgeLoginCandidate, len(expected))
+	seen := make(map[BridgeLoginCandidate]bool, len(expected))
+	for n, candidate := range expected {
+		if !parentMutationID(candidate.AccountID) || !parentMutationID(candidate.ProfileID) || !utf8.ValidString(candidate.AccountID) || !utf8.ValidString(candidate.ProfileID) || seen[candidate] {
+			return nil, ErrBridgeCredentialChanged
+		}
+		seen[candidate] = true
+		copyOfExpected[n] = candidate
+	}
+	return i.verifySelectedPassword(r, username, client, raw, original, copyOfExpected)
+}
+
+func (i *BridgeLoginSessionIssuer) verifySelectedPassword(r *http.Request, username, client, raw string, original *config.BridgeLoginPolicyObservation, expected []BridgeLoginCandidate) (proof *BridgeSelectedPasswordProof, err error) {
 	entered := time.Now()
 	if !i.valid() {
 		return nil, ErrBridgeSessionUnavailable
@@ -266,6 +289,23 @@ func (i *BridgeLoginSessionIssuer) VerifySelectedPassword(r *http.Request, usern
 	candidates, err := matchBridgeLoginCandidates(rows, username)
 	if err != nil {
 		return nil, err
+	}
+	if expected != nil {
+		if len(candidates) != len(expected) {
+			return nil, ErrBridgeCredentialChanged
+		}
+		for _, candidate := range candidates {
+			found := false
+			for _, charged := range expected {
+				if candidate == charged {
+					found = true
+					break
+				}
+			}
+			if !found {
+				return nil, ErrBridgeCredentialChanged
+			}
+		}
 	}
 	if len(candidates) == 0 {
 		return nil, ErrBridgeCredentialRejected

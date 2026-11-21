@@ -44,10 +44,33 @@ func (p *BridgeSelectedPasswordProof) Close() {
 	}
 }
 func (i *BridgeLoginSessionIssuer) VerifySelectedPassword(r *http.Request, username, client, raw string, original *config.BridgeLoginPolicyObservation) (*BridgeSelectedPasswordProof, error) {
+	return i.verifySelectedPassword(r, username, client, raw, original, nil, false)
+}
+
+// Candidate selectors constrain eligibility only; the core still captures and
+// checks every genuine original candidate before minting can be attempted.
+func (i *BridgeLoginSessionIssuer) VerifySelectedPasswordForCandidates(r *http.Request, username, client, raw string, original *config.BridgeLoginPolicyObservation, expected []BridgeLoginCandidate) (*BridgeSelectedPasswordProof, error) {
+	if len(expected) == 0 || len(expected) > 3 {
+		return nil, ErrBridgeCredentialChanged
+	}
+	return i.verifySelectedPassword(r, username, client, raw, original, expected, true)
+}
+
+func (i *BridgeLoginSessionIssuer) verifySelectedPassword(r *http.Request, username, client, raw string, original *config.BridgeLoginPolicyObservation, expected []BridgeLoginCandidate, constrained bool) (*BridgeSelectedPasswordProof, error) {
 	if !i.valid() {
 		return nil, ErrBridgeSessionUnavailable
 	}
-	core, err := i.core.VerifySelectedPassword(r, username, client, raw, original)
+	var core *datastore.BridgeSelectedPasswordProof
+	var err error
+	if constrained {
+		selectors := make([]datastore.BridgeLoginCandidate, len(expected))
+		for n, candidate := range expected {
+			selectors[n] = datastore.BridgeLoginCandidate{AccountID: candidate.AccountID, ProfileID: candidate.ProfileID}
+		}
+		core, err = i.core.VerifySelectedPasswordForCandidates(r, username, client, raw, original, selectors)
+	} else {
+		core, err = i.core.VerifySelectedPassword(r, username, client, raw, original)
+	}
 	if err != nil {
 		return nil, err
 	}

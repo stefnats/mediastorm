@@ -161,10 +161,21 @@ type authenticateByNameRequest struct {
 	Password string `json:"Password"`
 }
 
+func decodeAuthenticateByName(w http.ResponseWriter, r *http.Request, value *authenticateByNameRequest) error {
+	return json.NewDecoder(http.MaxBytesReader(w, r.Body, 64*1024)).Decode(value)
+}
+
 func (s *Server) handleAuthenticateByName(w http.ResponseWriter, r *http.Request) {
+	// A missing or unknown database capability must never select the cached
+	// password/session compatibility route. Only explicit file mode uses it.
+	storage, known := s.deps.Sessions.(interface{ UsesPostgres() bool })
+	if !known || storage.UsesPostgres() || s.deps.ManagedPassword != nil {
+		s.handleManagedAuthenticateByName(w, r)
+		return
+	}
 	ip := s.clientIP(r)
 	var req authenticateByNameRequest
-	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 64*1024)).Decode(&req); err != nil {
+	if err := decodeAuthenticateByName(w, r, &req); err != nil {
 		writeError(w, http.StatusBadRequest, "Invalid request body")
 		return
 	}
@@ -231,6 +242,10 @@ func (s *Server) userDto(profile models.User) dto.UserDto {
 	if name == "" {
 		name = profile.Name
 	}
+	return s.userDtoWithName(profile, name)
+}
+
+func (s *Server) userDtoWithName(profile models.User, name string) dto.UserDto {
 	now := time.Now().UTC()
 	return dto.UserDto{
 		Name:                      name,

@@ -109,17 +109,18 @@ type Handlers struct {
 
 // Deps wires the bridge to mediastorm.
 type Deps struct {
-	CacheDir    string
-	Accounts    AccountService
-	Users       UserService
-	Sessions    SessionService
-	Metadata    MetadataService
-	History     HistoryService
-	Watchlist   WatchlistService
-	CustomLists CustomListService
-	EPG         EPGService
-	Calendar    CalendarService
-	Handlers    Handlers
+	CacheDir        string
+	Accounts        AccountService
+	Users           UserService
+	Sessions        SessionService
+	ManagedPassword *ManagedPasswordLogin
+	Metadata        MetadataService
+	History         HistoryService
+	Watchlist       WatchlistService
+	CustomLists     CustomListService
+	EPG             EPGService
+	Calendar        CalendarService
+	Handlers        Handlers
 	// EPGTimeOffset returns the guide time correction for a profile (global
 	// Live.EPG.TimeOffsetMinutes with the per-profile override applied).
 	EPGTimeOffset func(profileID string) time.Duration
