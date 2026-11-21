@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"novastream/config"
 	"novastream/internal/database"
+	nzbmetadata "novastream/internal/nzb/metadata"
 	"os"
 	"path/filepath"
 	"strings"
@@ -36,7 +37,7 @@ func newSABPublicationSourceFixture(t *testing.T) *sabPublicationSourceFixture {
 		t.Fatal(e)
 	}
 	t.Cleanup(func() { f.db.Close() })
-	f.service, e = NewService(ServiceConfig{}, nil, f.db, nil, nil)
+	f.service, e = NewService(ServiceConfig{}, nzbmetadata.NewMetadataService(t.TempDir()), f.db, nil, nil)
 	if e != nil {
 		t.Fatal(e)
 	}

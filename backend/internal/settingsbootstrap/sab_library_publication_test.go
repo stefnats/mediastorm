@@ -7,6 +7,7 @@ import (
 	"novastream/internal/database"
 	"novastream/internal/datastore"
 	"novastream/internal/importer"
+	nzbmetadata "novastream/internal/nzb/metadata"
 	"path/filepath"
 	"testing"
 )
@@ -30,7 +31,7 @@ func TestSABPublicationBootstrap(t *testing.T) {
 				t.Fatal(e)
 			}
 			t.Cleanup(func() { db.Close() })
-			source, e := importer.NewService(importer.ServiceConfig{}, nil, db, nil, nil)
+			source, e := importer.NewService(importer.ServiceConfig{}, nzbmetadata.NewMetadataService(t.TempDir()), db, nil, nil)
 			if e != nil {
 				t.Fatal(e)
 			}
