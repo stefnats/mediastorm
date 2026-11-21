@@ -14,6 +14,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -121,6 +122,26 @@ func (w *releaseACKWire) originalSocketEnded(t *testing.T) {
 	}
 }
 
+// The real pgxpool acquire tracer may derive an ordinary context for metrics.
+// Its value is DATA only and cannot become the private terminal cleanup context.
+type releaseACKTraceKey struct{}
+type releaseACKTracer struct {
+	started atomic.Int64
+	ended   atomic.Int64
+}
+
+func (t *releaseACKTracer) TraceQueryStart(ctx context.Context, _ *pgx.Conn, _ pgx.TraceQueryStartData) context.Context {
+	return ctx
+}
+func (t *releaseACKTracer) TraceQueryEnd(context.Context, *pgx.Conn, pgx.TraceQueryEndData) {}
+func (t *releaseACKTracer) TraceAcquireStart(ctx context.Context, _ *pgxpool.Pool, _ pgxpool.TraceAcquireStartData) context.Context {
+	t.started.Add(1)
+	return context.WithValue(ctx, releaseACKTraceKey{}, t)
+}
+func (t *releaseACKTracer) TraceAcquireEnd(context.Context, *pgxpool.Pool, pgxpool.TraceAcquireEndData) {
+	t.ended.Add(1)
+}
+
 type releaseACKFixture struct {
 	base        *settingsPGFixture
 	pool        *pgxpool.Pool
@@ -128,7 +149,7 @@ type releaseACKFixture struct {
 	wire        *releaseACKWire
 }
 
-func newReleaseACKFixture(t *testing.T) *releaseACKFixture {
+func newReleaseACKFixture(t *testing.T, tracer *releaseACKTracer) *releaseACKFixture {
 	t.Helper()
 	base := settingsPG(t, nil)
 	// No original writer exists yet. Bind a genuine source pool with the same
@@ -139,6 +160,9 @@ func newReleaseACKFixture(t *testing.T) *releaseACKFixture {
 	wire := &releaseACKWire{response: make(chan struct{}, 8), release: make(chan struct{})}
 	configuration := base.pool.Config()
 	configuration.ConnConfig.DialFunc = wire.dial
+	if tracer != nil {
+		configuration.ConnConfig.Tracer = tracer
+	}
 	pool, err := pgxpool.NewWithConfig(t.Context(), configuration)
 	if err != nil {
 		t.Fatal(err)
@@ -211,7 +235,11 @@ func (f *releaseACKFixture) readyNow(t *testing.T) {
 func TestSettingsCoordinatorHealthyReleaseACK(t *testing.T) {
 	for _, mode := range []string{"idle-original-unlock-before-native-release", "held-unlock-ack-retains-native-barrier", "lost-unlock-ack-stays-unknown", "canceled-parent-owned-cleanup-budget", "concurrent-close-one-original-release", "retired-original-never-reconnects"} {
 		t.Run(mode, func(t *testing.T) {
-			f := newReleaseACKFixture(t)
+			var tracer *releaseACKTracer
+			if mode == "concurrent-close-one-original-release" {
+				tracer = &releaseACKTracer{}
+			}
+			f := newReleaseACKFixture(t, tracer)
 			parent, cancel := context.WithCancel(t.Context())
 			defer cancel()
 			guard, pid := f.guard(t, parent)
@@ -294,6 +322,10 @@ func TestSettingsCoordinatorHealthyReleaseACK(t *testing.T) {
 				f.wire.originalSocketEnded(t)
 				f.readyNow(t)
 			case "concurrent-close-one-original-release":
+				before := tracer.started.Load()
+				if before == 0 || tracer.ended.Load() != before {
+					t.Fatal("actual configured acquire tracer was not exercised")
+				}
 				done := make(chan struct{})
 				results := make(chan error, 4)
 				var workers sync.WaitGroup
@@ -311,6 +343,9 @@ func TestSettingsCoordinatorHealthyReleaseACK(t *testing.T) {
 				}
 				if f.wire.unlocks.Load() != 1 || f.wire.startups.Load() != 1 {
 					t.Fatal("concurrent release duplicated original SQL/backend")
+				}
+				if tracer.started.Load() != before || tracer.ended.Load() != before {
+					t.Fatal("terminal idle claim entered ordinary acquire tracing")
 				}
 				f.wire.originalSocketEnded(t)
 				f.readyNow(t)

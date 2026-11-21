@@ -865,10 +865,16 @@ func (g *WriteGuard) acknowledgeHealthyRelease() (*pgx.Conn, error) {
 		cancel()
 	}()
 
-	resource, err := pool.Acquire(ctx)
-	if err != nil {
+	// AcquireAllIdle does not construct, wait or replace the caller context
+	// through an acquire tracer. The original pool has exactly one resource.
+	resources := pool.AcquireAllIdle(ctx)
+	if len(resources) != 1 {
+		for _, resource := range resources {
+			resource.Release()
+		}
 		return nil, ErrUnknown
 	}
+	resource := resources[0]
 	if resource.Conn() != original {
 		resource.Release()
 		return nil, ErrUnknown
@@ -881,7 +887,7 @@ func (g *WriteGuard) acknowledgeHealthyRelease() (*pgx.Conn, error) {
 	}
 	var pid uint32
 	var released bool
-	err = actual.QueryRow(ctx, `SELECT pg_backend_pid(), pg_advisory_unlock($1::integer,$2::integer)`, pgx.QueryExecModeSimpleProtocol, Namespace, Resource).Scan(&pid, &released)
+	err := actual.QueryRow(ctx, `SELECT pg_backend_pid(), pg_advisory_unlock($1::integer,$2::integer)`, pgx.QueryExecModeSimpleProtocol, Namespace, Resource).Scan(&pid, &released)
 	if err != nil || !released || pid != actual.PgConn().PID() || ctx.Err() != nil {
 		return actual, ErrUnknown
 	}
