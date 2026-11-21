@@ -37,7 +37,7 @@ func (c *RecordingProgressCore) Commit(i *RecordingProgressIntent) (RecordingPro
 	if err != nil {
 		return zero, ErrRecordingProgressUnavailable
 	}
-	position, err := recordingProgressPosition(guard.ctx, guard.tx, catalog.schema, s, state)
+	position, err := recordingProgressPosition(guard, catalog.schema, s, state)
 	if err != nil {
 		return zero, err
 	}
@@ -162,12 +162,28 @@ func lockRecordingProgressAuthority(ctx context.Context, tx pgx.Tx, s *recording
 	return nil
 }
 
-func recordingProgressPosition(ctx context.Context, tx pgx.Tx, schema string, s *recordingProgressIntentState, state *recordingPlaybackState) (int64, error) {
+func recordingProgressPosition(guard *settingsProgressTx, schema string, s *recordingProgressIntentState, state *recordingPlaybackState) (int64, error) {
 	if s.command.Action == RecordingProgressFromStart {
 		return 0, nil
 	}
-	payload, err := readRecordingProgressPayload(ctx, tx, schema, s.identity.recordingID)
-	if err != nil || !payload.matches(s, state) {
+	payload, err := readRecordingProgressPayload(guard.ctx, guard.tx, schema, s.identity.recordingID)
+	if err != nil {
+		if s.command.Action == RecordingProgressResumeHistory {
+			return 0, err
+		}
+		return 0, ErrRecordingProgressChanged
+	}
+	if s.command.Action == RecordingProgressResumeHistory {
+		position, status, e := recordingHistoricalResumePosition(guard, s, state)
+		if e != nil {
+			return 0, e
+		}
+		if status != "compatible" {
+			return 0, ErrRecordingProgressChanged
+		}
+		return position, nil
+	}
+	if !payload.matches(s, state) {
 		return 0, ErrRecordingProgressChanged
 	}
 	if s.command.Action == RecordingProgressTouch {
@@ -282,6 +298,26 @@ func (c *RecordingProgressCore) ReadSnapshot(r *http.Request, identity Recording
 	if err != nil {
 		return zero, err
 	}
+	return c.readPreparedRecordingSnapshot(r, i)
+}
+
+// ReadSnapshotWithHistory returns candidate DATA only after the same genuine
+// reader transaction acknowledges rollback and all physical cleanup joins.
+func (c *RecordingProgressCore) ReadSnapshotWithHistory(r *http.Request, identity RecordingTimelineIdentity, observation RecordingProgressObservation, history RecordingProgressHistoryObservation) (RecordingProgressSnapshot, error) {
+	var zero RecordingProgressSnapshot
+	data, err := ownRecordingProgressHistory(identity, observation, history)
+	if err != nil {
+		return zero, err
+	}
+	i, err := c.prepareOriginal(r, identity, observation, nil)
+	if err != nil {
+		return zero, err
+	}
+	i.state.history = data
+	return c.readPreparedRecordingSnapshot(r, i)
+}
+func (c *RecordingProgressCore) readPreparedRecordingSnapshot(r *http.Request, i *RecordingProgressIntent) (RecordingProgressSnapshot, error) {
+	var zero RecordingProgressSnapshot
 	defer i.Close()
 	value, deadline, err := c.readSnapshotIntent(i)
 	// readSnapshotIntent has ended its active operation before this Close.
@@ -326,6 +362,18 @@ func (c *RecordingProgressCore) readSnapshotIntent(i *RecordingProgressIntent) (
 			end := position == s.observation.DurationMS
 			value.PositionMS = &position
 			value.AtDerivedEnd = &end
+		}
+	}
+	if s.history != nil {
+		position, status, e := recordingHistoricalResumePosition(guard, s, state)
+		if e != nil {
+			return zero, deadline, e
+		}
+		value.HistoryState = status
+		if status == "compatible" {
+			end := position == s.observation.DurationMS
+			value.HistoricalPositionMS = &position
+			value.HistoricalAtDerivedEnd = &end
 		}
 	}
 	var databaseNow time.Time

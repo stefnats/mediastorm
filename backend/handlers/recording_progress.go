@@ -147,9 +147,20 @@ func (h *RecordingProgressHandler) ServeHTTP(w http.ResponseWriter, r *http.Requ
 		return
 	}
 	id := mux.Vars(r)["recordingID"]
-	if r.URL == nil || r.URL.RawQuery != "" || r.URL.ForceQuery || len(mux.Vars(r)) != 1 || id == "" || id == "." || id == ".." || len(id) > 128 || strings.TrimSpace(id) != id || strings.ContainsAny(id, "/\\\x00") || len(r.TransferEncoding) != 0 {
+	if r.URL == nil || r.URL.ForceQuery || len(mux.Vars(r)) != 1 || id == "" || id == "." || id == ".." || len(id) > 128 || strings.TrimSpace(id) != id || strings.ContainsAny(id, "/\\\x00") || len(r.TransferEncoding) != 0 {
 		http.Error(w, "invalid recording progress request", 400)
 		return
+	}
+	// History is an explicit DATA option, never a profile/token selector.
+	// Accept only one canonical literal; duplicates/aliases/encoding guesses
+	// and every POST query are rejected before admission or source work.
+	includeHistory := false
+	if r.URL.RawQuery != "" {
+		if r.Method != http.MethodGet || (r.URL.RawQuery != "includeHistory=true" && r.URL.RawQuery != "includeHistory=false") {
+			http.Error(w, "invalid recording progress query", 400)
+			return
+		}
+		includeHistory = r.URL.RawQuery == "includeHistory=true"
 	}
 	for key := range r.Header {
 		switch strings.ToLower(key) {
@@ -278,7 +289,7 @@ func (h *RecordingProgressHandler) ServeHTTP(w http.ResponseWriter, r *http.Requ
 	}
 	var descriptor recordings.DerivedRecording
 	var history recordings.DerivedHistoryData
-	if r.Method == http.MethodPost {
+	if r.Method == http.MethodPost || includeHistory {
 		descriptor, history, err = h.service.GetDerivedWithHistoryData(ctx, id, authorize)
 	} else {
 		descriptor, err = h.service.GetDerived(ctx, id, authorize)
@@ -299,12 +310,33 @@ func (h *RecordingProgressHandler) ServeHTTP(w http.ResponseWriter, r *http.Requ
 	}
 	actual := datastore.RecordingProgressObservation{ArtifactID: timeline.ArtifactID, MappingSHA256: timeline.MappingRevision, DurationMS: timeline.DurationMS, ObservedAt: *timeline.ObservedAt, ExpiresAt: *timeline.ExpiresAt}
 	// Authorization's private profile query remains inside its closure. Core
-	// receives the actual original method/URL with its query-free current context.
+	// receives the actual original method/URL; its own strict GET-only DATA
+	// query allowlist retains the already-captured request/frame unchanged.
 	currentRequest := request.WithContext(ctx)
+	var historical datastore.RecordingProgressHistoryObservation
+	if r.Method == http.MethodPost || includeHistory {
+		if history.RecordingID != id || history.ArtifactID != descriptor.ID {
+			writeRecordingProgressHTTPError(w, datastore.ErrRecordingProgressChanged)
+			return
+		}
+		historical = datastore.RecordingProgressHistoryObservation{SourceStatus: string(descriptor.SourceStatus), SourceIncomplete: descriptor.SourceIncomplete, GapsOmitted: descriptor.GapsOmitted, OutputBytes: descriptor.Bytes, LedgerSHA256: history.LedgerSHA256, ToolSHA256: history.ToolSHA256, TransformSHA256: history.TransformSHA256, OutputSHA256: history.OutputSHA256}
+		for _, span := range descriptor.PartOffsets {
+			historical.Spans = append(historical.Spans, [3]int64{int64(span.PartIndex), span.StartMS, span.DurationMS})
+		}
+		for _, input := range history.Inputs {
+			historical.Inputs = append(historical.Inputs, datastore.RecordingProgressHistoryInput{PartIndex: int64(input.PartIndex), ByteLength: input.ByteLength, SHA256: input.SHA256})
+		}
+	}
 	var value any
 	var validUntil time.Time
 	if r.Method == http.MethodGet {
-		snapshot, e := h.core.ReadSnapshot(currentRequest, first, actual)
+		var snapshot datastore.RecordingProgressSnapshot
+		var e error
+		if includeHistory {
+			snapshot, e = h.core.ReadSnapshotWithHistory(currentRequest, first, actual, historical)
+		} else {
+			snapshot, e = h.core.ReadSnapshot(currentRequest, first, actual)
+		}
 		if e != nil {
 			writeRecordingProgressHTTPError(w, e)
 			return
@@ -315,17 +347,6 @@ func (h *RecordingProgressHandler) ServeHTTP(w http.ResponseWriter, r *http.Requ
 		if command.Incarnation != timeline.Incarnation || command.ArtifactID != timeline.ArtifactID || command.MappingSHA256 != timeline.MappingRevision || command.DurationMS != timeline.DurationMS {
 			writeRecordingProgressHTTPError(w, datastore.ErrRecordingProgressChanged)
 			return
-		}
-		if history.RecordingID != id || history.ArtifactID != descriptor.ID {
-			writeRecordingProgressHTTPError(w, datastore.ErrRecordingProgressChanged)
-			return
-		}
-		historical := datastore.RecordingProgressHistoryObservation{SourceStatus: string(descriptor.SourceStatus), SourceIncomplete: descriptor.SourceIncomplete, GapsOmitted: descriptor.GapsOmitted, OutputBytes: descriptor.Bytes, LedgerSHA256: history.LedgerSHA256, ToolSHA256: history.ToolSHA256, TransformSHA256: history.TransformSHA256, OutputSHA256: history.OutputSHA256}
-		for _, span := range descriptor.PartOffsets {
-			historical.Spans = append(historical.Spans, [3]int64{int64(span.PartIndex), span.StartMS, span.DurationMS})
-		}
-		for _, input := range history.Inputs {
-			historical.Inputs = append(historical.Inputs, datastore.RecordingProgressHistoryInput{PartIndex: int64(input.PartIndex), ByteLength: input.ByteLength, SHA256: input.SHA256})
 		}
 		intent, err = h.core.PrepareWithHistory(currentRequest, first, actual, command.Command, historical)
 		if err != nil {
@@ -438,7 +459,7 @@ func decodeRecordingProgressCommand(raw []byte) (value recordingProgressHTTPComm
 	value.DurationMS = *duration
 	value.Command.PositionMS = *position
 	switch value.Command.Action {
-	case datastore.RecordingProgressFromStart, datastore.RecordingProgressResume:
+	case datastore.RecordingProgressFromStart, datastore.RecordingProgressResume, datastore.RecordingProgressResumeHistory:
 		if *position != 0 {
 			return fail()
 		}

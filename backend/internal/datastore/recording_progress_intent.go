@@ -39,9 +39,10 @@ type RecordingProgressObservation struct {
 type RecordingProgressAction string
 
 const (
-	RecordingProgressFromStart RecordingProgressAction = "from-start"
-	RecordingProgressResume    RecordingProgressAction = "resume"
-	RecordingProgressTouch     RecordingProgressAction = "touch"
+	RecordingProgressFromStart     RecordingProgressAction = "from-start"
+	RecordingProgressResume        RecordingProgressAction = "resume"
+	RecordingProgressResumeHistory RecordingProgressAction = "resume-history"
+	RecordingProgressTouch         RecordingProgressAction = "touch"
 )
 
 type RecordingProgressCommand struct {
@@ -71,17 +72,20 @@ type RecordingProgressResult struct {
 // distinct from a missing state row; an absent position is never default zero.
 type RecordingProgressSnapshot struct {
 	// ValidUntil is original effective transaction-deadline DATA, not permission.
-	ValidUntil       time.Time `json:"validUntil"`
-	RecordingID      string    `json:"recordingId"`
-	Incarnation      string    `json:"incarnation"`
-	ArtifactID       string    `json:"artifactId"`
-	MappingSHA256    string    `json:"mappingSha256"`
-	DurationMS       int64     `json:"durationMs"`
-	Revision         string    `json:"revision"`
-	WriterGeneration string    `json:"writerGeneration"`
-	PositionState    string    `json:"positionState"`
-	PositionMS       *int64    `json:"positionMs,omitempty"`
-	AtDerivedEnd     *bool     `json:"atDerivedEnd,omitempty"`
+	ValidUntil             time.Time `json:"validUntil"`
+	RecordingID            string    `json:"recordingId"`
+	Incarnation            string    `json:"incarnation"`
+	ArtifactID             string    `json:"artifactId"`
+	MappingSHA256          string    `json:"mappingSha256"`
+	DurationMS             int64     `json:"durationMs"`
+	Revision               string    `json:"revision"`
+	WriterGeneration       string    `json:"writerGeneration"`
+	PositionState          string    `json:"positionState"`
+	PositionMS             *int64    `json:"positionMs,omitempty"`
+	AtDerivedEnd           *bool     `json:"atDerivedEnd,omitempty"`
+	HistoryState           string    `json:"historyState,omitempty"`
+	HistoricalPositionMS   *int64    `json:"historicalPositionMs,omitempty"`
+	HistoricalAtDerivedEnd *bool     `json:"historicalAtDerivedEnd,omitempty"`
 }
 
 type RecordingProgressCore struct{ state *recordingProgressCoreState }
@@ -178,7 +182,7 @@ func progressHex(value string, size int) bool {
 func validProgressData(o RecordingProgressObservation, command RecordingProgressCommand, at time.Time) bool {
 	return validProgressObservation(o, at) &&
 		command.ExpectedRevision >= 0 && command.WriterGeneration >= 0 && command.PositionMS >= 0 && command.PositionMS <= o.DurationMS &&
-		(command.Action == RecordingProgressTouch || (command.Action == RecordingProgressFromStart || command.Action == RecordingProgressResume) && command.PositionMS == 0)
+		(command.Action == RecordingProgressTouch || (command.Action == RecordingProgressFromStart || command.Action == RecordingProgressResume || command.Action == RecordingProgressResumeHistory) && command.PositionMS == 0)
 }
 
 func validProgressObservation(o RecordingProgressObservation, at time.Time) bool {
@@ -240,7 +244,7 @@ func progressBaseExpiry(tuple profilePinAccessTuple, original models.Session, de
 // independent HTTP authority, accept a viewer selector, or prepare media. The
 // caller must Close even a consumed intent, after its actual work is complete.
 func (c *RecordingProgressCore) Prepare(r *http.Request, identity RecordingTimelineIdentity, observation RecordingProgressObservation, command RecordingProgressCommand) (*RecordingProgressIntent, error) {
-	if !validProgressData(observation, command, time.Now()) {
+	if command.Action == RecordingProgressResumeHistory || !validProgressData(observation, command, time.Now()) {
 		return nil, ErrRecordingProgressChanged
 	}
 	return c.prepareOriginal(r, identity, observation, &command)
@@ -309,11 +313,14 @@ func ownRecordingProgressHistory(identity RecordingTimelineIdentity, o Recording
 func (c *RecordingProgressCore) PrepareWithHistory(r *http.Request, identity RecordingTimelineIdentity, observation RecordingProgressObservation, command RecordingProgressCommand, history RecordingProgressHistoryObservation) (*RecordingProgressIntent, error) {
 	// Bound and own DATA before any blocking admission/SQL. No caller slice or
 	// pointer can mutate the eventual sidecar after this method returns.
+	if !validProgressData(observation, command, time.Now()) {
+		return nil, ErrRecordingProgressChanged
+	}
 	data, err := ownRecordingProgressHistory(identity, observation, history)
 	if err != nil {
 		return nil, err
 	}
-	intent, err := c.Prepare(r, identity, observation, command)
+	intent, err := c.prepareOriginal(r, identity, observation, &command)
 	if err != nil {
 		return nil, err
 	}
@@ -328,7 +335,10 @@ func (c *RecordingProgressCore) prepareOriginal(r *http.Request, identity Record
 	if command == nil {
 		method = http.MethodGet
 	}
-	if !c.valid() || r == nil || r.URL == nil || r.Method != method || r.URL.RawQuery != "" || len(r.URL.EscapedPath()) > 4096 || !validProgressObservation(observation, time.Now()) || identity.incarnation.String() == "00000000-0000-0000-0000-000000000000" || !parentMutationID(identity.owner) || identity.recordingID == "" || len(identity.recordingID) > 128 {
+	// Keep the original authenticated request URL/frame. The only admitted
+	// GET query is one exact presentation option; no auth selector is normalized.
+	queryAllowed := r != nil && r.URL != nil && !r.URL.ForceQuery && (r.URL.RawQuery == "" || method == http.MethodGet && (r.URL.RawQuery == "includeHistory=true" || r.URL.RawQuery == "includeHistory=false"))
+	if !c.valid() || r == nil || r.URL == nil || r.Method != method || !queryAllowed || len(r.URL.EscapedPath()) > 4096 || !validProgressObservation(observation, time.Now()) || identity.incarnation.String() == "00000000-0000-0000-0000-000000000000" || !parentMutationID(identity.owner) || identity.recordingID == "" || len(identity.recordingID) > 128 {
 		return nil, ErrRecordingProgressChanged
 	}
 	frame, _ := r.Context().Value(pgRequestFrameKey{}).(*pgRequestFrame)
