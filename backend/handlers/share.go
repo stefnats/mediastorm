@@ -1,7 +1,9 @@
 package handlers
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"html"
 	"io"
 	"net/http"
@@ -10,6 +12,7 @@ import (
 	"time"
 
 	"novastream/internal/auth"
+	"novastream/internal/datastore"
 	"novastream/internal/requestsecurity"
 	"novastream/models"
 	"novastream/services/libraryaccess"
@@ -50,11 +53,20 @@ type ShareProfileService interface {
 
 // ShareHandler creates and consumes one-time shareable playback links.
 type ShareHandler struct {
-	store          *ShareStore
-	sessions       ShareSessionService
-	users          ShareProfileService
-	serverBasePath string
-	libraryAccess  *libraryaccess.Service
+	store           *ShareStore
+	sessions        ShareSessionService
+	users           ShareProfileService
+	serverBasePath  string
+	libraryAccess   *libraryaccess.Service
+	managedCreation bool
+	creator         *datastore.ShareLinkCreator
+}
+
+// Selecting PG creation remains fail-closed even when its original managed
+// creator is unavailable. The existing constructor isolates file compatibility.
+func (h *ShareHandler) SetManagedShareCreation(creator *datastore.ShareLinkCreator) {
+	h.managedCreation = true
+	h.creator = creator
 }
 
 func (h *ShareHandler) SetLibraryAccessService(service *libraryaccess.Service) {
@@ -109,6 +121,66 @@ func (h *ShareHandler) Create(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
 		return
 	}
+	if h.managedCreation && r.Context().Value(shareCreateEntryKey{}) != h {
+		h.serveBoundedCreate(w, r, http.HandlerFunc(h.create))
+		return
+	}
+	h.create(w, r)
+}
+
+type shareCreateEntryKey struct{}
+
+// BoundedCreateEntry starts the actual managed lifetime before the registered
+// authentication/ownership middleware can read a request body. File mode and
+// unrelated endpoints retain their original middleware behavior.
+func (h *ShareHandler) BoundedCreateEntry(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		path := r.URL.Path
+		if !h.managedCreation || r.Method != http.MethodPost || (path != "/api/share/create" && path != "/admin/api/share/create" && path != "/account/api/share/create") {
+			next.ServeHTTP(w, r)
+			return
+		}
+		h.serveBoundedCreate(w, r, next)
+	})
+}
+
+func (h *ShareHandler) serveBoundedCreate(w http.ResponseWriter, r *http.Request, next http.Handler) {
+	if h.creator == nil || h.creator.Context().Err() != nil {
+		writeShareJSONError(w, http.StatusServiceUnavailable, "share creation unavailable")
+		return
+	}
+	if r.Context().Value(shareCreateEntryKey{}) == h {
+		next.ServeHTTP(w, r)
+		return
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
+	defer cancel()
+	ctx = context.WithValue(ctx, shareCreateEntryKey{}, h)
+	r = r.WithContext(ctx)
+	control := http.NewResponseController(w)
+	deadline, _ := ctx.Deadline()
+	_ = control.SetReadDeadline(deadline)
+	_ = control.SetWriteDeadline(deadline)
+	interrupted := make(chan struct{})
+	stopRead := context.AfterFunc(ctx, func() {
+		defer close(interrupted)
+		_ = control.SetReadDeadline(time.Now())
+		_ = control.SetWriteDeadline(time.Now())
+	})
+	runtimeDone := make(chan struct{})
+	stopRuntime := context.AfterFunc(h.creator.Context(), func() { defer close(runtimeDone); cancel() })
+	defer func() {
+		if !stopRuntime() {
+			<-runtimeDone
+		}
+		if !stopRead() {
+			<-interrupted
+		}
+	}()
+	next.ServeHTTP(w, r)
+}
+
+func (h *ShareHandler) create(w http.ResponseWriter, r *http.Request) {
 
 	accountID := auth.GetAccountID(r)
 	if accountID == "" {
@@ -118,6 +190,10 @@ func (h *ShareHandler) Create(w http.ResponseWriter, r *http.Request) {
 
 	raw, err := io.ReadAll(http.MaxBytesReader(w, r.Body, 1<<20))
 	if err != nil {
+		if h.managedCreation && r.Context().Err() != nil {
+			writeShareJSONError(w, http.StatusServiceUnavailable, "share creation unavailable")
+			return
+		}
 		writeShareJSONError(w, http.StatusBadRequest, "invalid request body")
 		return
 	}
@@ -151,7 +227,7 @@ func (h *ShareHandler) Create(w http.ResponseWriter, r *http.Request) {
 	// profile identified by profileId; that profile must belong to the caller's
 	// account (master may act across accounts) and must have the grant the master
 	// sets. There is no master bypass — the flag is always required.
-	if h.users != nil {
+	if !h.managedCreation && h.users != nil {
 		profileID := params["profileId"]
 		profile, ok := h.users.Get(profileID)
 		if profileID == "" || !ok ||
@@ -187,14 +263,76 @@ func (h *ShareHandler) Create(w http.ResponseWriter, r *http.Request) {
 		ttl = time.Duration(days) * 24 * time.Hour
 	}
 
-	link, err := h.store.Create(r.Context(), accountID, auth.IsMaster(r), params, ttl, req.MaxUses, strings.TrimSpace(req.Label))
+	var link *models.ShareLink
+	if h.managedCreation {
+		link, err = h.creator.Create(r, params["profileId"], params, ttl, req.MaxUses, strings.TrimSpace(req.Label))
+	} else {
+		link, err = h.store.Create(r.Context(), accountID, auth.IsMaster(r), params, ttl, req.MaxUses, strings.TrimSpace(req.Label))
+	}
 	if err != nil {
-		writeShareJSONError(w, http.StatusInternalServerError, "failed to create share link")
+		status := http.StatusInternalServerError
+		if h.managedCreation {
+			status = http.StatusServiceUnavailable
+			if errors.Is(err, datastore.ErrShareProvenanceForbidden) {
+				status = http.StatusForbidden
+			}
+		}
+		writeShareJSONError(w, status, "failed to create share link")
 		return
 	}
 
+	if h.managedCreation {
+		h.writeManagedCreatedShare(w, r, link)
+		return
+	}
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(h.viewOf(link))
+}
+
+// A committed link remains committed if delivery fails. This bounded managed
+// publication never retries, logs the token or calls a failed output rollback.
+func (h *ShareHandler) writeManagedCreatedShare(w http.ResponseWriter, r *http.Request, link *models.ShareLink) {
+	deadline, ok := r.Context().Deadline()
+	if !ok || link == nil {
+		writeShareJSONError(w, http.StatusServiceUnavailable, "share creation unavailable")
+		return
+	}
+	if link.ExpiresAt.Before(deadline) {
+		deadline = link.ExpiresAt
+	}
+	valid := func() bool {
+		return r.Context().Err() == nil && deadline.After(time.Now()) && h.creator != nil && h.creator.Context().Err() == nil
+	}
+	if !valid() {
+		writeShareJSONError(w, http.StatusServiceUnavailable, "share creation unavailable")
+		return
+	}
+	control := http.NewResponseController(w)
+	_ = control.SetWriteDeadline(deadline)
+	ctx, cancel := context.WithDeadline(r.Context(), deadline)
+	defer cancel()
+	interrupted := make(chan struct{})
+	stop := context.AfterFunc(ctx, func() { defer close(interrupted); _ = control.SetWriteDeadline(time.Now()) })
+	defer func() {
+		if !stop() {
+			<-interrupted
+		}
+	}()
+	payload, err := json.Marshal(h.viewOf(link))
+	if err != nil || len(payload) > 2<<20 || ctx.Err() != nil || !valid() {
+		writeShareJSONError(w, http.StatusServiceUnavailable, "share creation unavailable")
+		return
+	}
+	payload = append(payload, '\n')
+	if ctx.Err() != nil || !valid() {
+		writeShareJSONError(w, http.StatusServiceUnavailable, "share creation unavailable")
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Cache-Control", "private, no-store")
+	if _, err = w.Write(payload); err != nil {
+		return
+	}
 }
 
 // List returns the share links the caller may manage (own links, or all for the

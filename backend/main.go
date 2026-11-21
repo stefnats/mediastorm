@@ -1194,6 +1194,13 @@ func main() {
 		shareLinkRepo = store.ShareLinks()
 	}
 	shareHandler := handlers.NewShareHandler(handlers.NewShareStore(shareLinkRepo), sessionsService, userService, settings.Server.BasePath)
+	if store != nil {
+		creator, createErr := managedStartup.NewShareLinkCreator(store)
+		if createErr != nil {
+			log.Printf("[share] managed share creation unavailable: %v", createErr)
+		}
+		shareHandler.SetManagedShareCreation(creator)
+	}
 	shareHandler.SetLibraryAccessService(libraryAccessService)
 	var watchRoomsHandler *handlers.WatchRoomsHandler
 	var watchPartyHandler *handlers.WatchPartyHandler
@@ -1528,7 +1535,7 @@ func main() {
 	r.HandleFunc("/admin/api/bad-streams/{id}/share", adminUIHandler.RequireMasterAuth(badStreamsHandler.ShareReport)).Methods(http.MethodPost)
 	r.HandleFunc("/admin/api/bad-streams/{id}", adminUIHandler.RequireMasterAuth(badStreamsHandler.Delete)).Methods(http.MethodDelete)
 	r.HandleFunc("/admin/api/playback/strm", adminUIHandler.RequireAuth(adminUIHandler.DownloadSTRM)).Methods(http.MethodGet)
-	r.HandleFunc("/admin/api/share/create", adminUIHandler.RequireAuth(shareHandler.Create)).Methods(http.MethodPost)
+	r.HandleFunc("/admin/api/share/create", adminUIHandler.RequireShareCreationAuth(shareHandler)).Methods(http.MethodPost)
 	r.HandleFunc("/admin/api/share/links", adminUIHandler.RequireAuth(shareHandler.List)).Methods(http.MethodGet)
 	r.HandleFunc("/admin/api/share/links/active", adminUIHandler.RequireAuth(shareHandler.SetActive)).Methods(http.MethodPost)
 	r.HandleFunc("/admin/api/share/links", adminUIHandler.RequireAuth(shareHandler.Delete)).Methods(http.MethodDelete)
@@ -1966,7 +1973,7 @@ func main() {
 	r.HandleFunc("/account/api/playback/bad-streams/{id}", releaseCookieHandler(badStreamsHandler.Delete)).Methods(http.MethodDelete)
 
 	r.HandleFunc("/account/api/playback/strm", adminUIHandler.RequireAuth(adminUIHandler.DownloadSTRM)).Methods(http.MethodGet)
-	r.HandleFunc("/account/api/share/create", adminUIHandler.RequireAuth(shareHandler.Create)).Methods(http.MethodPost)
+	r.HandleFunc("/account/api/share/create", adminUIHandler.RequireShareCreationAuth(shareHandler)).Methods(http.MethodPost)
 	r.HandleFunc("/account/api/share/links", adminUIHandler.RequireAuth(shareHandler.List)).Methods(http.MethodGet)
 	r.HandleFunc("/account/api/share/links/active", adminUIHandler.RequireAuth(shareHandler.SetActive)).Methods(http.MethodPost)
 	r.HandleFunc("/account/api/share/links", adminUIHandler.RequireAuth(shareHandler.Delete)).Methods(http.MethodDelete)

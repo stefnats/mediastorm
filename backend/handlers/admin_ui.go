@@ -4738,6 +4738,12 @@ func (h *AdminUIHandler) requireProfileScope(w http.ResponseWriter, r *http.Requ
 
 // RequireAuth keeps its existing cookie acquisition/error policy. The shared
 // post-auth path retains the same scope, onboarding, deadline and profile checks.
+// RequireShareCreationAuth places the concrete managed share lifetime outside
+// the original cookie authentication and current-ownership body reader.
+func (h *AdminUIHandler) RequireShareCreationAuth(share *ShareHandler) http.HandlerFunc {
+	return share.BoundedCreateEntry(h.RequireAuth(share.Create)).ServeHTTP
+}
+
 func (h *AdminUIHandler) RequireAuth(next http.HandlerFunc) http.HandlerFunc {
 	owned := h.cookieOwnedHandler(next)
 	return func(w http.ResponseWriter, r *http.Request) {
