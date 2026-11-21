@@ -165,14 +165,18 @@ func (h *SABLibraryPublicationHandler) BoundedEntry(next http.Handler) http.Hand
 		defer func() {
 			// Flush actual buffered output while all original IO links remain armed.
 			_ = entry.controller.Flush()
+			// A raw intentional read timeout can cancel net/http's original
+			// background reader. Disarm/join both original interruption links
+			// after the real flush, before intentional body cleanup, so that
+			// net/http can still write its final response framing on return.
+			entry.stop()
+			stopOwner()
 			entry.ioMu.Lock()
 			_ = entry.controller.SetReadDeadline(time.Now().Add(-time.Second))
 			entry.ioMu.Unlock()
 			if r.Body != nil {
 				_ = r.Body.Close()
 			}
-			entry.stop()
-			stopOwner()
 			cancel()
 			h.mu.Lock()
 			delete(h.entries, entry)

@@ -480,7 +480,7 @@ func TestSABPublicationPhysicalCopy(t *testing.T) {
 				return
 			}
 			if name == "source-close-joins-copy-and-consumer" {
-				f, actor, record, formats := publicationCopySource(t, [][]byte{[]byte("abcdef")}, []int{1})
+				_, actor, record, formats := publicationCopySource(t, [][]byte{[]byte("abcdef")}, []int{1})
 				copy := publicationCopyReady(t, actor, record, formats)
 				value := publicationCopyConsume(t, copy)
 				closed := make(chan struct{})

@@ -337,6 +337,44 @@ func publicationFixturePG(t *testing.T, proxyMode string) *publicationFixture {
 	}
 	return f
 }
+
+// End every real native issuer/domain before constructing the next isolated
+// current fixture. Each owned schema/role is still removed by its original
+// registered cleanup; no production state or callback replaces the runtime.
+func closePublicationRuntime(t *testing.T, f *publicationFixture) {
+	t.Helper()
+	if f.publisher != nil {
+		f.publisher.Close()
+		f.publisher = nil
+	}
+	if f.issuer != nil {
+		f.issuer.Close()
+		f.issuer = nil
+	}
+	if f.source != nil {
+		if e := f.source.Close(); e != nil {
+			t.Fatal(e)
+		}
+		f.source = nil
+	}
+	if f.db != nil {
+		if e := f.db.Close(); e != nil {
+			t.Fatal(e)
+		}
+		f.db = nil
+	}
+	if f.startup != nil {
+		if e := f.startup.Close(); e != nil {
+			t.Fatal(e)
+		}
+		f.startup = nil
+	}
+	if f.store != nil {
+		f.store.Close()
+		f.store = nil
+	}
+}
+
 func publicationTestMedia(t *testing.T) []byte {
 	t.Helper()
 	tool := os.Getenv("FAMILY_LOCAL_PROBE_TEST_FFMPEG")
@@ -490,9 +528,17 @@ func TestSABPublicationCompletionRegistration(t *testing.T) {
 			intent := f.intent(t, r)
 			copy := f.copy(t, r, intent)
 			if name == "foreign-context-source-operation-and-issuer-denied" {
-				other := publicationFixturePG(t, "")
-				foreignR := other.request(t, "POST", "", `{"libraryId":"library","ordinals":[1]}`)
-				foreign := other.intent(t, foreignR)
+				otherIssuer, e := f.startup.NewSABLibraryPublicationIssuer(f.store, f.source)
+				if e != nil {
+					t.Fatal("second genuine issuer on same original domain", e)
+				}
+				defer otherIssuer.Close()
+				foreignR := f.request(t, "POST", "", `{"libraryId":"library","ordinals":[1]}`)
+				foreign, e := otherIssuer.Capture(foreignR, 1, []byte(`{"libraryId":"library","ordinals":[1]}`))
+				if e != nil {
+					t.Fatal("genuine distinct original source capture", e)
+				}
+				defer foreign.Close()
 				if view, e := foreign.Register(foreignR, copy); e == nil || view.Reference != "" {
 					t.Fatal("foreign issuer/source completion accepted")
 				}
@@ -500,7 +546,7 @@ func TestSABPublicationCompletionRegistration(t *testing.T) {
 				if view, e := intent.Register(cloned, copy); e == nil || view.Reference != "" {
 					t.Fatal("replacement original context accepted")
 				}
-				if f.count(t, "local_media_items") != 0 || other.count(t, "local_media_items") != 0 {
+				if f.count(t, "local_media_items") != 0 {
 					t.Fatal("foreign attempt inserted items")
 				}
 				return
@@ -553,6 +599,7 @@ func TestSABPublicationCompletionRegistration(t *testing.T) {
 						t.Fatal("retired source inserted item")
 					}
 					original.Close()
+					closePublicationRuntime(t, actual)
 				}
 				return
 			}
@@ -613,6 +660,8 @@ func TestSABPublicationCompletionRegistration(t *testing.T) {
 				return
 			}
 			if name == "known-pg-ack-sqlite-final-unavailable-one-row" {
+				f.db.Connection().SetMaxOpenConns(2)
+				f.db.Connection().SetMaxIdleConns(2)
 				type outcome struct {
 					view datastore.SABLibraryPublicationView
 					err  error
@@ -659,6 +708,20 @@ func TestSABPublicationCompletionRegistration(t *testing.T) {
 				}
 				if f.count(t, "local_media_items") != 1 {
 					t.Fatal("known PG commit lost or duplicated")
+				}
+				cleanupCtx, cleanupCancel := context.WithTimeout(t.Context(), time.Second)
+				defer cleanupCancel()
+				restored, e := f.db.Connection().Conn(cleanupCtx)
+				if e != nil {
+					t.Fatal("journal connection not returned after actual cleanup", e)
+				}
+				defer restored.Close()
+				var busy, synchronous int
+				if e = restored.QueryRowContext(cleanupCtx, "PRAGMA busy_timeout").Scan(&busy); e != nil || busy != 30000 {
+					t.Fatal("journal leaked its bounded busy timeout", e, busy)
+				}
+				if e = restored.QueryRowContext(cleanupCtx, "PRAGMA synchronous").Scan(&synchronous); e != nil || synchronous != 1 {
+					t.Fatal("journal failed to restore original synchronous level", e, synchronous)
 				}
 				return
 			}

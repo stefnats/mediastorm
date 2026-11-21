@@ -8,6 +8,7 @@ import (
 	"crypto/rand"
 	"crypto/sha256"
 	"database/sql"
+	"database/sql/driver"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -329,14 +330,88 @@ func (s *SABStagedPublication) ReopenCopy(ctx context.Context, operation string)
 
 // Every operational write uses an actual dedicated FULL-synchronous connection.
 // Returned records are evidence DATA; only the original actor can mint a copy.
-func (c *SABPublicationCopy) journal(phase string, apply func(context.Context, *sql.Tx) error) error {
+func (c *SABPublicationCopy) journal(phase string, apply func(context.Context, *sql.Tx) error) (err error) {
 	ctx, cancel := context.WithTimeout(c.ctx, 5*time.Second)
 	defer cancel()
 	conn, e := c.source.owner.database.Connection().Conn(ctx)
 	if e != nil {
 		return e
 	}
-	defer conn.Close()
+	var originalBusy, originalSync int
+	changed, committed := false, false
+	defer func() {
+		cleanupFailed := false
+		if changed {
+			// Restore outside the original canceled work context, on this same owned
+			// connection, after its transaction has actually ended. Keep the short
+			// busy budget through synchronous restoration; restore the old busy
+			// handler last so unrelated queue operations retain their original policy.
+			cleanup, stop := context.WithTimeout(context.Background(), time.Second)
+			if _, e := conn.ExecContext(cleanup, fmt.Sprintf("PRAGMA synchronous=%d", originalSync)); e != nil {
+				cleanupFailed = true
+			}
+			var level int
+			if e := conn.QueryRowContext(cleanup, "PRAGMA synchronous").Scan(&level); e != nil || level != originalSync {
+				cleanupFailed = true
+			}
+			if _, e := conn.ExecContext(cleanup, fmt.Sprintf("PRAGMA busy_timeout=%d", originalBusy)); e != nil {
+				cleanupFailed = true
+			}
+			var busy int
+			if e := conn.QueryRowContext(cleanup, "PRAGMA busy_timeout").Scan(&busy); e != nil || busy != originalBusy {
+				cleanupFailed = true
+			}
+			stop()
+		}
+		if cleanupFailed {
+			// An unverified connection must never return to the generic queue pool.
+			// Raw's ErrBadConn path discards the genuine underlying driver connection;
+			// it supplies no actor, data, acknowledgement or cleanup callback receipt.
+			_ = conn.Raw(func(any) error { return driver.ErrBadConn })
+		}
+		closeErr := conn.Close()
+		if cleanupFailed || closeErr != nil && !errors.Is(closeErr, sql.ErrConnDone) {
+			if committed || errors.Is(err, database.ErrSABPublicationOutcomeUnknown) {
+				err = database.ErrSABPublicationOutcomeUnknown
+			} else {
+				err = database.ErrSABPublicationUnavailable
+			}
+		}
+	}()
+	if e = conn.QueryRowContext(ctx, "PRAGMA busy_timeout").Scan(&originalBusy); e != nil {
+		return e
+	}
+	if e = conn.QueryRowContext(ctx, "PRAGMA synchronous").Scan(&originalSync); e != nil {
+		return e
+	}
+	if originalBusy < 0 || int64(originalBusy) > 2147483647 || originalSync < 0 || originalSync > 3 {
+		return database.ErrSABPublicationUnavailable
+	}
+	boundBusy := func() error {
+		deadline, ok := ctx.Deadline()
+		if !ok || ctx.Err() != nil {
+			return database.ErrSABPublicationUnavailable
+		}
+		milliseconds := time.Until(deadline).Milliseconds()
+		if milliseconds < 1 {
+			return database.ErrSABPublicationUnavailable
+		}
+		if milliseconds > 250 {
+			milliseconds = 250
+		}
+		changed = true
+		if _, e := conn.ExecContext(ctx, fmt.Sprintf("PRAGMA busy_timeout=%d", milliseconds)); e != nil {
+			return e
+		}
+		var actual int64
+		if e := conn.QueryRowContext(ctx, "PRAGMA busy_timeout").Scan(&actual); e != nil || actual != milliseconds {
+			return database.ErrSABPublicationUnavailable
+		}
+		return ctx.Err()
+	}
+	if e = boundBusy(); e != nil {
+		return e
+	}
 	if _, e = conn.ExecContext(ctx, "PRAGMA synchronous=FULL"); e != nil {
 		return e
 	}
@@ -344,23 +419,36 @@ func (c *SABPublicationCopy) journal(phase string, apply func(context.Context, *
 	if e = conn.QueryRowContext(ctx, "PRAGMA synchronous").Scan(&level); e != nil || level != 2 {
 		return database.ErrSABPublicationUnavailable
 	}
+	// Refresh the actual C busy handler against the remaining fixed lifetime
+	// immediately before beginning this transaction. Context cancellation alone
+	// cannot interrupt sqlite3's inherited 30-second C busy sleep.
+	if e = boundBusy(); e != nil {
+		return e
+	}
 	tx, e := conn.BeginTx(ctx, nil)
 	if e != nil {
 		return e
 	}
 	defer tx.Rollback()
+	if ctx.Err() != nil {
+		return ctx.Err()
+	}
 	if e = apply(ctx, tx); e != nil {
 		return e
+	}
+	if ctx.Err() != nil {
+		return ctx.Err()
 	}
 	if e = tx.Commit(); e != nil {
 		return database.ErrSABPublicationOutcomeUnknown
 	}
+	committed = true
 	if hooks := c.source.copyHooks; hooks != nil && hooks.afterCommit != nil {
 		if e = hooks.afterCommit(phase); e != nil {
 			return database.ErrSABPublicationOutcomeUnknown
 		}
 	}
-	if c.ctx.Err() != nil {
+	if c.ctx.Err() != nil || ctx.Err() != nil {
 		return database.ErrSABPublicationOutcomeUnknown
 	}
 	return nil
