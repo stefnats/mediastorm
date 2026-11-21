@@ -9,7 +9,6 @@ import (
 	"novastream/config"
 	"novastream/internal/database"
 	"novastream/models"
-	"novastream/services/sessions"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -21,17 +20,31 @@ import (
 	"time"
 )
 
+// StageTestSessionService is a test-only construction adapter. The external
+// integration test package installs only the genuine sessions.Service factory,
+// keeping this package's test dependency graph free of a datastore cycle.
+type StageTestSessionService interface {
+	Create(accountID string, isMaster bool, userAgent, ipAddress string) (models.Session, error)
+	SnapshotForAuthorization(ctx context.Context, token string) (*models.Session, error)
+	Revoke(token string) error
+}
+
+var StageTestSessionFactory func(storageDir string, duration time.Duration) (StageTestSessionService, error)
+
 // Actual nonrenewing in-memory sessions; role is a controlled current-account
 // port. This is not a SQL/login or installed HTTP-authority claim.
 type stageTestAuthority struct {
-	sessions *sessions.Service
+	sessions StageTestSessionService
 	original models.Session
 	master   atomic.Bool
 }
 
 func newStageTestAuthority(t *testing.T) *stageTestAuthority {
 	t.Helper()
-	s, e := sessions.NewService("", time.Hour)
+	if StageTestSessionFactory == nil {
+		t.Fatal("genuine external session fixture constructor is not initialized")
+	}
+	s, e := StageTestSessionFactory("", time.Hour)
 	if e != nil {
 		t.Fatal(e)
 	}

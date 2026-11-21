@@ -15,6 +15,7 @@ import (
 	"net/http/httptest"
 	"novastream/internal/database"
 	"novastream/internal/importer"
+	nzbmetadata "novastream/internal/nzb/metadata"
 	"os"
 	"path/filepath"
 	"strings"
@@ -55,7 +56,7 @@ func sabPublicationPG(t *testing.T, dial func(context.Context, string, string) (
 		t.Fatal(e)
 	}
 	t.Cleanup(func() { f.db.Close() })
-	f.source, e = importer.NewService(importer.ServiceConfig{}, nil, f.db, nil, nil)
+	f.source, e = importer.NewService(importer.ServiceConfig{}, nzbmetadata.NewMetadataService(t.TempDir()), f.db, nil, nil)
 	if e != nil {
 		t.Fatal(e)
 	}
