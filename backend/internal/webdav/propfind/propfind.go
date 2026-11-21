@@ -3,9 +3,11 @@ package propfind
 // Code copied from webdav package of golang.org/x/net/webdav to override
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/url"
 	"os"
@@ -222,3 +224,144 @@ func stripPrefix(p, prefix string) (string, int, error) {
 	}
 	return p, http.StatusNotFound, errPrefixMismatch
 }
+
+// HandleBoundedPropfind stages one complete managed response. Its filesystem
+// must be the original bounded request source, never a generic fallback.
+func HandleBoundedPropfind(fs webdav.FileSystem, ls webdav.LockSystem, w http.ResponseWriter, r *http.Request, prefix, hrefPrefix string) (int, error) {
+	if hrefPrefix == "" || len(hrefPrefix) > 8192 || !strings.HasPrefix(hrefPrefix, "/") || strings.HasPrefix(hrefPrefix, "//") || path.Clean(hrefPrefix) != hrefPrefix || strings.ContainsAny(hrefPrefix, "\\\x00\r\n?#") {
+		return http.StatusBadRequest, errInvalidResponse
+	}
+	reqPath, status, err := stripPrefix(r.URL.Path, prefix)
+	if err != nil {
+		return status, err
+	}
+	depth := infiniteDepth
+	if hdr := r.Header.Get("Depth"); hdr != "" {
+		depth = parseDepth(hdr)
+		if depth == invalidDepth {
+			return http.StatusBadRequest, errInvalidDepth
+		}
+	}
+	// Read the original bounded body before any source enumeration.
+	pf, status, err := readPropfind(r.Body)
+	if err != nil {
+		var large *http.MaxBytesError
+		if errors.As(err, &large) {
+			return http.StatusRequestEntityTooLarge, err
+		}
+		return status, err
+	}
+	if err = r.Context().Err(); err != nil {
+		return http.StatusServiceUnavailable, err
+	}
+	info, err := fs.Stat(r.Context(), reqPath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return http.StatusNotFound, err
+		}
+		return http.StatusServiceUnavailable, err
+	}
+	out := &boundedPropfindOutput{header: make(http.Header)}
+	mw := multistatusWriter{w: out}
+	visited := 0
+	var walk func(string, os.FileInfo, int, int) error
+	walk = func(name string, fi os.FileInfo, left, level int) error {
+		if err := r.Context().Err(); err != nil {
+			return err
+		}
+		if level > 32 || visited >= 4096 {
+			return errManagedPropfindBound
+		}
+		visited++
+		var stats []webdav.Propstat
+		if pf.Propname != nil {
+			names, e := propnames(fi)
+			if e != nil {
+				return e
+			}
+			st := webdav.Propstat{Status: http.StatusOK}
+			for _, n := range names {
+				st.Props = append(st.Props, webdav.Property{XMLName: n})
+			}
+			stats = append(stats, st)
+		} else if pf.Allprop != nil {
+			stats, err = allprop(r.Context(), fi, name, pf.Prop)
+		} else {
+			stats, err = props(r.Context(), fi, name, pf.Prop)
+		}
+		if err != nil {
+			return err
+		}
+		href := path.Join(hrefPrefix, name)
+		if href != "/" && fi.IsDir() {
+			href += "/"
+		}
+		if err := mw.write(makePropstatResponse(href, stats)); err != nil {
+			return err
+		}
+		if !fi.IsDir() || left == 0 {
+			return nil
+		}
+		file, e := fs.OpenFile(r.Context(), name, os.O_RDONLY, 0)
+		if e != nil {
+			return e
+		}
+		children, e := file.Readdir(0)
+		closeErr := file.Close()
+		if e != nil {
+			return e
+		}
+		if closeErr != nil {
+			return closeErr
+		}
+		if len(children) > 4096-visited {
+			return errManagedPropfindBound
+		}
+		next := left
+		if next == 1 {
+			next = 0
+		}
+		for _, child := range children {
+			if e = walk(path.Join(name, child.Name()), child, next, level+1); e != nil {
+				return e
+			}
+		}
+		return nil
+	}
+	if err = walk(reqPath, info, depth, 0); err != nil {
+		return http.StatusServiceUnavailable, err
+	}
+	if err = mw.close(); err != nil {
+		return http.StatusServiceUnavailable, err
+	}
+	if err = r.Context().Err(); err != nil {
+		return http.StatusServiceUnavailable, err
+	}
+	for key, values := range out.header {
+		w.Header()[key] = append([]string(nil), values...)
+	}
+	w.Header().Set("Content-Length", fmt.Sprint(out.body.Len()))
+	w.WriteHeader(webdav.StatusMulti)
+	if _, err = w.Write(out.body.Bytes()); err != nil {
+		return 0, err
+	}
+	return 0, nil
+}
+
+var errManagedPropfindBound = errors.New("bounded WebDAV metadata unavailable")
+
+type boundedPropfindOutput struct {
+	header http.Header
+	body   bytes.Buffer
+}
+
+func (w *boundedPropfindOutput) Header() http.Header { return w.header }
+func (w *boundedPropfindOutput) WriteHeader(int)     {}
+func (w *boundedPropfindOutput) Write(p []byte) (int, error) {
+	if len(p) > 8<<20-w.body.Len() {
+		return 0, errManagedPropfindBound
+	}
+	return w.body.Write(p)
+}
+
+var _ io.Writer = (*boundedPropfindOutput)(nil)

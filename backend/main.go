@@ -22,18 +22,20 @@ import (
 	"strings"
 	"time"
 
+	"github.com/spf13/afero"
+
 	"novastream/api"
 	"novastream/config"
 	"novastream/handlers"
 	"novastream/internal/accountrecovery"
 	"novastream/internal/apiusage"
 	"novastream/internal/auth"
-	"novastream/internal/database"
 	"novastream/internal/datastore"
 	"novastream/internal/integration"
 	"novastream/internal/jellyfinbridge"
 	"novastream/internal/livecapacity"
 	"novastream/internal/mediaidentity"
+	"novastream/internal/nzbfilesystem"
 	"novastream/internal/pool"
 	"novastream/internal/requestsecurity"
 	"novastream/internal/settingsbootstrap"
@@ -382,7 +384,7 @@ func main() {
 	defer nzbSystem.Close()
 
 	// Create WebDAV handler if enabled
-	var webdavHandler http.Handler
+	var managedWebDAV *webdav.ManagedHandler
 	if settings.WebDAV.Enabled {
 		// Generate WebDAV password if not set
 		if strings.TrimSpace(settings.WebDAV.Password) == "" {
@@ -397,21 +399,14 @@ func main() {
 			fmt.Println("🔐 Generated WebDAV credentials and saved them to protected application settings")
 		}
 
-		webdavConfig := &webdav.Config{
-			Prefix: settings.WebDAV.Prefix,
-			User:   settings.WebDAV.Username,
-			Pass:   settings.WebDAV.Password,
-		}
-
-		// Get database for user repository
-		db := nzbSystem.Database()
-		userRepo := database.NewUserRepository(db.Connection())
-
-		handler, err := webdav.NewHandler(webdavConfig, nzbSystem.FileSystem(), nil, userRepo, configAdapter.GetConfigGetter())
+		managedWebDAV, err = newManagedWebDAVRuntime(managedStartup, store, nzbSystem.FileSystem(), settings.WebDAV.Prefix)
 		if err != nil {
-			log.Fatalf("failed to create WebDAV handler: %v", err)
+			// This reachable Main path requires PG. Keep the configured route
+			// unavailable rather than falling back to cached global credentials.
+			log.Printf("[webdav] managed runtime unavailable: %v", err)
 		}
-		webdavHandler = handler.GetHTTPHandler()
+		defer managedWebDAV.Close()
+
 		fmt.Printf("📁 WebDAV endpoint enabled at %s\n", settings.WebDAV.Prefix)
 	}
 
@@ -2175,8 +2170,8 @@ func main() {
 	}).Methods(http.MethodGet)
 
 	// Mount WebDAV handler if enabled
-	if webdavHandler != nil {
-		r.PathPrefix(settings.WebDAV.Prefix + "/").Handler(webdavHandler)
+	if settings.WebDAV.Enabled {
+		mountManagedWebDAV(r, settings.WebDAV.Prefix, managedWebDAV)
 		fmt.Printf("✅ WebDAV mounted at %s\n", settings.WebDAV.Prefix)
 	}
 
@@ -2321,8 +2316,11 @@ func main() {
 
 	// Wrap handler with base path prefix stripping if configured
 	var handler http.Handler = r
+	if settings.WebDAV.Enabled {
+		handler = managedWebDAVOptions(settings.WebDAV.Prefix, managedWebDAV, r)
+	}
 	if settings.Server.BasePath != "" {
-		handler = utils.BasePathHandler(settings.Server.BasePath, r)
+		handler = utils.BasePathHandler(settings.Server.BasePath, handler)
 		fmt.Printf("📁 Base path prefix: %s (requests to %s/* will be routed normally)\n", settings.Server.BasePath, settings.Server.BasePath)
 	}
 
@@ -2621,6 +2619,10 @@ func main() {
 
 	// Stop calendar service background refresh
 	calendarService.Stop()
+
+	// Retire original WebDAV source/body/query work before stopping its actual
+	// NZB workers or closing the original Startup/store during deferred cleanup.
+	managedWebDAV.Close()
 
 	// Stop NZB system workers first to cancel background processing
 	log.Println("🧹 Stopping NZB system workers...")
@@ -3155,4 +3157,113 @@ func configureManagedSharePlayback(startup *settingsbootstrap.Startup, store *da
 		err = errors.Join(err, video.SetManagedSharePlayback(runtime, pins))
 	}
 	return err
+}
+
+// newManagedWebDAVRuntime is the real Main composition seam. Unknown or missing
+// concrete PG/source dependencies never select legacy WebDAV authentication.
+func newManagedWebDAVRuntime(startup *settingsbootstrap.Startup, store *datastore.DataStore, filesystem afero.Fs, prefix string) (*webdav.ManagedHandler, error) {
+	source, ok := filesystem.(*nzbfilesystem.NzbFilesystem)
+	if startup == nil || store == nil || !ok || source == nil {
+		return nil, errors.New("managed WebDAV dependencies unavailable")
+	}
+	issuer, err := startup.NewDeploymentWebDAVIssuer(store)
+	if err != nil {
+		return nil, err
+	}
+	handler, err := webdav.NewManagedHandler(prefix, source, issuer)
+	if err != nil {
+		issuer.Close()
+		return nil, err
+	}
+	return handler, nil
+}
+func mountManagedWebDAV(router *mux.Router, prefix string, managed *webdav.ManagedHandler) {
+	var handler http.Handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = http.NewResponseController(w).SetWriteDeadline(time.Now().Add(time.Second))
+		http.Error(w, "WebDAV unavailable", http.StatusServiceUnavailable)
+	})
+	if managed != nil {
+		handler = managed.GetHTTPHandler()
+	}
+	base := strings.TrimRight(strings.TrimSpace(prefix), "/")
+	if base == "" {
+		base = "/"
+	}
+	if !strings.HasPrefix(base, "/") {
+		base = "/" + base
+	}
+	if base == "/" {
+		router.PathPrefix("/").Handler(handler).Name("managed-webdav-root")
+		return
+	}
+	router.Handle(base, handler).Name("managed-webdav-exact")
+	router.PathPrefix(base + "/").Handler(handler).Name("managed-webdav-subtree")
+}
+
+// Browser preflight describes static capabilities without authenticating or
+// reading a source. Other OPTIONS still reaches the actual managed Basic gate.
+func managedWebDAVOptions(prefix string, managed *webdav.ManagedHandler, router *mux.Router) http.Handler {
+	base := strings.TrimRight(strings.TrimSpace(prefix), "/")
+	if base == "" {
+		base = "/"
+	}
+	if !strings.HasPrefix(base, "/") {
+		base = "/" + base
+	}
+	owned := make(map[*mux.Route]struct{})
+	for _, name := range []string{"managed-webdav-root", "managed-webdav-exact", "managed-webdav-subtree"} {
+		if route := router.GetRoute(name); route != nil {
+			owned[route] = struct{}{}
+		}
+	}
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		match := base == "/" || r.URL.Path == base || strings.HasPrefix(r.URL.Path, base+"/")
+		if r.Method != http.MethodOptions || !match {
+			router.ServeHTTP(w, r)
+			return
+		}
+		// This clone is routing DATA before any managed observation. Never
+		// execute its handler or use its context as authentication evidence.
+		probe := r.Clone(r.Context())
+		if r.Header.Get("Origin") != "" && r.Header.Get("Access-Control-Request-Method") != "" {
+			probe.Method = r.Header.Get("Access-Control-Request-Method")
+		}
+		var selected mux.RouteMatch
+		if !router.Match(probe, &selected) {
+			router.ServeHTTP(w, r)
+			return
+		}
+		if _, dav := owned[selected.Route]; !dav {
+			router.ServeHTTP(w, r)
+			return
+		}
+
+		if managed == nil || managed.Closed() {
+			_ = http.NewResponseController(w).SetWriteDeadline(time.Now().Add(time.Second))
+			http.Error(w, "WebDAV unavailable", http.StatusServiceUnavailable)
+			return
+		}
+		origin, method := r.Header.Get("Origin"), r.Header.Get("Access-Control-Request-Method")
+		if origin == "" || method == "" {
+			managed.ServeHTTP(w, r)
+			return
+		}
+		_ = http.NewResponseController(w).SetWriteDeadline(time.Now().Add(time.Second))
+		if !utils.IsAllowedOrigin(origin) {
+			http.Error(w, "WebDAV unavailable", http.StatusForbidden)
+			return
+		}
+		methods := "GET, HEAD, OPTIONS, PROPFIND, MOVE, DELETE"
+		w.Header().Set("Access-Control-Allow-Origin", origin)
+		w.Header().Set("Vary", "Origin")
+		w.Header().Set("Access-Control-Allow-Methods", methods)
+		w.Header().Set("Access-Control-Allow-Headers", "Authorization, Content-Type, Depth, Destination, Overwrite, Range, If-Range, If-Match, If-Modified-Since, If-Unmodified-Since, X-Show-Corrupted")
+		switch method {
+		case "GET", "HEAD", "OPTIONS", "PROPFIND", "MOVE", "DELETE":
+			w.WriteHeader(http.StatusOK)
+		default:
+			w.Header().Set("Allow", methods)
+			http.Error(w, "Method Not Allowed", http.StatusMethodNotAllowed)
+		}
+	})
 }

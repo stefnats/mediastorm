@@ -8,6 +8,7 @@ import (
 	"github.com/spf13/afero"
 	"golang.org/x/net/webdav"
 	"novastream/internal/nzb/utils"
+	"novastream/internal/nzbfilesystem"
 )
 
 type fileSystem struct {
@@ -103,4 +104,10 @@ func (fs *fileSystem) Stat(ctx context.Context, name string) (os.FileInfo, error
 		return source.StatWithContext(ctx, name)
 	}
 	return fs.Fs.Stat(name)
+}
+
+// requestSourceToWebdavFS accepts only the whole original request's concrete
+// bounded source view. Managed HTTP never selects a generic afero fallback.
+func requestSourceToWebdavFS(source *nzbfilesystem.RequestSource) webdav.FileSystem {
+	return &fileSystem{Fs: source}
 }

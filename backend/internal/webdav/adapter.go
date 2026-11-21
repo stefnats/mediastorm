@@ -10,12 +10,12 @@ import (
 	"strings"
 
 	"github.com/go-pkgz/auth/v2/token"
+	"github.com/spf13/afero"
+	"golang.org/x/net/webdav"
 	"novastream/config"
 	"novastream/internal/database"
 	"novastream/internal/nzb/utils"
 	"novastream/internal/webdav/propfind"
-	"github.com/spf13/afero"
-	"golang.org/x/net/webdav"
 )
 
 // Handler provides WebDAV functionality as an HTTP handler
@@ -35,7 +35,7 @@ func NewHandler(
 ) (*Handler, error) {
 	// Create dynamic auth credentials with initial values
 	authCreds := NewAuthCredentials(config.User, config.Pass)
-	
+
 	// Create custom error handler that maps our errors to proper HTTP status codes
 	errorHandler := &customErrorHandler{
 		fileSystem: aferoToWebdavFS(fs),
@@ -107,11 +107,7 @@ func NewHandler(
 		}
 
 		w.Header().Set("Accept-Ranges", "bytes")
-		r = r.WithContext(context.WithValue(r.Context(), utils.ContentLengthKey, r.Header.Get("Content-Length")))
-		r = r.WithContext(context.WithValue(r.Context(), utils.RangeKey, r.Header.Get("Range")))
-		r = r.WithContext(context.WithValue(r.Context(), utils.IsCopy, r.Method == "COPY"))
-		r = r.WithContext(context.WithValue(r.Context(), utils.Origin, r.RequestURI))
-		r = r.WithContext(context.WithValue(r.Context(), utils.ShowCorrupted, r.Header.Get("X-Show-Corrupted") == "true"))
+		r = r.WithContext(webDAVSourceContext(r))
 
 		// Log MOVE and COPY operations to understand client behavior
 		switch r.Method {
@@ -215,4 +211,14 @@ func (h *Handler) SyncAuthCredentials() {
 		h.authCreds.UpdateCredentials(currentConfig.WebDAV.User, currentConfig.WebDAV.Password)
 		slog.Debug("WebDAV auth credentials synced from config")
 	}
+}
+
+// webDAVSourceContext establishes descriptive source arguments before a managed
+// original request is captured. These values never authenticate a request.
+func webDAVSourceContext(r *http.Request) context.Context {
+	ctx := context.WithValue(r.Context(), utils.ContentLengthKey, r.Header.Get("Content-Length"))
+	ctx = context.WithValue(ctx, utils.RangeKey, r.Header.Get("Range"))
+	ctx = context.WithValue(ctx, utils.IsCopy, r.Method == "COPY")
+	ctx = context.WithValue(ctx, utils.Origin, r.RequestURI)
+	return context.WithValue(ctx, utils.ShowCorrupted, r.Header.Get("X-Show-Corrupted") == "true")
 }
