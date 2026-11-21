@@ -177,6 +177,7 @@ func (s *Service) openDerivedInputs(ctx context.Context, r models.Recording, che
 }
 
 type derivedWork struct {
+	history       *derivedHistoryCapture
 	root          *os.Root
 	parent        *os.Root
 	dir           *os.File

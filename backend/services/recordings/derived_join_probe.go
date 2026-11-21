@@ -12,6 +12,7 @@ import (
 	"os"
 	"os/exec"
 	"reflect"
+	"runtime"
 	"strconv"
 	"strings"
 	"syscall"
@@ -285,7 +286,7 @@ func probeDerivedMedia(ctx context.Context, tool string, work *derivedWork, inde
 	if e != nil || index < 1 || index > len(work.stageVersions) || !sameDerivedVersion(work.stageVersions[index-1], derivedVersion{index, info, changeToken(info)}) {
 		return derivedMedia{}, ErrDerivedUnavailable
 	}
-	return inspectDerived(ctx, tool, file, "mpegts", check, true)
+	return inspectDerivedHistory(ctx, tool, file, "mpegts", check, true, work.history)
 }
 func probeDerivedOutput(ctx context.Context, tool string, work *derivedWork, check func() error) (derivedMedia, error) {
 	file, err := work.root.OpenFile("output.part.mkv", os.O_RDONLY|syscall.O_NOFOLLOW|syscall.O_NONBLOCK, 0)
@@ -298,8 +299,54 @@ func probeDerivedOutput(ctx context.Context, tool string, work *derivedWork, che
 	if e != nil || f != nil || !actual.Mode().IsRegular() || !os.SameFile(actual, expected) {
 		return derivedMedia{}, ErrDerivedUnavailable
 	}
-	return inspectDerived(ctx, tool, file, "matroska", check, false)
+	return inspectDerivedHistory(ctx, tool, file, "matroska", check, false, work.history)
 }
+
+// Execute the exact held ELF file that was measured. Script/interpreter and
+// unsupported platform behavior stays unchanged and supplies no strong evidence.
+func runDerivedHistoryProcess(ctx context.Context, cmd *exec.Cmd, check func() error, role int, capture *derivedHistoryCapture) error {
+	if capture == nil {
+		return runDerivedProcess(ctx, cmd, check)
+	}
+	weak := func() error { capture.unsupported = true; return runDerivedProcess(ctx, cmd, check) }
+	if runtime.GOOS != "linux" || role < 0 || role > 1 {
+		return weak()
+	}
+	file, err := os.OpenFile(cmd.Path, os.O_RDONLY|syscall.O_NONBLOCK, 0)
+	if err != nil {
+		return weak()
+	}
+	defer file.Close()
+	info, err := file.Stat()
+	if err != nil || !info.Mode().IsRegular() || info.Size() > 128<<20 || changeToken(info) == "" {
+		return weak()
+	}
+	var magic [4]byte
+	if n, e := file.ReadAt(magic[:], 0); e != nil || n != 4 || string(magic[:]) != "\x7fELF" {
+		return weak()
+	}
+	digest, err := hashDerivedHeldFile(file, 128<<20, check)
+	if err != nil {
+		return err
+	}
+	original := derivedVersion{1, info, changeToken(info)}
+	childFD := 3 + len(cmd.ExtraFiles)
+	cmd.ExtraFiles = append(cmd.ExtraFiles, file)
+	cmd.Path = "/proc/self/fd/" + strconv.Itoa(childFD)
+	if err = runDerivedProcess(ctx, cmd, check); err != nil {
+		return err
+	}
+	after, err := file.Stat()
+	if err != nil || !sameDerivedVersion(original, derivedVersion{1, after, changeToken(after)}) {
+		return ErrDerivedUnavailable
+	}
+	if capture.tools[role] != "" && capture.tools[role] != digest {
+		return ErrDerivedUnavailable
+	}
+	capture.tools[role] = digest
+	return check()
+}
+
 func runDerivedProcess(parent context.Context, cmd *exec.Cmd, check func() error) error {
 	ctx, cancel := context.WithCancel(parent)
 	defer cancel()
@@ -360,6 +407,9 @@ func probeDerivedCommand(ctx context.Context, tool string, file *os.File, format
 	return cmd
 }
 func inspectDerived(parent context.Context, tool string, file *os.File, format string, check func() error, input bool) (derivedMedia, error) {
+	return inspectDerivedHistory(parent, tool, file, format, check, input, nil)
+}
+func inspectDerivedHistory(parent context.Context, tool string, file *os.File, format string, check func() error, input bool, capture *derivedHistoryCapture) (derivedMedia, error) {
 	ctx, cancel := context.WithTimeout(parent, 30*time.Second)
 	defer cancel()
 	result := derivedMedia{packets: map[int]int{}, frames: map[int]int{}, gaps: map[int][]derivedPacketGap{}, frameGaps: map[int][]derivedPacketGap{}}
@@ -368,7 +418,7 @@ func inspectDerived(parent context.Context, tool string, file *os.File, format s
 	stderr := &timingOutput{limit: 4 << 10}
 	cmd.Stdout = stdout
 	cmd.Stderr = stderr
-	if err := runDerivedProcess(ctx, cmd, check); err != nil {
+	if err := runDerivedHistoryProcess(ctx, cmd, check, 1, capture); err != nil {
 		return result, derivedProbeError(ctx, err)
 	}
 	var meta struct {
@@ -404,7 +454,7 @@ func inspectDerived(parent context.Context, tool string, file *os.File, format s
 		}
 		states[s.Index] = &derivedPacketState{base: base, stream: s}
 	}
-	err := scanDerivedProcess(ctx, tool, file, format, "packets", "packet=stream_index,pts,dts,duration,flags", check, func(raw json.RawMessage) error {
+	err := scanDerivedHistoryProcess(ctx, tool, file, format, "packets", "packet=stream_index,pts,dts,duration,flags", check, capture, func(raw json.RawMessage) error {
 		var p struct {
 			Index    int           `json:"stream_index"`
 			PTS      derivedNumber `json:"pts"`
@@ -488,7 +538,7 @@ func inspectDerived(parent context.Context, tool string, file *os.File, format s
 	for _, stream := range result.streams {
 		sequences[stream.Index] = &derivedFrameSequence{base: states[stream.Index].base}
 	}
-	err = scanDerivedProcess(ctx, tool, file, format, "frames", "frame=media_type,stream_index,pts,best_effort_timestamp,width,height,pix_fmt,sample_aspect_ratio,interlaced_frame,color_range,color_space,color_transfer,color_primaries,sample_fmt,channels,channel_layout,nb_samples,duration,pkt_duration", check, func(raw json.RawMessage) error {
+	err = scanDerivedHistoryProcess(ctx, tool, file, format, "frames", "frame=media_type,stream_index,pts,best_effort_timestamp,width,height,pix_fmt,sample_aspect_ratio,interlaced_frame,color_range,color_space,color_transfer,color_primaries,sample_fmt,channels,channel_layout,nb_samples,duration,pkt_duration", check, capture, func(raw json.RawMessage) error {
 		var frame derivedFrame
 		if json.Unmarshal(raw, &frame) != nil {
 			return ErrDerivedIncompatible
@@ -684,6 +734,9 @@ func validDerivedFrame(s derivedStream, f derivedFrame) bool {
 	return actual.Sign() > 0 && delta.Cmp(base) <= 0
 }
 func scanDerivedProcess(ctx context.Context, tool string, file *os.File, format, key, entries string, check func() error, consume func(json.RawMessage) error) error {
+	return scanDerivedHistoryProcess(ctx, tool, file, format, key, entries, check, nil, consume)
+}
+func scanDerivedHistoryProcess(ctx context.Context, tool string, file *os.File, format, key, entries string, check func() error, capture *derivedHistoryCapture, consume func(json.RawMessage) error) error {
 	if _, err := file.Seek(0, io.SeekStart); err != nil {
 		return ErrDerivedUnavailable
 	}
@@ -707,7 +760,7 @@ func scanDerivedProcess(ctx context.Context, tool string, file *os.File, format,
 		}
 		readDone <- err
 	}()
-	processErr := runDerivedProcess(ctx, cmd, check)
+	processErr := runDerivedHistoryProcess(ctx, cmd, check, 1, capture)
 	writer.Close()
 	readErr := <-readDone
 	if errors.Is(processErr, ErrDerivedAccess) || errors.Is(processErr, ErrDerivedUnavailable) || errors.Is(processErr, ErrDerivedTooLarge) {
@@ -787,6 +840,10 @@ func (w *derivedWork) remux(parent context.Context, tool string, media []derived
 		}
 	}
 	args = append(args, outputArgs...)
+	if capture := w.history; capture != nil {
+		raw, _ := json.Marshal([3]any{"recording-remux/v1", args, text.String()})
+		capture.recipe = derivedHistoryDigest(raw)
+	}
 	cmd := exec.CommandContext(ctx, tool, args...)
 	cmd.ExtraFiles = []*os.File{w.dir, w.output}
 	// Linux Go performs chdir before remapping ExtraFiles: use the original
@@ -809,7 +866,7 @@ func (w *derivedWork) remux(parent context.Context, tool string, media []derived
 		}
 		return nil
 	}
-	if err = runDerivedProcess(ctx, cmd, boundedCheck); err != nil {
+	if err = runDerivedHistoryProcess(ctx, cmd, boundedCheck, 0, w.history); err != nil {
 		return err
 	}
 	if stderr.Len() != 0 {

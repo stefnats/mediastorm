@@ -3,7 +3,9 @@ package recordings
 import (
 	"context"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"io"
 	"os"
@@ -72,6 +74,108 @@ func copyDerived(v DerivedRecording) DerivedRecording {
 	return v
 }
 
+// DerivedHistoryData is an immutable observation of actual preparation, never
+// permission to open media, write progress, renew a TTL or resume an old mapping.
+type DerivedHistoryInput struct {
+	PartIndex  int
+	ByteLength int64
+	SHA256     string
+}
+
+// Nil tool/transform means unverified transformation evidence even when an
+// output digest exists. No legacy DATA classification flag certifies rebind.
+type DerivedHistoryData struct {
+	RecordingID, ArtifactID                   string
+	Inputs                                    []DerivedHistoryInput
+	LedgerSHA256                              string
+	ToolSHA256, TransformSHA256, OutputSHA256 *string
+}
+
+func copyDerivedHistory(v DerivedHistoryData) DerivedHistoryData {
+	v.Inputs = append([]DerivedHistoryInput(nil), v.Inputs...)
+	clone := func(p *string) *string {
+		if p == nil {
+			return nil
+		}
+		s := *p
+		return &s
+	}
+	v.ToolSHA256, v.TransformSHA256, v.OutputSHA256 = clone(v.ToolSHA256), clone(v.TransformSHA256), clone(v.OutputSHA256)
+	return v
+}
+
+// Private, bounded DATA collector on one already-owned preparation. It carries
+// no authority; every actual file/process operation retains the original check.
+type derivedHistoryCapture struct {
+	tools       [2]string
+	unsupported bool
+	recipe      string
+}
+
+func derivedHistoryDigest(raw []byte) string {
+	sum := sha256.Sum256(raw)
+	return hex.EncodeToString(sum[:])
+}
+func hashDerivedHeldFile(file *os.File, limit int64, check func() error) (string, error) {
+	info, err := file.Stat()
+	if err != nil || !info.Mode().IsRegular() || info.Size() < 1 || info.Size() > limit {
+		return "", ErrDerivedUnavailable
+	}
+	original := derivedVersion{1, info, changeToken(info)}
+	hash := sha256.New()
+	buffer := make([]byte, 1<<20)
+	for offset := int64(0); offset < info.Size(); {
+		if err = check(); err != nil {
+			return "", err
+		}
+		count := int64(len(buffer))
+		if count > info.Size()-offset {
+			count = info.Size() - offset
+		}
+		n, e := file.ReadAt(buffer[:int(count)], offset)
+		if e != nil || int64(n) != count {
+			return "", ErrDerivedUnavailable
+		}
+		_, _ = hash.Write(buffer[:n])
+		offset += int64(n)
+	}
+	after, err := file.Stat()
+	if err != nil || !sameDerivedVersion(original, derivedVersion{1, after, changeToken(after)}) {
+		return "", ErrDerivedUnavailable
+	}
+	if err = check(); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(hash.Sum(nil)), nil
+}
+func captureDerivedHistory(work *derivedWork, ledger [32]byte, capture *derivedHistoryCapture, check func() error) (DerivedHistoryData, error) {
+	value := DerivedHistoryData{ArtifactID: work.id, LedgerSHA256: hex.EncodeToString(ledger[:])}
+	if len(work.digests) < 2 || len(work.digests) > 256 || len(work.stageVersions) != len(work.digests) {
+		return value, ErrDerivedUnavailable
+	}
+	for i, digest := range work.digests {
+		value.Inputs = append(value.Inputs, DerivedHistoryInput{i + 1, work.stageVersions[i].info.Size(), digest})
+	}
+	output, err := hashDerivedHeldFile(work.output, derivedCacheLimit, func() error {
+		if e := check(); e != nil {
+			return e
+		}
+		return work.checkOutput(work.output)
+	})
+	if err != nil {
+		return DerivedHistoryData{}, err
+	}
+	value.OutputSHA256 = &output
+	if capture != nil && !capture.unsupported && capture.tools[0] != "" && capture.tools[1] != "" && capture.recipe != "" {
+		raw, _ := json.Marshal([3]string{"recording-tools/v1", capture.tools[0], capture.tools[1]})
+		tool := derivedHistoryDigest(raw)
+		value.ToolSHA256 = &tool
+		recipe := capture.recipe
+		value.TransformSHA256 = &recipe
+	}
+	return value, nil
+}
+
 type derivedState struct {
 	ctx         context.Context
 	cancel      context.CancelFunc
@@ -91,6 +195,7 @@ type derivedOwner struct {
 }
 type derivedEntry struct {
 	value        DerivedRecording
+	history      DerivedHistoryData
 	ledger       [32]byte
 	versions     []derivedVersion
 	work         *derivedWork
@@ -283,34 +388,41 @@ func (s *Service) derivedRecording(ctx context.Context, id string, authorize fun
 	return r, fp, err
 }
 func (s *Service) GetDerived(ctx context.Context, id string, authorize func() error) (DerivedRecording, error) {
+	value, _, err := s.GetDerivedWithHistoryData(ctx, id, authorize)
+	return value, err
+}
+
+// GetDerivedWithHistoryData snapshots the same genuine live entry as its media
+// descriptor. The returned DATA cannot replace any current authority checks.
+func (s *Service) GetDerivedWithHistoryData(ctx context.Context, id string, authorize func() error) (DerivedRecording, DerivedHistoryData, error) {
 	r, fp, err := s.derivedRecording(ctx, id, authorize)
 	if err != nil {
-		return DerivedRecording{}, err
+		return DerivedRecording{}, DerivedHistoryData{}, err
 	}
 	select {
 	case derivedStatusSlots <- struct{}{}:
 	default:
-		return DerivedRecording{}, ErrDerivedBusy
+		return DerivedRecording{}, DerivedHistoryData{}, ErrDerivedBusy
 	}
 	defer func() { <-derivedStatusSlots }()
 	state := s.derivedState()
 	unknown := derivedUnknown(r, "not_prepared")
 	if s.derivedCurrent(ctx, state) != nil {
 		unknown.Reason = "configuration_changed"
-		return unknown, nil
+		return unknown, DerivedHistoryData{}, nil
 	}
 	state.mu.Lock()
 	e := state.entries[id]
 	if e == nil || e.retired {
 		state.mu.Unlock()
-		return unknown, nil
+		return unknown, DerivedHistoryData{}, nil
 	}
 	if e.value.ExpiresAt == nil || !time.Now().Before(*e.value.ExpiresAt) {
 		state.retire(e)
 		delete(state.entries, id)
 		state.mu.Unlock()
 		unknown.Reason = "expired"
-		return unknown, nil
+		return unknown, DerivedHistoryData{}, nil
 	}
 	epoch, restored := derivedRestoreStamp()
 	if e.ledger != fp || !restored || epoch != e.restoreEpoch {
@@ -318,7 +430,7 @@ func (s *Service) GetDerived(ctx context.Context, id string, authorize func() er
 		delete(state.entries, id)
 		state.mu.Unlock()
 		unknown.Reason = "source_changed"
-		return unknown, nil
+		return unknown, DerivedHistoryData{}, nil
 	}
 	state.mu.Unlock()
 	retireInvalid := func() {
@@ -332,39 +444,39 @@ func (s *Service) GetDerived(ctx context.Context, id string, authorize func() er
 	inputs, err := s.openDerivedInputs(ctx, r, func() error { return derivedCheck(ctx, authorize) })
 	if err != nil {
 		if errors.Is(err, ErrDerivedAccess) {
-			return DerivedRecording{}, err
+			return DerivedRecording{}, DerivedHistoryData{}, err
 		}
 		retireInvalid()
 		unknown.Reason = "source_changed"
-		return unknown, nil
+		return unknown, DerivedHistoryData{}, nil
 	}
 	defer inputs.close()
 	if !sameDerivedVersions(inputs.versions(), e.versions) || inputs.check() != nil {
 		retireInvalid()
 		unknown.Reason = "source_changed"
-		return unknown, nil
+		return unknown, DerivedHistoryData{}, nil
 	}
 	if e.work.checkOutput(e.work.output) != nil {
 		retireInvalid()
 		unknown.Reason = "source_changed"
-		return unknown, nil
+		return unknown, DerivedHistoryData{}, nil
 	}
 	_, latest, err := s.derivedRecording(ctx, id, authorize)
 	if err != nil {
-		return DerivedRecording{}, err
+		return DerivedRecording{}, DerivedHistoryData{}, err
 	}
 	if latest != fp || s.derivedCurrent(ctx, state) != nil {
 		retireInvalid()
 		unknown.Reason = "source_changed"
-		return unknown, nil
+		return unknown, DerivedHistoryData{}, nil
 	}
 	state.mu.Lock()
 	valid := !e.retired && state.entries[id] == e
 	state.mu.Unlock()
 	if !valid {
-		return unknown, nil
+		return unknown, DerivedHistoryData{}, nil
 	}
-	return copyDerived(e.value), nil
+	return copyDerived(e.value), copyDerivedHistory(e.history), nil
 }
 
 // PrepareDerived is an explicit, synchronous request. No worker survives its
@@ -495,6 +607,8 @@ func (s *Service) PrepareDerived(parent context.Context, id string, authorize fu
 	if err = work.stage(ctx, inputs, checkAll); err != nil {
 		return result, err
 	}
+	capture := &derivedHistoryCapture{}
+	work.history = capture
 	media := make([]derivedMedia, 0, len(inputs.files))
 	var totalMS int64
 	offsets := []DerivedPartOffset{}
@@ -539,13 +653,18 @@ func (s *Service) PrepareDerived(parent context.Context, id string, authorize fu
 	if err = work.publish(checkAll); err != nil {
 		return result, err
 	}
+	history, historyErr := captureDerivedHistory(work, fp, capture, checkAll)
+	if historyErr != nil {
+		return DerivedRecording{}, historyErr
+	}
+	history.RecordingID = id
 	now := time.Now().UTC()
 	expiry := now.Add(derivedTTL)
 	result = DerivedRecording{RecordingID: id, ID: work.id, State: "ready", DurationMS: output.durationMS, Bytes: work.outputInfo.Size(), SourceIncomplete: r.Capture.Incomplete, GapsOmitted: len(r.Capture.Gaps) > 0, SourceStatus: r.Status, PartOffsets: offsets, ObservedAt: &now, ExpiresAt: &expiry}
 	if result.GapsOmitted {
 		result.SourceIncomplete = true
 	}
-	entry := &derivedEntry{value: copyDerived(result), ledger: fp, versions: inputs.versions(), work: work, restoreEpoch: restoreEpoch}
+	entry := &derivedEntry{value: copyDerived(result), history: copyDerivedHistory(history), ledger: fp, versions: inputs.versions(), work: work, restoreEpoch: restoreEpoch}
 	if err = checkAll(); err != nil {
 		return DerivedRecording{}, err
 	}

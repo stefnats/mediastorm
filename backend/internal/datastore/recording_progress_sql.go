@@ -69,6 +69,25 @@ func (c *RecordingProgressCore) Commit(i *RecordingProgressIntent) (RecordingPro
 	if err != nil || tag.RowsAffected() != 1 {
 		return zero, ErrRecordingProgressUnavailable
 	}
+	if s.history != nil {
+		// The original CAS and085 insert have succeeded on this SAME actual tx.
+		// Only actual server values may fill the durable historical envelope.
+		envelope := s.history.envelope
+		envelope.Position, envelope.End = position, position == s.observation.DurationMS
+		envelope.Revision, envelope.Generation = updated.revision, updated.generation
+		envelope.Operation = *updated.operationID
+		raw, e := json.Marshal(envelope)
+		if e != nil {
+			return zero, ErrRecordingProgressUnavailable
+		}
+		data, e := decodeRecordingProgressHistory(raw)
+		if e != nil {
+			return zero, ErrRecordingProgressUnavailable
+		}
+		if e = guard.writeRecordingProgressHistory(data); e != nil {
+			return zero, ErrRecordingProgressUnavailable
+		}
+	}
 	if !s.current(ctx) || guard.ctx.Err() != nil || !deadline.After(time.Now()) {
 		return zero, ErrRecordingProgressChanged
 	}
