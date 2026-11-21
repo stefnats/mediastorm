@@ -5904,6 +5904,12 @@ paths:
     get:
       tags: [live]
       operationId: getRecordingProgress
+      parameters:
+        - name: includeHistory
+          in: query
+          required: false
+          description: Explicit presentation-only historical DATA opt-in. A single canonical true or false literal is accepted. Omitted or false preserves the exact legacy response fields.
+          schema: {type: string, enum: ['true', 'false'], default: 'false'}
       summary: Read the current joined-medium timeline and durable position
       description: |
         Requires the actual original full PG session, stored adult recording
@@ -5911,6 +5917,11 @@ paths:
         selector, body, Range or condition header is accepted. Reads the actual
         current GetDerived artifact without preparing or renewing it. Timeline,
         counters, position and validUntil are DATA, never media permission.
+        Only includeHistory=true returns historical candidate fields; omitted
+        or false uses the legacy snapshot shape. Candidates require current
+        authority and actual read-transaction cleanup. Missing input/tool/recipe evidence or
+        changed ledger/measured coordinates is unverifiable, even if output
+        digests match. GET never prepares a fresh artifact.
       responses:
         '200':
           description: Snapshot after actual original transaction cleanup.
@@ -5935,6 +5946,13 @@ paths:
         current recording incarnation/artifact/map/duration tuple must match.
         A known COMMIT can persist even if its response is later lost. An
         unavailable response never proves rollback. No query selector is valid.
+        Ordinary resume requires the exact current saved mapping. The explicit
+        resume-history action uses positionMs zero and current identity/CAS;
+        the server re-reads historical DATA under its original transaction and
+        requires equal actual input, ledger, tool, recipe and measured timeline
+        semantics. Old counters and output-byte equality are not authority.
+        Unverifiable historical rebind requires an explicit from-start choice. Historical
+        DATA never renews an old artifact TTL or authorization.
       requestBody:
         required: true
         content:
@@ -6873,7 +6891,7 @@ components:
       additionalProperties: false
       required: [action, expectedRevision, writerGeneration, incarnation, artifactId, mappingSha256, durationMs, positionMs]
       properties:
-        action: {type: string, enum: [from-start, resume, touch]}
+        action: {type: string, enum: [from-start, resume, resume-history, touch]}
         expectedRevision: {$ref: '#/components/schemas/RecordingProgressCounter'}
         writerGeneration: {$ref: '#/components/schemas/RecordingProgressCounter'}
         incarnation: {type: string, format: uuid}
@@ -6883,7 +6901,7 @@ components:
         positionMs: {type: integer, format: int64, minimum: 0, maximum: 43200000}
       oneOf:
         - properties:
-            action: {enum: [from-start, resume]}
+            action: {enum: [from-start, resume, resume-history]}
             positionMs: {enum: [0]}
         - properties:
             action: {enum: [touch]}
@@ -6933,6 +6951,20 @@ components:
         positionState: {type: string, enum: [none, matching, conflict]}
         positionMs: {type: integer, format: int64, minimum: 0, maximum: 43200000}
         atDerivedEnd: {type: boolean}
+        historyState: {type: string, enum: [absent, unverifiable, compatible], description: Historical candidate DATA; never permission or a reusable approval.}
+        historicalPositionMs: {type: integer, format: int64, minimum: 0, maximum: 43200000}
+        historicalAtDerivedEnd: {type: boolean}
+      allOf:
+        - oneOf:
+            - required: [historyState, historicalPositionMs, historicalAtDerivedEnd]
+              properties:
+                historyState: {enum: [compatible]}
+            - not:
+                anyOf:
+                  - required: [historicalPositionMs]
+                  - required: [historicalAtDerivedEnd]
+              properties:
+                historyState: {enum: [absent, unverifiable]}
       oneOf:
         - properties:
             positionState: {enum: [matching]}
