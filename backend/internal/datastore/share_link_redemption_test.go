@@ -270,7 +270,7 @@ func TestSharePlaybackAtomicRedemption(t *testing.T) {
 				t.Fatal("actual atomic redemption", err)
 			}
 			wantOwner := "actor"
-			if kind == "master-foreign-source" {
+			if kind == "master-foreign-source" || kind == "source-expiry" || kind == "creator-expiry" {
 				wantOwner = "other"
 			}
 			if result.Session.AccountID != wantOwner || result.Session.IsMaster || result.Session.Scope != models.SessionScopeStream || result.Session.ScopeResource != f.resource || result.Params["profileId"] != f.profile {
