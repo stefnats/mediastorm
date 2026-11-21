@@ -301,7 +301,7 @@ func managedTestPG(t *testing.T, hold bool, encryption string) *managedTestFixtu
 		t.Fatal(e)
 	}
 	f.system, e = integration.NewNzbSystem(integration.NzbConfig{QueueDatabasePath: filepath.Join(t.TempDir(), "queue.db"), MetadataRootPath: root, MaxProcessorWorkers: 1, MaxDownloadWorkers: 1}, &managedTestManager{pool: f.pool}, func() *config.AltMountConfig {
-		return &config.AltMountConfig{Streaming: config.StreamingConfig{MaxDownloadWorkers: 1, MaxCacheSizeMB: 1}}
+		return &config.AltMountConfig{Streaming: config.StreamingConfig{MaxDownloadWorkers: 1, MaxCacheSizeMB: 1}, Import: config.ImportConfig{QueueProcessingIntervalSeconds: 1}}
 	})
 	if e != nil {
 		t.Fatal(e)

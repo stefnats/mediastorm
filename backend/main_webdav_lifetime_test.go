@@ -32,6 +32,7 @@ import (
 	"novastream/internal/settingsbootstrap"
 	"novastream/internal/settingscommit"
 	"novastream/internal/webdav"
+	"novastream/models"
 	"novastream/utils"
 )
 
@@ -49,6 +50,18 @@ type mainWebDAVFixture struct {
 func mainWebDAVPG(t *testing.T) *mainWebDAVFixture {
 	t.Helper()
 	old := newPublicPinWebFixture(t)
+	// The reused profile fixture bootstraps a Primary Profile owned by master.
+	// Supply its real account before asking the complete managed deployment to
+	// attest an inactive household; an orphan profile must remain unavailable.
+	now := time.Now().UTC()
+	bootstrapOwner := &models.Account{ID: models.MasterAccountID, Username: "Synthetic DAV bootstrap owner", PasswordHash: "synthetic-unused-hash", IsMaster: true, CreatedAt: now, UpdatedAt: now}
+	if e := old.store.Accounts().Create(t.Context(), bootstrapOwner); e != nil {
+		t.Fatal("actual bootstrap account", e)
+	}
+	var profileCount, orphanCount int
+	if e := old.store.Pool().QueryRow(t.Context(), `SELECT count(*),count(*) FILTER(WHERE a.id IS NULL) FROM users u LEFT JOIN accounts a ON a.id=u.account_id`).Scan(&profileCount, &orphanCount); e != nil || profileCount != 2 || orphanCount != 0 {
+		t.Fatal("synthetic deployment must retain both profiles with real current account owners", e, profileCount, orphanCount)
+	}
 	f := &mainWebDAVFixture{manager: config.NewManager(filepath.Join(t.TempDir(), "settings.json")), settings: config.DefaultSettings()}
 	f.settings.Database.URL = old.store.Pool().Config().ConnConfig.ConnString()
 	f.settings.Database.MaxOpenConns = 1
