@@ -134,7 +134,7 @@ func TestParentRatingsRegisteredExactFieldsAndAtomicPair(t *testing.T) {
 				}
 			}
 			sort.Strings(changed)
-			sort.Strings(wantedFields)
+			wantedFields = parentExpectedFieldsWithShareRotation(t, before, after, wantedFields)
 			if !reflect.DeepEqual(changed, wantedFields) || !reflect.DeepEqual(other, parentModeAPIRow(t, f, f.foreign)) || version == parentListWritesVersion(t, f) {
 				t.Fatal("rating write changed an unrelated field/profile or skipped its established write")
 			}

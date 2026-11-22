@@ -241,6 +241,7 @@ func TestParentKidsFlagCookieFullSemanticsAndAtomicDefaults(t *testing.T) {
 						t.Fatal("equal-value flag skipped its established UPDATE")
 					}
 					expected["updated_at"] = after["updated_at"]
+					parentExpectedCookieShareRotation(t, before, after, expected)
 					if !reflect.DeepEqual(expected, after) {
 						t.Fatal("cookie flag changed an unrelated field or missed exact defaults")
 					}

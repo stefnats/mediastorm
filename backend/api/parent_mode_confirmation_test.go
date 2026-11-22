@@ -122,7 +122,8 @@ func TestParentModeRegisteredOriginalConfirmationAndNarrowCommit(t *testing.T) {
 				}
 			}
 			sort.Strings(changed)
-			if !reflect.DeepEqual(changed, []string{"kids_mode", "updated_at"}) || !reflect.DeepEqual(other, parentModeAPIRow(t, f, f.foreign)) {
+			wantedFields := parentExpectedFieldsWithShareRotation(t, before, after, []string{"kids_mode", "updated_at"})
+			if !reflect.DeepEqual(changed, wantedFields) || !reflect.DeepEqual(other, parentModeAPIRow(t, f, f.foreign)) {
 				t.Fatal("confirmed mode mutation changed another field or profile")
 			}
 			profile, ok := f.users.Get(f.open)

@@ -133,7 +133,8 @@ func TestParentListWritesRegisteredDecoderSemanticsAndTrueNoop(t *testing.T) {
 				}
 			}
 			sort.Strings(changed)
-			if !reflect.DeepEqual(changed, item.fields) || !reflect.DeepEqual(other, parentModeAPIRow(t, f, f.foreign)) {
+			wantedFields := parentExpectedFieldsWithShareRotation(t, before, after, item.fields)
+			if !reflect.DeepEqual(changed, wantedFields) || !reflect.DeepEqual(other, parentModeAPIRow(t, f, f.foreign)) {
 				t.Fatal("list write changed an unrelated target field or profile")
 			}
 			if (version == parentListWritesVersion(t, f)) != item.noop {

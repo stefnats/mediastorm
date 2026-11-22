@@ -104,7 +104,8 @@ func TestParentListRemovalRegisteredExactIdentityAndNarrowCommit(t *testing.T) {
 				}
 			}
 			sort.Strings(changed)
-			if !reflect.DeepEqual(changed, fields) || !reflect.DeepEqual(other, parentModeAPIRow(t, f, f.foreign)) {
+			wantedFields := parentExpectedFieldsWithShareRotation(t, before, after, fields)
+			if !reflect.DeepEqual(changed, wantedFields) || !reflect.DeepEqual(other, parentModeAPIRow(t, f, f.foreign)) {
 				t.Fatal("list removal changed an unrelated field or profile")
 			}
 			profile, ok := f.users.Get(f.open)

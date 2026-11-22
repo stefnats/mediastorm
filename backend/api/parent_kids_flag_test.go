@@ -118,7 +118,7 @@ func TestParentKidsFlagRegisteredCompleteSetterSemantics(t *testing.T) {
 				}
 			}
 			sort.Strings(changed)
-			sort.Strings(changedExpected)
+			changedExpected = parentExpectedFieldsWithShareRotation(t, before, after, changedExpected)
 			if !reflect.DeepEqual(changed, changedExpected) || version == parentListWritesVersion(t, f) || !reflect.DeepEqual(other, parentModeAPIRow(t, f, f.foreign)) {
 				t.Fatal("flag changed unrelated user fields or missed the established timestamp write")
 			}
