@@ -73,6 +73,10 @@ func sabFallbackPageBounds(cursor string, limit int) (int64, int64, error) {
 
 // ListSABFallbackStatuses never resolves configuration, opens NZBs, or calls SAB.
 func (s *Service) ListSABFallbackStatuses(ctx context.Context, cursor string, limit int) (SABFallbackPage, error) {
+	ceiling, before, err := sabFallbackPageBounds(cursor, limit)
+	if err != nil {
+		return SABFallbackPage{}, err
+	}
 	work, finishSource, sourceError := s.beginSourceWork(ctx, false)
 	if sourceError != nil {
 		return SABFallbackPage{}, ErrSABFallbackUnavailable
@@ -80,10 +84,6 @@ func (s *Service) ListSABFallbackStatuses(ctx context.Context, cursor string, li
 	defer finishSource()
 	ctx = work
 
-	ceiling, before, err := sabFallbackPageBounds(cursor, limit)
-	if err != nil {
-		return SABFallbackPage{}, err
-	}
 	if s == nil || s.database == nil {
 		return SABFallbackPage{}, ErrSABFallbackUnavailable
 	}
