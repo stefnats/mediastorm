@@ -8,11 +8,16 @@ import (
 	"testing"
 
 	"github.com/gorilla/mux"
+	"novastream/api/openapi"
 )
 
 func TestLocalGroupsStoredMediaCapabilityAndRequestLocalBasis(t *testing.T) {
 	service, _ := newLocalGroupsFixture()
 	handler := NewLocalMediaHandler(service, nil, false)
+	validator, err := openapi.NewValidator(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
 	for _, tc := range []struct{ query, basis string }{
 		{"include=cards", ""},
 		{"include=cards&audioLanguage=fr&mediaUnknown=exclude", "stored_library_versions"},
@@ -20,7 +25,15 @@ func TestLocalGroupsStoredMediaCapabilityAndRequestLocalBasis(t *testing.T) {
 		{"include=cards&hdr=hdr10&minHeight=2160", "stored_library_versions"},
 		{"include=cards", ""},
 	} {
-		result := localGroupsRequest(t, handler, "local", tc.query)
+		w := localLibraryLanguageRequest(handler, tc.query)
+		request := httptest.NewRequest(http.MethodGet, "/api/library/libraries/local/groups?"+tc.query, nil)
+		if err := validator.ValidateRequest(request, nil); err != nil {
+			t.Fatal(err)
+		}
+		if err := validator.ValidateResponse(request, w.Code, w.Header(), w.Body.Bytes()); err != nil {
+			t.Fatal(err)
+		}
+		result := localLibraryLanguageDecode(t, w)
 		if !result.StoredMediaFilterSupported || result.StoredMediaFilterBasis != tc.basis {
 			t.Fatalf("support/basis for %q: %+v", tc.query, result)
 		}
