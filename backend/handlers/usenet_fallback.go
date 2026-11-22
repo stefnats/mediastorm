@@ -33,6 +33,7 @@ type UsenetFallbackHandler struct {
 	sessions        fallbackSessionReader
 	accounts        fallbackAccountReader
 	previewSettings importer.SABImportPreviewSettings
+	arrLibrary      importer.ARRLibraryImporter
 }
 
 func NewUsenetFallbackHandler(service usenetFallbackService, sessions fallbackSessionReader, accounts fallbackAccountReader) *UsenetFallbackHandler {

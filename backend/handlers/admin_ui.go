@@ -439,6 +439,19 @@ var SettingsSchema = map[string]interface{}{
 			},
 		},
 	},
+	"sabnzbd": map[string]interface{}{
+		"label": "Sonarr / Radarr imports", "icon": "download", "group": "providers", "order": 5,
+		"fields": map[string]interface{}{
+			"sonarr.baseUrl":     map[string]interface{}{"type": "text", "label": "Sonarr API URL", "description": "App URL, including any configured URL base.", "order": 1},
+			"sonarr.apiKey":      map[string]interface{}{"type": "password", "label": "Sonarr API key", "description": "API key from the app settings.", "order": 2},
+			"sonarr.libraryId":   map[string]interface{}{"type": "text", "label": "Sonarr Local library ID", "description": "Existing local library ID used for imported files.", "order": 3},
+			"sonarr.libraryRoot": map[string]interface{}{"type": "text", "label": "Sonarr Library path in app", "description": "Optional library root seen by this app when its mount path differs from MediaStorm.", "order": 4},
+			"radarr.baseUrl":     map[string]interface{}{"type": "text", "label": "Radarr API URL", "description": "App URL, including any configured URL base.", "order": 5},
+			"radarr.apiKey":      map[string]interface{}{"type": "password", "label": "Radarr API key", "description": "API key from the app settings.", "order": 6},
+			"radarr.libraryId":   map[string]interface{}{"type": "text", "label": "Radarr Local library ID", "description": "Existing local library ID used for imported files.", "order": 7},
+			"radarr.libraryRoot": map[string]interface{}{"type": "text", "label": "Radarr Library path in app", "description": "Optional library root seen by this app when its mount path differs from MediaStorm.", "order": 8},
+		},
+	},
 	"usenet": map[string]interface{}{
 		"label":    "Usenet Servers",
 		"icon":     "database",

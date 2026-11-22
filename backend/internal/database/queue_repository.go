@@ -103,6 +103,9 @@ func NewQueueRepository(db interface {
 	return &QueueRepository{db: db}
 }
 
+// ARRImportMetadataKey retains command IDs/status across ordinary requeue.
+const ARRImportMetadataKey = "arr_import_v1"
+
 // AddToQueue adds a new NZB file to the import queue
 func (r *QueueRepository) AddToQueue(item *ImportQueueItem) error {
 	query := `
@@ -112,11 +115,14 @@ func (r *QueueRepository) AddToQueue(item *ImportQueueItem) error {
 		priority = CASE WHEN excluded.priority < priority THEN excluded.priority ELSE priority END,
 		category = excluded.category,
 		batch_id = excluded.batch_id,
-		metadata = CASE
+        metadata = CASE
+          WHEN (CASE WHEN json_valid(import_queue.metadata) THEN json_type(import_queue.metadata, '$.arr_import_v1') ELSE NULL END) IS NOT NULL
+          THEN json_set(CASE WHEN (CASE WHEN json_valid(import_queue.metadata) THEN json_type(import_queue.metadata, '$._sabFallbackV1') ELSE NULL END) IS NOT NULL THEN json_set(CASE WHEN json_valid(excluded.metadata) THEN CASE WHEN json_type(excluded.metadata)='object' THEN excluded.metadata ELSE '{}' END ELSE '{}' END, '$._sabFallbackV1', json_extract(import_queue.metadata, '$._sabFallbackV1')) ELSE CASE WHEN json_valid(excluded.metadata) THEN CASE WHEN json_type(excluded.metadata)='object' THEN excluded.metadata ELSE '{}' END ELSE '{}' END END, '$.arr_import_v1', json_extract(import_queue.metadata, '$.arr_import_v1'))
+          ELSE CASE
           WHEN (CASE WHEN json_valid(import_queue.metadata) THEN json_type(import_queue.metadata, '$._sabFallbackV1') ELSE NULL END) IS NOT NULL
           THEN json_set(CASE WHEN json_valid(excluded.metadata) THEN CASE WHEN json_type(excluded.metadata)='object' THEN excluded.metadata ELSE '{}' END ELSE '{}' END,
             '$._sabFallbackV1', json_extract(import_queue.metadata, '$._sabFallbackV1'))
-          ELSE excluded.metadata END,
+          ELSE excluded.metadata END END,
 		file_size = excluded.file_size,
 		status = excluded.status,
 		retry_count = 0,
@@ -245,14 +251,20 @@ func (r *QueueRepository) UpdateMetadata(itemID int64, metadata *string) error {
 		next := metadata
 		var oldFields, newFields map[string]json.RawMessage
 		if item.Metadata != nil && json.Unmarshal([]byte(*item.Metadata), &oldFields) == nil {
-			if receipt, exists := oldFields[SABFallbackMetadataKey]; exists {
-				if metadata != nil && json.Unmarshal([]byte(*metadata), &newFields) != nil {
-					return fmt.Errorf("invalid queue metadata")
+			preserved := false
+			for _, key := range []string{SABFallbackMetadataKey, ARRImportMetadataKey} {
+				if receipt, exists := oldFields[key]; exists {
+					if !preserved && metadata != nil && json.Unmarshal([]byte(*metadata), &newFields) != nil {
+						return fmt.Errorf("invalid queue metadata")
+					}
+					if newFields == nil {
+						newFields = map[string]json.RawMessage{}
+					}
+					newFields[key] = receipt
+					preserved = true
 				}
-				if newFields == nil {
-					newFields = map[string]json.RawMessage{}
-				}
-				newFields[SABFallbackMetadataKey] = receipt
+			}
+			if preserved {
 				raw, err := json.Marshal(newFields)
 				if err != nil {
 					return err

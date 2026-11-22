@@ -2077,7 +2077,10 @@ func (s *Service) buildItem(ctx context.Context, library models.LocalMediaLibrar
 		item.ID = existing.ID
 		item.CreatedAt = existing.CreatedAt
 		if keepManual {
-			// A changed file at the same path keeps the title an admin chose.
+			// A changed file at the same path keeps the title and episode
+			// selection an admin chose.
+			item.SeasonNumber = existing.SeasonNumber
+			item.EpisodeNumber = existing.EpisodeNumber
 			item.Confidence = existing.Confidence
 			item.MatchStatus = existing.MatchStatus
 			item.MatchedTitleID = existing.MatchedTitleID

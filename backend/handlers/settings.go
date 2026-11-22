@@ -636,6 +636,8 @@ func redactSettings(s *config.Settings) {
 
 	// SABnzbd
 	mask(&s.SABnzbd.FallbackAPIKey)
+	mask(&s.SABnzbd.Sonarr.APIKey)
+	mask(&s.SABnzbd.Radarr.APIKey)
 
 	// Subtitles
 	mask(&s.Subtitles.OpenSubtitlesPassword)
@@ -821,6 +823,8 @@ func preserveRedactedFields(incoming *config.Settings, existing *config.Settings
 
 	// SABnzbd
 	restore(&incoming.SABnzbd.FallbackAPIKey, existing.SABnzbd.FallbackAPIKey)
+	restore(&incoming.SABnzbd.Sonarr.APIKey, existing.SABnzbd.Sonarr.APIKey)
+	restore(&incoming.SABnzbd.Radarr.APIKey, existing.SABnzbd.Radarr.APIKey)
 	restore(&incoming.SABnzbd.ImportStageTargetRoot, existing.SABnzbd.ImportStageTargetRoot)
 	restore(&incoming.SABnzbd.ImportPreviewRemoteRoot, existing.SABnzbd.ImportPreviewRemoteRoot)
 	restore(&incoming.SABnzbd.ImportPreviewLocalRoot, existing.SABnzbd.ImportPreviewLocalRoot)

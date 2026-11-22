@@ -586,8 +586,19 @@ type ImportSettings struct {
 	UsenetParserShareDivisor int `json:"usenetParserShareDivisor"`
 }
 
+// ARRImportSettings connects completed downloads to one existing local library.
+// LibraryRoot is the library path seen by the external app when mounts differ.
+type ARRImportSettings struct {
+	BaseURL     string `json:"baseUrl"`
+	APIKey      string `json:"apiKey"`
+	LibraryID   string `json:"libraryId"`
+	LibraryRoot string `json:"libraryRoot,omitempty"`
+}
+
 // SABnzbdSettings defines SABnzbd fallback configuration
 type SABnzbdSettings struct {
+	Sonarr ARRImportSettings `json:"sonarr"`
+	Radarr ARRImportSettings `json:"radarr"`
 	// Explicit managed-copy target and logical byte budget. Empty/zero disables copies.
 	ImportStageTargetRoot string `json:"importStageTargetRoot,omitempty"`
 	ImportStageMaxBytes   int64  `json:"importStageMaxBytes,omitempty"`

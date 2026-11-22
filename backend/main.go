@@ -1466,6 +1466,7 @@ func main() {
 		}
 		return current.SABnzbd, nil
 	})
+	usenetFallbackHandler.SetARRLibrary(localMediaService)
 	registerUsenetFallbackRoutes(r, adminUIHandler, usenetFallbackHandler)
 	publicationHandler, publicationErr := newSABLibraryPublicationRuntime(managedStartup, store, nzbSystem.ImporterService(), currentProfilePins)
 	if publicationErr != nil {
@@ -3099,6 +3100,9 @@ func registerUsenetFallbackRoutes(r *mux.Router, admin *handlers.AdminUIHandler,
 	r.HandleFunc("/admin/api/usenet/fallback/{queueID}", admin.RequireAuth(fallback.Get)).Methods(http.MethodGet)
 	r.HandleFunc("/admin/api/usenet/fallback/{queueID}/refresh", admin.RequireAuth(recordingWebOrigin(fallback.Refresh))).Methods(http.MethodPost)
 	r.HandleFunc("/admin/api/usenet/fallback/{queueID}/import-preview", admin.RequireAuth(recordingWebOrigin(fallback.Preview))).Methods(http.MethodPost)
+	r.HandleFunc("/admin/api/usenet/fallback/{queueID}/arr", admin.RequireAuth(fallback.ARRStatus)).Methods(http.MethodGet)
+	r.HandleFunc("/admin/api/usenet/fallback/{queueID}/arr", admin.RequireAuth(recordingWebOrigin(fallback.ARRSubmit))).Methods(http.MethodPost)
+	r.HandleFunc("/admin/api/usenet/fallback/{queueID}/arr/refresh", admin.RequireAuth(recordingWebOrigin(fallback.ARRRefresh))).Methods(http.MethodPost)
 	r.HandleFunc("/admin/api/usenet/fallback/{queueID}/stage", admin.RequireAuth(fallback.GetManagedCopy)).Methods(http.MethodGet)
 	r.HandleFunc("/admin/api/usenet/fallback/{queueID}/stage", admin.RequireAuth(recordingWebOrigin(fallback.CopyFiles))).Methods(http.MethodPost)
 }

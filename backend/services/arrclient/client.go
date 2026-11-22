@@ -119,18 +119,18 @@ func (c *Client) Status(ctx context.Context, id int64) (Command, error) {
 	return c.request(ctx, http.MethodGet, id, nil, "", "")
 }
 
-func (c *Client) request(caller context.Context, method string, id int64, body []byte, directory, downloadClientID string) (result Command, resultErr error) {
+func (c *Client) exchange(caller context.Context, method, endpoint string, query url.Values, body []byte) (result []byte, resultErr error) {
 	if c == nil || c.self != c || caller == nil || caller.Err() != nil {
-		return Command{}, ErrUnavailable
+		return nil, ErrUnavailable
 	}
 	c.mu.Lock()
 	if c.closed || c.ctx.Err() != nil {
 		c.mu.Unlock()
-		return Command{}, ErrUnavailable
+		return nil, ErrUnavailable
 	}
 	if c.active >= 4 {
 		c.mu.Unlock()
-		return Command{}, ErrBusy
+		return nil, ErrBusy
 	}
 	c.active++
 	c.operations.Add(1)
@@ -150,13 +150,11 @@ func (c *Client) request(caller context.Context, method string, id int64, body [
 		cancel()
 	}()
 	u := c.base
-	u.Path = strings.TrimRight(u.Path, "/") + "/api/v3/command"
-	if id != 0 {
-		u.Path += "/" + strconv.FormatInt(id, 10)
-	}
+	u.Path = strings.TrimRight(u.Path, "/") + endpoint
+	u.RawQuery = query.Encode()
 	req, err := http.NewRequestWithContext(ctx, method, u.String(), bytes.NewReader(body))
 	if err != nil {
-		return Command{}, ErrUnavailable
+		return nil, ErrUnavailable
 	}
 	req.Header.Set("X-Api-Key", c.key)
 	req.Header.Set("Accept", "application/json")
@@ -172,23 +170,39 @@ func (c *Client) request(caller context.Context, method string, id int64, body [
 		if resp != nil && resp.Body != nil {
 			_ = resp.Body.Close()
 		}
-		return Command{}, failure
+		return nil, failure
 	}
 	// The actual body closes before runtime links are disarmed or slots refunded.
 	defer func() {
 		if err := resp.Body.Close(); err != nil || ctx.Err() != nil || c.ctx.Err() != nil {
-			result, resultErr = Command{}, failure
+			result, resultErr = nil, failure
 		}
 	}()
 	if resp.StatusCode != http.StatusOK && !(method == http.MethodPost && resp.StatusCode == http.StatusCreated) {
-		return Command{}, failure
+		return nil, failure
 	}
 	if resp.ContentLength > maxResponseBytes {
-		return Command{}, failure
+		return nil, failure
 	}
 	raw, err := io.ReadAll(io.LimitReader(resp.Body, maxResponseBytes+1))
 	if err != nil || len(raw) > maxResponseBytes || ctx.Err() != nil {
-		return Command{}, failure
+		return nil, failure
+	}
+	return raw, nil
+}
+
+func (c *Client) request(caller context.Context, method string, id int64, body []byte, directory, downloadClientID string) (Command, error) {
+	endpoint := "/api/v3/command"
+	if id != 0 {
+		endpoint += "/" + strconv.FormatInt(id, 10)
+	}
+	raw, err := c.exchange(caller, method, endpoint, nil, body)
+	if err != nil {
+		return Command{}, err
+	}
+	failure := ErrUnavailable
+	if method == http.MethodPost {
+		failure = ErrUnknown
 	}
 	fields, err := uniqueObject(raw)
 	if err != nil {
@@ -212,7 +226,7 @@ func (c *Client) request(caller context.Context, method string, id int64, body [
 			return Command{}, failure
 		}
 	}
-	if ctx.Err() != nil || c.ctx.Err() != nil {
+	if caller.Err() != nil || c.ctx.Err() != nil {
 		return Command{}, failure
 	}
 	return command, nil

@@ -114,8 +114,57 @@
       } finally { if (owns(card, stamp, intent)) for (const [node, disabled] of paused) if (node.isConnected) node.disabled = disabled; }
     });
     card.append(refresh, status);
+    if (panel.dataset.arrImport === 'true') arrControls(item, card, stamp);
     if (panel.dataset.managedCopy === 'true') copyControls(item, card, stamp, refresh);
     if (panel.dataset.importPreview === 'true' && item.state === 'download_completed') previewControls(item, card, stamp, refresh);
+  }
+  function arrControls(item, card, stamp) {
+    const section = document.createElement('div');
+    section.append(text('h4', 'Sonarr / Radarr library import'));
+    const backend = document.createElement('select'); backend.setAttribute('aria-label', 'Import app');
+    const view = text('button', 'View import'); view.type = 'button'; view.className = 'btn btn-secondary';
+    const submit = text('button', 'Import download'); submit.type = 'button'; submit.className = 'btn btn-secondary'; submit.disabled = true;
+    const refresh = text('button', 'Check import / retry library scan'); refresh.type = 'button'; refresh.className = 'btn btn-secondary'; refresh.disabled = true;
+    const state = text('p', ''); state.setAttribute('role', 'status');
+    const library = text('a', 'Open local library'); library.href = panel.dataset.arrLibraryHref; library.hidden = true;
+    const labels = {not_started:'No library import yet.', submission_unknown:'Submission acknowledgement unknown. Check the import before retrying.', importing:'The app is importing this download.', import_failed:'The app could not import this download. Check its queue and paths, then retry.', awaiting_files:'Waiting for the imported library file.', media_unavailable:'The imported file could not be verified as video. Check the file and ffprobe configuration, then Check import again.', needs_match:'The file is in the local library. Assign its title in library management.', library_scan_failed:'The import was reported, but the local library scan failed. Check import retries the scan.', configuration_changed:'The configured app or path changed. Review settings before retrying.', available:'Available in your local library. Your normal playback source preference applies.'};
+    let current = null, working = false;
+    function render(value) {
+      if (!value || value.queueId !== item.queueId || !Object.hasOwn(labels, value.state) || !Array.isArray(value.itemIds)) throw Error('shape');
+      current = value; state.textContent = labels[value.state];
+      if (value.state === 'available') state.textContent += ' Indexed files: ' + value.itemIds.length + '.';
+      if (value.reason === 'provider_unavailable') state.textContent += ' The app is currently unreachable; try Check import again.';
+      if (value.reason === 'multiple_episodes') state.textContent += ' This file contains multiple episodes. Review the manual episode selection in the local library.';
+      if (value.reason === 'manual_match_conflict') state.textContent += ' Your manual title or episode differs from the app history. It has been preserved; review it in the local library.';
+      if (value.reason === 'library_file_missing') state.textContent += ' Verify the configured library mount/path mapping.';
+      if (value.reason === 'no_imported_file') state.textContent += ' The command finished without a confirmed imported file. Review the app’s import queue.';
+      backend.replaceChildren();
+      for (const kind of value.configuredBackends || []) if (kind === 'sonarr' || kind === 'radarr') { const option = text('option', kind === 'sonarr' ? 'Sonarr' : 'Radarr'); option.value = kind; backend.append(option); }
+      if (value.backend) backend.value = value.backend;
+      if (!backend.options.length) state.textContent += ' Configure Sonarr or Radarr and its local library in Settings.';
+      const retry = ['import_failed', 'submission_unknown', 'configuration_changed'].includes(value.state);
+      submit.textContent = retry ? 'Retry import' : 'Import download';
+      submit.disabled = working || !backend.value || item.state !== 'download_completed' || value.state !== 'not_started' && !retry;
+      backend.disabled = working || value.state !== 'not_started' && !retry;
+      refresh.disabled = working || value.state === 'not_started';
+      library.hidden = !['available', 'needs_match', 'library_scan_failed', 'media_unavailable'].includes(value.state);
+    }
+    async function perform(actionName) {
+      if (working || !isCurrent(stamp)) return;
+      if (actionName === 'submit' && !window.confirm(current && current.state !== 'not_started' ? 'Retry this copy-only import? Check the app first if the previous acknowledgement was unknown.' : 'Send this completed download to the selected app for a copy-only library import?')) return;
+      working = true; let failed = false;
+      const currentSection = () => isCurrent(stamp) && section.isConnected;
+      view.disabled = submit.disabled = refresh.disabled = backend.disabled = true;
+      const url = endpoint.href + '/' + item.queueId + '/arr';
+      try {
+        const value = await request(actionName === 'refresh' ? url + '/refresh' : url, actionName === 'status' ? 'GET' : 'POST', stamp, actionName === 'submit' ? {backend: backend.value, retry: current.state !== 'not_started'} : undefined);
+        if (currentSection()) { working = false; render(value); }
+      } catch (_) { failed = true; }
+      finally { working = false; if (currentSection()) { view.disabled = false; if (current) render(current); if (failed) state.textContent = 'The import could not be checked. Saved status is retained. Try View import or Check import again.'; } }
+    }
+    view.addEventListener('click', () => perform('status')); submit.addEventListener('click', () => perform('submit')); refresh.addEventListener('click', () => perform('refresh'));
+    backend.addEventListener('change', () => { if (current && ['not_started', 'import_failed', 'submission_unknown', 'configuration_changed'].includes(current.state)) submit.disabled = !backend.value || item.state !== 'download_completed'; });
+    section.append(view, backend, submit, refresh, state, library); card.append(section);
   }
   function copyTime(value) {
     if (typeof value !== 'string') return false;
