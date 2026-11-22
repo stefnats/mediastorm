@@ -73,12 +73,15 @@ type JellyfinLibrary struct {
 }
 
 type JellyfinMediaStream struct {
-	Type       string `json:"Type"`
-	Codec      string `json:"Codec"`
-	Width      int    `json:"Width,omitempty"`
-	Height     int    `json:"Height,omitempty"`
-	VideoRange string `json:"VideoRange,omitempty"`
-	Language   string `json:"Language,omitempty"`
+	Index          *int   `json:"Index"`
+	IsExternal     bool   `json:"IsExternal"`
+	VideoRangeType string `json:"VideoRangeType,omitempty"`
+	Type           string `json:"Type"`
+	Codec          string `json:"Codec"`
+	Width          int    `json:"Width,omitempty"`
+	Height         int    `json:"Height,omitempty"`
+	VideoRange     string `json:"VideoRange,omitempty"`
+	Language       string `json:"Language,omitempty"`
 }
 
 type JellyfinMediaSource struct {

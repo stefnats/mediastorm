@@ -12224,10 +12224,6 @@ func (h *AdminUIHandler) ListLocalMediaItems(w http.ResponseWriter, r *http.Requ
 		if remoteLibrary, remoteErr := h.remoteMediaService.GetLibrary(r.Context(), id); remoteErr != nil {
 			err = remoteErr
 		} else if remoteLibrary != nil {
-			if mediaFilters.Active() {
-				http.Error(w, "media filters are currently available for local libraries only", http.StatusBadRequest)
-				return
-			}
 			items, err = h.remoteMediaService.ListItems(r.Context(), id, listQuery)
 		} else if localLibrary, localErr := h.localMediaService.GetLibrary(r.Context(), id); localErr != nil {
 			err = localErr
@@ -12284,10 +12280,6 @@ func (h *AdminUIHandler) ListLocalMediaGroups(w http.ResponseWriter, r *http.Req
 		if remoteLibrary, remoteErr := h.remoteMediaService.GetLibrary(r.Context(), id); remoteErr != nil {
 			err = remoteErr
 		} else if remoteLibrary != nil {
-			if mediaFilters.Active() {
-				http.Error(w, "media filters are currently available for local libraries only", http.StatusBadRequest)
-				return
-			}
 			groups, err = h.remoteMediaService.ListGroups(r.Context(), id, listQuery)
 		}
 	}

@@ -244,10 +244,6 @@ func (h *LocalMediaHandler) ListGroups(w http.ResponseWriter, r *http.Request) {
 		if remoteLibrary, remoteErr := h.remote.GetLibrary(r.Context(), libraryID); remoteErr != nil {
 			err = remoteErr
 		} else if remoteLibrary != nil {
-			if mediaFilters.Active() {
-				http.Error(w, "media filters are currently available for local libraries only", http.StatusBadRequest)
-				return
-			}
 			if language.active() {
 				http.Error(w, "original-language filtering is unavailable for remote libraries", http.StatusBadRequest)
 				return

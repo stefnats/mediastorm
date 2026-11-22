@@ -784,12 +784,21 @@ type PlexLibrary struct {
 type PlexGuid struct {
 	ID string `json:"id"`
 }
+type PlexStream struct {
+	Key          string `json:"key"`
+	Index        *int   `json:"index"`
+	StreamType   int    `json:"streamType"`
+	Codec        string `json:"codec"`
+	LanguageCode string `json:"languageCode"`
+}
+
 type PlexPart struct {
-	ID        int64  `json:"id"`
-	Key       string `json:"key"`
-	File      string `json:"file"`
-	Container string `json:"container"`
-	Size      int64  `json:"size"`
+	Stream    []PlexStream `json:"Stream"`
+	ID        int64        `json:"id"`
+	Key       string       `json:"key"`
+	File      string       `json:"file"`
+	Container string       `json:"container"`
+	Size      int64        `json:"size"`
 }
 type PlexMedia struct {
 	ID                int64      `json:"id"`

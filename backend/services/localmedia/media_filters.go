@@ -137,6 +137,13 @@ func subtitleMediaMatch(p *models.LocalMediaProbe, f models.LocalMediaFilters) m
 	}
 	return mediaAnd(presence, language)
 }
+
+// MatchesMediaFilters applies the same file/track and unknown-value rules to
+// saved local scans and saved remote-library versions. It performs no I/O.
+func MatchesMediaFilters(p *models.LocalMediaProbe, f models.LocalMediaFilters) bool {
+	return localMediaMatchesFilters(p, f)
+}
+
 func localMediaMatchesFilters(p *models.LocalMediaProbe, f models.LocalMediaFilters) bool {
 	if !f.Active() {
 		return true

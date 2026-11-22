@@ -22,6 +22,7 @@ import (
 	"novastream/models"
 	"novastream/services/jellyfin"
 	"novastream/services/kids"
+	"novastream/services/localmedia"
 	"novastream/services/plex"
 	"novastream/services/streaming"
 )
@@ -426,6 +427,9 @@ func (s *Service) fetch(ctx context.Context, library *models.RemoteMediaLibrary)
 	if err != nil {
 		return nil, err
 	}
+	if err := s.fillPlexStreamInventories(ctx, server, items); err != nil {
+		return nil, err
+	}
 	return normalizePlex(library, items), nil
 }
 
@@ -504,6 +508,7 @@ func normalizeJellyfin(library *models.RemoteMediaLibrary, source []jellyfin.Jel
 					v.AudioLanguages = append(v.AudioLanguages, strings.TrimSpace(stream.Language))
 				}
 			}
+			v.Probe = jellyfinFilterProbe(v, media.MediaStreams)
 			v.VersionLabel = versionLabel(v.Height, v.VideoCodec, v.HDRFormat, media.Name)
 			v.StreamPath = "jellyfinmedia:" + v.ID
 			result = append(result, v)
@@ -562,6 +567,7 @@ func normalizePlex(library *models.RemoteMediaLibrary, source []plex.PlexLibrary
 					v.SeriesExternalIDs = plexExternalIDs(item.GrandparentGuid)
 					v.EpisodeExternalIDs = plexExternalIDs(item.Guid)
 				}
+				v.Probe = plexFilterProbe(v, part.Stream)
 				v.VersionLabel = versionLabel(v.Height, v.VideoCodec, v.HDRFormat, media.VideoResolution)
 				v.StreamPath = "plexmedia:" + v.ID
 				result = append(result, v)
@@ -616,9 +622,24 @@ func (s *Service) ListGroups(ctx context.Context, libraryID string, query models
 	if err != nil || library == nil {
 		return nil, ErrNotFound
 	}
+	if err := localmedia.ValidateMediaFilters(query.MediaFilters); err != nil {
+		return nil, err
+	}
 	items, err := s.repo.ListItems(ctx, libraryID, query.IncludeMissing)
 	if err != nil {
 		return nil, err
+	}
+	if query.MediaFilters.Active() {
+		filtered := items[:0]
+		for _, item := range items {
+			if err := ctx.Err(); err != nil {
+				return nil, err
+			}
+			if localmedia.MatchesMediaFilters(remoteFilterProbe(item), query.MediaFilters) {
+				filtered = append(filtered, item)
+			}
+		}
+		items = filtered
 	}
 	groups := groupItems(library, items, query.IncludeCards)
 	// Kids profile rating caps, as local libraries apply them: before paging, so
@@ -844,7 +865,7 @@ func applyExternalIDs(g *models.LocalMediaItemGroup, ids *models.LocalMediaExter
 	g.TVDBID, _ = strconv.ParseInt(ids.TVDB, 10, 64)
 }
 func toLocalItem(library *models.RemoteMediaLibrary, item models.RemoteMediaItem) models.LocalMediaItem {
-	return models.LocalMediaItem{ID: item.ID, LibraryID: item.LibraryID, FileName: item.FileName, LibraryType: item.LibraryType, DetectedTitle: item.Title, DetectedYear: item.Year, SeasonNumber: item.SeasonNumber, EpisodeNumber: item.EpisodeNumber, MatchStatus: models.LocalMediaMatchStatusMatched, MatchedName: item.Title, MatchedYear: item.Year, ExternalIDs: item.ExternalIDs, EpisodeTitle: item.EpisodeTitle, SizeBytes: item.SizeBytes, Probe: &models.LocalMediaProbe{DurationSeconds: item.DurationSeconds, SizeBytes: item.SizeBytes, VideoCodec: item.VideoCodec, Width: item.Width, Height: item.Height, HDRFormat: item.HDRFormat, AudioCodecs: []string{item.AudioCodec}}, SourceType: library.Provider, SourceName: strings.Title(library.Provider), SourceServerName: library.ServerName, VersionLabel: item.VersionLabel}
+	return models.LocalMediaItem{ID: item.ID, LibraryID: item.LibraryID, FileName: item.FileName, LibraryType: item.LibraryType, DetectedTitle: item.Title, DetectedYear: item.Year, SeasonNumber: item.SeasonNumber, EpisodeNumber: item.EpisodeNumber, MatchStatus: models.LocalMediaMatchStatusMatched, MatchedName: item.Title, MatchedYear: item.Year, ExternalIDs: item.ExternalIDs, EpisodeTitle: item.EpisodeTitle, SizeBytes: item.SizeBytes, Probe: remoteFilterProbe(item), SourceType: library.Provider, SourceName: strings.Title(library.Provider), SourceServerName: library.ServerName, VersionLabel: item.VersionLabel}
 }
 
 func (s *Service) FindMatches(ctx context.Context, query models.LocalMediaMatchQuery) ([]models.LocalMediaMatchedGroup, error) {

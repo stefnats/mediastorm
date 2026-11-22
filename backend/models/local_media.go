@@ -382,6 +382,7 @@ type RemoteMediaItem struct {
 	EpisodeExternalIDs *LocalMediaExternalIDs `json:"episodeExternalIds,omitempty"`
 	SinglePart         bool                   `json:"singlePart,omitempty"`
 	AudioLanguages     []string               `json:"audioLanguages,omitempty"`
+	Probe              *LocalMediaProbe       `json:"probe,omitempty"` // File-specific catalogue facts saved during ordinary provider sync.
 
 	PosterURL       string  `json:"posterUrl,omitempty"`
 	BackdropURL     string  `json:"backdropUrl,omitempty"`

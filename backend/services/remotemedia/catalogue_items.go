@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"novastream/models"
+	"novastream/services/localmedia"
 )
 
 // ErrInvalidQuery identifies an unsupported mirrored-catalogue item sort.
@@ -20,6 +21,9 @@ func (s *Service) ListItems(ctx context.Context, libraryID string, query models.
 		return nil, errors.New("remote catalogue context is required")
 	}
 	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if err := localmedia.ValidateMediaFilters(query.MediaFilters); err != nil {
 		return nil, err
 	}
 	mode := strings.TrimSpace(query.Sort)
@@ -55,6 +59,9 @@ func (s *Service) ListItems(ctx context.Context, libraryID string, query models.
 	for _, row := range rows {
 		if err := ctx.Err(); err != nil {
 			return nil, err
+		}
+		if !localmedia.MatchesMediaFilters(remoteFilterProbe(row), query.MediaFilters) {
+			continue
 		}
 		if !include {
 			continue

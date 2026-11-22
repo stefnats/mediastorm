@@ -101,6 +101,7 @@ func scanRemoteItem(row interface{ Scan(...interface{}) error }) (*models.Remote
 	}
 	_ = json.Unmarshal(providerData, &v.ProviderData)
 	models.HydrateRemoteSelectionProof(&v)
+	models.HydrateRemoteMediaFilterFacts(&v)
 	return &v, nil
 }
 
@@ -138,6 +139,7 @@ func (r *pgRemoteMediaRepo) UpsertItem(ctx context.Context, v *models.RemoteMedi
 	externalIDs, _ := json.Marshal(v.ExternalIDs)
 	// Never store JSON null for provider_data; nil maps marshal to null and wipe partKeys on restore.
 	providerDataMap := models.RemoteSelectionProviderData(v)
+	models.StoreRemoteMediaFilterFacts(v, providerDataMap)
 	providerData, _ := json.Marshal(providerDataMap)
 	_, err := r.pool.Exec(ctx, `INSERT INTO remote_media_items (`+remoteItemColumns+`) VALUES
 		($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29,$30,$31,$32,$33)
