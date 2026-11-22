@@ -1971,6 +1971,7 @@ func main() {
 	r.HandleFunc("/account/api/playback/prequeue/{prequeueID}", releaseCookieHandler(prequeueHandler.GetStatus)).Methods(http.MethodGet)
 	r.HandleFunc("/account/api/playback/prequeue/{prequeueID}/report", releaseCookieHandler(prequeueHandler.ReleaseReportOptions)).Methods(http.MethodGet)
 	r.HandleFunc("/account/api/playback/prequeue/{prequeueID}/report", releaseCookieHandler(prequeueHandler.ReportRelease)).Methods(http.MethodPost)
+	r.HandleFunc("/account/api/playback/prequeue/{prequeueID}/audio-language", releaseCookieHandler(prequeueHandler.CheckAudioLanguage)).Methods(http.MethodPost)
 	r.HandleFunc("/account/api/playback/prequeue/{prequeueID}/retry", releaseCookieHandler(prequeueHandler.RetryRelease)).Methods(http.MethodPost)
 	r.HandleFunc("/account/api/playback/prequeue/{prequeueID}/retry", releaseCookieHandler(prequeueHandler.CancelReleaseRetry)).Methods(http.MethodDelete)
 	r.HandleFunc("/account/api/playback/bad-streams/{id}", releaseCookieHandler(badStreamsHandler.Delete)).Methods(http.MethodDelete)

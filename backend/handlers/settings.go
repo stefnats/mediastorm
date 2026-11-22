@@ -220,6 +220,11 @@ func (h *SettingsHandler) GetSettings(w http.ResponseWriter, r *http.Request) {
 		json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
 		return
 	}
+	if !auth.IsMaster(r) {
+		// Speech analysis is configured by the server owner. Clients receive
+		// capability information from the selected-release controls instead.
+		s.Playback.AudioLanguageCheckURL = ""
+	}
 
 	if accountID := auth.GetAccountID(r); accountID != "" && !auth.IsMaster(r) {
 		s = config.FilterLiveSettingsForAccount(s, accountID)

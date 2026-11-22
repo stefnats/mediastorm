@@ -2,6 +2,7 @@ package handlers
 
 import (
 	"context"
+	"encoding/binary"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -13,14 +14,36 @@ import (
 	"testing"
 
 	"github.com/gorilla/mux"
+	"novastream/config"
 	"novastream/internal/auth"
 	"novastream/models"
+	"novastream/services/audiolanguage"
 	"novastream/services/badstreams"
 )
+
+type releaseLanguageBrowserProber struct{ VideoFullProber }
+
+func (releaseLanguageBrowserProber) SamplePreparedAudio(context.Context, string, int, float64) ([]byte, error) {
+	pcm := make([]byte, audiolanguage.SampleBytes)
+	for i := 0; i < len(pcm); i += 2 {
+		binary.LittleEndian.PutUint16(pcm[i:], 2000)
+	}
+	return pcm, nil
+}
 
 func releaseReportBrowserFixture(t *testing.T) http.Handler {
 	t.Helper()
 	h, entry, registry := releaseReportFixture(t)
+	analysis := httptest.NewServer(http.HandlerFunc(languageFixtureReply))
+	t.Cleanup(analysis.Close)
+	cfg := config.NewManager(filepath.Join(t.TempDir(), "settings.json"))
+	settings := config.DefaultSettings()
+	settings.Playback.AudioLanguageCheckURL = analysis.URL + "/inference"
+	if err := cfg.Save(settings); err != nil {
+		t.Fatal(err)
+	}
+	h.SetConfigManager(cfg)
+	h.fullProber = releaseLanguageBrowserProber{h.fullProber}
 	profile := models.User{ID: "profile", AccountID: "account", Name: "Preview profile"}
 	web := NewWebPlaybackHandler(fakeWebPlaybackUsers{users: []models.User{profile}}, fakeWebPlaybackSessions{token: "fixture-token", session: models.Session{Token: "fixture-token", AccountID: "account", IsMaster: true}}, "")
 	bad := NewBadStreamsHandler(registry)
@@ -49,6 +72,7 @@ func releaseReportBrowserFixture(t *testing.T) http.Handler {
 	router.PathPrefix("/api/static/").Handler(http.StripPrefix("/api/static/", http.FileServer(http.Dir("static"))))
 	router.HandleFunc("/api/playback/prequeue/{prequeueID}/report", h.ReleaseReportOptions).Methods("GET")
 	router.HandleFunc("/api/playback/prequeue/{prequeueID}/report", h.ReportRelease).Methods("POST")
+	router.HandleFunc("/api/playback/prequeue/{prequeueID}/audio-language", h.CheckAudioLanguage).Methods("POST")
 	router.HandleFunc("/api/playback/prequeue/{prequeueID}/retry", h.RetryRelease).Methods("POST")
 	router.HandleFunc("/api/playback/prequeue/{prequeueID}/retry", h.CancelReleaseRetry).Methods("DELETE")
 	router.HandleFunc("/api/playback/prequeue/{prequeueID}", h.GetStatus).Methods("GET")
