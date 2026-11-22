@@ -12145,8 +12145,21 @@ func (h *AdminUIHandler) ScanLocalMediaLibrary(w http.ResponseWriter, r *http.Re
 		return
 	}
 	id := mux.Vars(r)["libraryID"]
+	refreshMediaInfo := false
+	if raw := r.URL.Query().Get("refreshMediaInfo"); raw != "" {
+		var err error
+		refreshMediaInfo, err = strconv.ParseBool(raw)
+		if err != nil {
+			http.Error(w, "invalid media information refresh option", http.StatusBadRequest)
+			return
+		}
+	}
 	if h.remoteMediaService != nil {
 		if remote, _ := h.remoteMediaService.GetLibrary(r.Context(), id); remote != nil {
+			if refreshMediaInfo {
+				http.Error(w, "use Sync to refresh remote library information", http.StatusBadRequest)
+				return
+			}
 			count, err := h.remoteMediaService.Sync(r.Context(), id)
 			if err != nil {
 				http.Error(w, err.Error(), http.StatusBadRequest)
@@ -12157,7 +12170,13 @@ func (h *AdminUIHandler) ScanLocalMediaLibrary(w http.ResponseWriter, r *http.Re
 			return
 		}
 	}
-	summary, err := h.localMediaService.StartScan(r.Context(), id)
+	var summary models.LocalMediaScanSummary
+	var err error
+	if refreshMediaInfo {
+		summary, err = h.localMediaService.StartMediaInfoRefresh(r.Context(), id)
+	} else {
+		summary, err = h.localMediaService.StartScan(r.Context(), id)
+	}
 	if err != nil {
 		status := http.StatusBadRequest
 		if errors.Is(err, localmedia.ErrLibraryScanning) {

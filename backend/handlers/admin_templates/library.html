@@ -181,7 +181,7 @@
             </div>
             <details id="libraryMediaFilters" style="margin-top:0.75rem">
               <summary>Stored media filters (local libraries)</summary>
-              <p>These filters read saved scan information only. They do not check providers or guarantee that a device can play a file. Older scans may have unknown languages. A normal scan reuses unchanged files; languages are saved only when a file is actually probed again. There is currently no separate refresh for an unchanged file.</p>
+              <p>These filters read saved file information. Use Refresh media info to update languages and formats for unchanged local files. Unreadable information remains unknown.</p>
               <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,180px),1fr));gap:0.75rem">
                 <label>Audio language<input id="mediaAudioLanguage" class="form-input" placeholder="e.g. fr, en, spa" maxlength="32"></label>
                 <label>Subtitle language<input id="mediaSubtitleLanguage" class="form-input" placeholder="e.g. fr, en, spa" maxlength="32"></label>
@@ -1250,6 +1250,7 @@ function renderLibraries(container) {
           ${library.lastScanError ? `<div style="color: var(--danger); font-size: 0.85rem;">${escapeHtml(library.lastScanError)}</div>` : ''}
           <div style="display: flex; gap: 0.5rem; flex-wrap: wrap;" onclick="event.stopPropagation()">
             <button class="btn btn-primary btn-sm" onclick="scanLibrary('${library.id}')" ${library.lastScanStatus === 'scanning' ? 'disabled' : ''}>${library.lastScanStatus === 'scanning' ? 'Working...' : (library.sourceType && library.sourceType !== 'local' ? 'Sync' : 'Scan')}</button>
+            ${!library.sourceType || library.sourceType === 'local' ? `<button class="btn btn-secondary btn-sm" onclick="scanLibrary('${library.id}', true)" ${library.lastScanStatus === 'scanning' ? 'disabled' : ''}>Refresh media info</button>` : ''}
             ${!library.sourceType || library.sourceType === 'local' ? `<button class="btn btn-secondary btn-sm" onclick="editLibrary('${library.id}')">Edit</button>` : ''}
             <button class="btn btn-secondary btn-sm" onclick="manageLibraryAccess('${library.id}')">Access</button>
             <button class="btn btn-danger btn-sm" onclick="deleteLibrary('${library.id}')">Delete</button>
@@ -1396,14 +1397,14 @@ function renderScanProgress(library) {
   `;
 }
 
-async function scanLibrary(id) {
+async function scanLibrary(id, refreshMediaInfo = false) {
   try {
-    const res = await fetch(basePath + '/api/library/libraries/' + encodeURIComponent(id) + '/scan', { method: 'POST' });
+    const res = await fetch(basePath + '/api/library/libraries/' + encodeURIComponent(id) + '/scan' + (refreshMediaInfo ? '?refreshMediaInfo=true' : ''), { method: 'POST' });
     if (!res.ok) throw new Error(await res.text());
     const summary = await res.json();
     // Local scans are accepted asynchronously; progress/completion come from polling.
     if (summary && summary.async) {
-      showToast('Scan started');
+      showToast(refreshMediaInfo ? 'Media information refresh started' : 'Scan started');
       await loadLibraries();
       return;
     }

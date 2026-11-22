@@ -1648,6 +1648,15 @@ func (s *Service) refreshLibrarySummary(ctx context.Context, libraryID string) e
 // HTTP clients (admin UI) are not tied to scan duration. Progress and completion
 // are exposed via library lastScan* fields.
 func (s *Service) StartScan(ctx context.Context, libraryID string) (models.LocalMediaScanSummary, error) {
+	return s.startScan(ctx, libraryID, false)
+}
+
+// StartMediaInfoRefresh explicitly rereads file facts, including unchanged files.
+func (s *Service) StartMediaInfoRefresh(ctx context.Context, libraryID string) (models.LocalMediaScanSummary, error) {
+	return s.startScan(ctx, libraryID, true)
+}
+
+func (s *Service) startScan(ctx context.Context, libraryID string, refreshMediaInfo bool) (models.LocalMediaScanSummary, error) {
 	if ctx == nil || ctx.Err() != nil {
 		return models.LocalMediaScanSummary{}, ErrServiceUnavailable
 	}
@@ -1680,7 +1689,7 @@ func (s *Service) StartScan(ctx context.Context, libraryID string) (models.Local
 	launched = true
 	go func() {
 		defer finishWork()
-		if _, err := s.scanLibrary(original, libCopy); err != nil {
+		if _, err := s.scanLibrary(original, libCopy, refreshMediaInfo); err != nil {
 			log.Printf("[localmedia] background scan failed library=%q id=%s: %v", libCopy.Name, libCopy.ID, err)
 		}
 	}()
@@ -1688,6 +1697,15 @@ func (s *Service) StartScan(ctx context.Context, libraryID string) (models.Local
 }
 
 func (s *Service) RunScan(ctx context.Context, libraryID string) (models.LocalMediaScanSummary, error) {
+	return s.runScan(ctx, libraryID, false)
+}
+
+// RunMediaInfoRefresh is the synchronous explicit file-information refresh.
+func (s *Service) RunMediaInfoRefresh(ctx context.Context, libraryID string) (models.LocalMediaScanSummary, error) {
+	return s.runScan(ctx, libraryID, true)
+}
+
+func (s *Service) runScan(ctx context.Context, libraryID string, refreshMediaInfo bool) (models.LocalMediaScanSummary, error) {
 	work, finish, err := s.beginLocalWork(ctx)
 	if err != nil {
 		return models.LocalMediaScanSummary{}, err
@@ -1697,7 +1715,7 @@ func (s *Service) RunScan(ctx context.Context, libraryID string) (models.LocalMe
 	if err != nil {
 		return models.LocalMediaScanSummary{}, err
 	}
-	return s.scanLibrary(work, *library)
+	return s.scanLibrary(work, *library, refreshMediaInfo)
 }
 
 func (s *Service) beginScan(ctx context.Context, libraryID string) (*models.LocalMediaLibrary, error) {
@@ -1753,7 +1771,7 @@ func (s *Service) markLibraryScanning(ctx context.Context, library *models.Local
 	return nil
 }
 
-func (s *Service) scanLibrary(ctx context.Context, library models.LocalMediaLibrary) (models.LocalMediaScanSummary, error) {
+func (s *Service) scanLibrary(ctx context.Context, library models.LocalMediaLibrary, refreshMediaInfo bool) (models.LocalMediaScanSummary, error) {
 	defer s.finishScan(library.ID)
 
 	log.Printf("[localmedia] scan started library=%q id=%s type=%s root=%q", library.Name, library.ID, library.Type, library.RootPath)
@@ -1764,7 +1782,7 @@ func (s *Service) scanLibrary(ctx context.Context, library models.LocalMediaLibr
 	}
 
 	scanID := uuid.NewString()
-	summary, err := s.discoverAndMatch(ctx, library, scanID)
+	summary, err := s.discoverAndMatch(ctx, library, scanID, refreshMediaInfo)
 	finishedAt := time.Now().UTC()
 	library.LastScanFinishedAt = &finishedAt
 	library.UpdatedAt = finishedAt
@@ -1802,7 +1820,7 @@ func (s *Service) scanLibrary(ctx context.Context, library models.LocalMediaLibr
 	return summary, nil
 }
 
-func (s *Service) discoverAndMatch(ctx context.Context, library models.LocalMediaLibrary, scanID string) (models.LocalMediaScanSummary, error) {
+func (s *Service) discoverAndMatch(ctx context.Context, library models.LocalMediaLibrary, scanID string, refreshMediaInfo bool) (models.LocalMediaScanSummary, error) {
 	var candidates []scanFileCandidate
 	for index, root := range libraryRoots(library) {
 		if ctx.Err() != nil {
@@ -1888,7 +1906,7 @@ func (s *Service) discoverAndMatch(ctx context.Context, library models.LocalMedi
 			return summary, ctx.Err()
 		}
 		existing, hasExisting := existingByRelativePath[candidate.relativePath]
-		item, reused, err := s.buildItem(ctx, library, candidate.path, candidate.relativePath, detectedByPath[candidate.path], metadataCache, scanID, existing, hasExisting)
+		item, reused, err := s.buildItem(ctx, library, candidate.path, candidate.relativePath, detectedByPath[candidate.path], metadataCache, scanID, existing, hasExisting, refreshMediaInfo)
 		if err != nil {
 			buildErrors++
 			if buildErrors <= 10 || buildErrors%100 == 0 {
@@ -2040,7 +2058,7 @@ func normalizeLibraryFilterTerms(terms []string) []string {
 	return normalized
 }
 
-func (s *Service) buildItem(ctx context.Context, library models.LocalMediaLibrary, filePath, relativePath string, detected detectedTitle, metadataCache *scanMetadataCache, scanID string, existing models.LocalMediaItem, hasExisting bool) (models.LocalMediaItem, bool, error) {
+func (s *Service) buildItem(ctx context.Context, library models.LocalMediaLibrary, filePath, relativePath string, detected detectedTitle, metadataCache *scanMetadataCache, scanID string, existing models.LocalMediaItem, hasExisting, refreshMediaInfo bool) (models.LocalMediaItem, bool, error) {
 	info, err := os.Stat(filePath)
 	if err != nil {
 		return models.LocalMediaItem{}, false, err
@@ -2048,7 +2066,13 @@ func (s *Service) buildItem(ctx context.Context, library models.LocalMediaLibrar
 	modifiedAt := info.ModTime().UTC()
 	now := time.Now().UTC()
 	if hasExisting && canReuseLocalMediaItem(existing, filePath, info.Size(), modifiedAt) {
-		s.rematchReusedItemByExternalIDs(ctx, library, detected, metadataCache, &existing)
+		if refreshMediaInfo {
+			// Preserve the catalogue identity and manual selection. Failed probes
+			// replace stale file facts with the existing explicit unknown shape.
+			existing.Probe = s.probeLocalFile(ctx, filePath, info.Size())
+		} else {
+			s.rematchReusedItemByExternalIDs(ctx, library, detected, metadataCache, &existing)
+		}
 		existing.FilePath = filePath
 		existing.FileName = filepath.Base(filePath)
 		existing.IsMissing = false
