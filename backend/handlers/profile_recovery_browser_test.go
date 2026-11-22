@@ -97,6 +97,7 @@ func newProfileRecoveryBrowserFixture(t *testing.T, master bool) *profileRecover
 	recovery := NewProfileRecoveryHandler(coordinator, func() config.SecuritySettings {
 		return config.SecuritySettings{EnforceProfilePins: true}
 	})
+	liveSettings := NewUserSettingsHandler(settings, f.pg.users, manager)
 	router := mux.NewRouter()
 	for _, prefix := range []string{"/admin", "/account"} {
 		router.HandleFunc(prefix+"/kids-settings", admin.RequireAuth(admin.KidsSettingsPage)).Methods("GET")
@@ -111,6 +112,7 @@ func newProfileRecoveryBrowserFixture(t *testing.T, master bool) *profileRecover
 			}
 			admin.RequireAuth(recovery.Cookie)(w, r)
 		}).Methods("POST")
+		router.HandleFunc(prefix+"/api/users/{userID}/kids/live-policy", admin.RequireAuth(liveSettings.KidsLivePolicy)).Methods(http.MethodGet)
 		// Any accidental save fallback is observable and stays outside the
 		// real Recovery handler; these are deliberately denied fixture routes.
 		router.PathPrefix(prefix + "/api/users/").HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
