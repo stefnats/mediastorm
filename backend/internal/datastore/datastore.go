@@ -26,6 +26,9 @@ type DataStore struct {
 	// Protected by the existing familyMediaAdmission mutex.
 	familyMediaRetired    bool
 	familyMediaRetireDone chan struct{}
+	// The same admission mutex protects the one original NZB purpose binding.
+	familyNZBClosed  bool
+	familyNZBSources *FamilyNZBSources
 }
 
 // New connects to PostgreSQL, runs migrations, and returns a ready DataStore.
@@ -72,6 +75,7 @@ func (ds *DataStore) Close() {
 	if ds == nil {
 		return
 	}
+	ds.retireFamilyNZB()
 	ds.retireFamilyMediaOwners()
 	if ds.pool != nil {
 		ds.pool.Close()

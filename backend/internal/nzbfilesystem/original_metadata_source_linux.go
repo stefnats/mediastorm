@@ -73,6 +73,10 @@ type originalMetadataSourceState struct {
 	expiry         time.Time
 	mu             *sync.Mutex
 	closed, opened bool
+	attemptMode    bool
+	attemptSeq     uint64
+	attempt        *OriginalMetadataAttempt
+	attemptErr     error
 	pending        *sync.WaitGroup
 	nodes          []originalNode
 	file           *os.File
@@ -667,7 +671,7 @@ func (s *OriginalMetadataSource) Open(ctx context.Context, start, length int64) 
 	}
 	defer s.pending.Done()
 	s.mu.Lock()
-	if s.opened {
+	if s.opened || s.attemptMode {
 		s.mu.Unlock()
 		return nil, ErrOriginalMetadataUnavailable
 	}
@@ -770,9 +774,13 @@ func (s *OriginalMetadataSource) SignalClose() {
 	s.closed = true
 	s.cancel()
 	r := s.stream
+	a := s.attempt
 	s.mu.Unlock()
 	if r != nil {
 		_ = SignalSourceClose(r.raw)
+	}
+	if a != nil {
+		a.SignalClose()
 	}
 }
 func (s *OriginalMetadataSource) retire() {
@@ -782,6 +790,7 @@ func (s *OriginalMetadataSource) retire() {
 	s.pending.Wait()
 	s.mu.Lock()
 	r := s.stream
+	a := s.attempt
 	s.mu.Unlock()
 	if r != nil {
 		s.err = errors.Join(s.err, JoinSourceCleanup(r.raw))
@@ -802,6 +811,12 @@ func (s *OriginalMetadataSource) retire() {
 		vmf.globalPassword = ""
 		vmf.globalSalt = ""
 	}
+	if a != nil {
+		_ = a.CloseAndJoin()
+	}
+	s.mu.Lock()
+	s.err = errors.Join(s.err, s.attemptErr)
+	s.mu.Unlock()
 	if s.stopNamespace != nil {
 		s.stopNamespace()
 	}
@@ -918,3 +933,300 @@ func (OriginalMetadataStream) Format(f fmt.State, _ rune) {
 }
 func (OriginalMetadataStream) MarshalJSON() ([]byte, error) { return []byte("null"), nil }
 func (*OriginalMetadataStream) UnmarshalJSON([]byte) error  { return ErrOriginalMetadataUnavailable }
+
+// OriginalMetadataAttempt owns one physical request, not its retained snapshot.
+// Only OpenAttempt can bind it to the original metadata and decoder receipt.
+type OriginalMetadataAttempt struct{ *originalMetadataAttemptState }
+type originalMetadataAttemptState struct {
+	self        *OriginalMetadataAttempt
+	source      *OriginalMetadataSource
+	generation  uint64
+	ctx         context.Context
+	cancel      context.CancelFunc
+	mu          sync.Mutex
+	readMu      sync.Mutex
+	closed      bool
+	pending     sync.WaitGroup
+	remaining   int64
+	raw         *requestFile
+	ready, done chan struct{}
+	stopCaller  func()
+	stopRequest func()
+	err         error
+}
+
+func (s *OriginalMetadataSource) OpenAttempt(ctx context.Context, start, length int64) (*OriginalMetadataAttempt, error) {
+	if e := s.enter(); e != nil {
+		return nil, e
+	}
+	defer s.pending.Done()
+	// Unlike legacy Open, invalid operation-local inputs cannot consume or
+	// retire an existing original snapshot or another working attempt.
+	if ctx == nil || ctx.Err() != nil || start < 0 || length <= 0 || start > s.meta.FileSize || length > s.meta.FileSize-start {
+		return nil, ErrOriginalMetadataUnavailable
+	}
+	life, cancel := context.WithCancel(s.ctx)
+	if deadline, ok := ctx.Deadline(); ok {
+		cancel()
+		life, cancel = context.WithDeadline(s.ctx, deadline)
+	}
+	a := &OriginalMetadataAttempt{originalMetadataAttemptState: &originalMetadataAttemptState{source: s, ctx: life, cancel: cancel, remaining: length, ready: make(chan struct{}), done: make(chan struct{})}}
+	a.self = a
+	s.mu.Lock()
+	if s.closed || s.ctx.Err() != nil || s.opened || s.attempt != nil || s.attemptSeq == ^uint64(0) {
+		overflow := s.attemptSeq == ^uint64(0)
+		s.mu.Unlock()
+		cancel()
+		if overflow {
+			s.SignalClose()
+		}
+		return nil, ErrOriginalMetadataUnavailable
+	}
+	s.attemptMode = true
+	s.attemptSeq++
+	a.generation = s.attemptSeq
+	s.attempt = a
+	s.mu.Unlock()
+	go a.retire()
+	published := false
+	defer func() {
+		close(a.ready)
+		if !published {
+			a.SignalClose()
+			<-a.done
+		}
+	}()
+	a.stopCaller = originalLink(ctx, a.SignalClose)
+	work, finish := context.WithTimeout(a.ctx, 30*time.Second)
+	unlink := originalLink(work, a.SignalClose)
+	defer func() { unlink(); finish() }()
+	if e := s.checkPhysical(work); e != nil {
+		a.physicalFailure(e)
+		return nil, e
+	}
+	raw := make([]byte, int(s.version.Size))
+	if e := originalReadExact(work, s.file, raw); e != nil {
+		// This bounded reader maps cancellation to unavailable. It does not
+		// itself attest a named/held identity mismatch after local cancel.
+		if work.Err() == nil {
+			a.physicalFailure(e)
+		}
+		return nil, e
+	}
+	if sha256.Sum256(raw) != s.digest {
+		s.SignalClose()
+		return nil, ErrOriginalMetadataUnavailable
+	}
+	if e := s.checkPhysical(work); e != nil {
+		a.physicalFailure(e)
+		return nil, e
+	}
+	request, e := s.owner.fs.NewRequestSource(a.ctx, RequestSourceBudgets{})
+	if e != nil {
+		return nil, e
+	}
+	args := utils.NewPathWithArgs(s.name)
+	args.SetRange(fmt.Sprintf("bytes=%d-%d", start, start+length-1))
+	vmf := &MetadataVirtualFile{name: s.name, fileMeta: s.meta, args: args, poolManager: s.decoder.manager, maxWorkers: s.decoder.workers, maxCacheSizeMB: s.decoder.cacheMB, rcloneCipher: s.decoder.rclone, aesCipher: s.decoder.encryptionHeaders, globalPassword: s.decoder.password, globalSalt: s.decoder.salt, position: start, originalRangeEnd: start + length - 1}
+	attachSourceLifetime(request.ctx, cancel, vmf)
+	rawFile := &requestFile{File: vmf, owner: request, ownsSource: true}
+	a.mu.Lock()
+	a.raw = rawFile
+	denied := a.closed || a.ctx.Err() != nil
+	a.mu.Unlock()
+	request.mu.Lock()
+	denied = denied || request.retired || request.ctx.Err() != nil
+	if !denied {
+		request.files[rawFile] = struct{}{}
+	}
+	request.mu.Unlock()
+	a.stopRequest = originalLink(request.ctx, a.SignalClose)
+	if denied {
+		return nil, ErrOriginalMetadataUnavailable
+	}
+	if e := s.checkPhysical(work); e != nil {
+		a.physicalFailure(e)
+		return nil, e
+	}
+	if a.ctx.Err() != nil || ctx.Err() != nil {
+		return nil, ErrOriginalMetadataUnavailable
+	}
+	published = true
+	return a, nil
+}
+
+func (a *OriginalMetadataAttempt) valid() bool {
+	return a != nil && a.originalMetadataAttemptState != nil && a.self == a && a.source != nil && a.source.valid() && a.ctx != nil
+}
+func (a *OriginalMetadataAttempt) physicalFailure(err error) {
+	// checkPhysical returns typed context errors for operation-local cancel.
+	// A positively observed physical mismatch stays terminal even if the
+	// caller cancels between that observation and this signal.
+	if err != nil && !errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded) {
+		a.source.SignalClose()
+	}
+}
+func (a *OriginalMetadataAttempt) Context() context.Context {
+	if !a.valid() {
+		return (*OriginalMetadataSource)(nil).Context()
+	}
+	return a.ctx
+}
+func (a *OriginalMetadataAttempt) Check(ctx context.Context) error {
+	if !a.valid() || ctx == nil || ctx.Err() != nil || a.ctx.Err() != nil {
+		return ErrOriginalMetadataUnavailable
+	}
+	select {
+	case <-a.ready:
+	default:
+		return ErrOriginalMetadataUnavailable
+	}
+	a.mu.Lock()
+	denied := a.closed || a.raw == nil
+	a.mu.Unlock()
+	if denied {
+		return ErrOriginalMetadataUnavailable
+	}
+	return a.source.Check(ctx)
+}
+func (a *OriginalMetadataAttempt) SignalClose() {
+	if !a.valid() {
+		return
+	}
+	a.mu.Lock()
+	a.closed = true
+	a.cancel()
+	raw := a.raw
+	a.mu.Unlock()
+	if raw != nil {
+		_ = SignalSourceClose(raw)
+	}
+}
+func (a *OriginalMetadataAttempt) retire() {
+	<-a.ctx.Done()
+	a.SignalClose()
+	<-a.ready
+	a.pending.Wait()
+	if a.raw != nil {
+		a.err = JoinSourceCleanup(a.raw)
+		done, err := SourceCleanupDone(a.raw)
+		if err != nil {
+			a.err = errors.Join(a.err, err)
+			a.source.SignalClose()
+			return // No actual completion: retain the original reservation.
+		}
+		<-done
+	}
+	if a.stopRequest != nil {
+		a.stopRequest()
+	}
+	if a.stopCaller != nil {
+		a.stopCaller()
+	}
+	if a.raw != nil {
+		vmf := a.raw.File.(*MetadataVirtualFile)
+		vmf.fileMeta = nil
+		vmf.poolManager = nil
+		vmf.rcloneCipher = nil
+		vmf.aesCipher = nil
+		vmf.globalPassword = ""
+		vmf.globalSalt = ""
+	}
+	s := a.source
+	if a.err != nil {
+		s.mu.Lock()
+		s.attemptErr = errors.Join(s.attemptErr, a.err)
+		s.mu.Unlock()
+		s.SignalClose()
+	}
+	// Publish availability and real completion together, after all joins. A
+	// stale closed handle can never clear a later attempt's exact pointer.
+	s.mu.Lock()
+	if s.attempt == a {
+		s.attempt = nil
+	}
+	close(a.done)
+	s.mu.Unlock()
+}
+func (a *OriginalMetadataAttempt) CloseAndJoin() error {
+	if !a.valid() {
+		return ErrOriginalMetadataUnavailable
+	}
+	a.SignalClose()
+	<-a.done
+	return a.err
+}
+func (a *OriginalMetadataAttempt) Close() error { return a.CloseAndJoin() }
+func (a *OriginalMetadataAttempt) CleanupDone() <-chan struct{} {
+	if !a.valid() {
+		return nil
+	}
+	return a.done
+}
+func (a *OriginalMetadataAttempt) Read(p []byte) (n int, err error) {
+	original := p
+	var pending bool
+	defer func() {
+		if err != nil && err != io.EOF {
+			clear(original)
+			n = 0
+		}
+		if pending {
+			a.source.pending.Done()
+			a.pending.Done()
+		}
+	}()
+	if !a.valid() {
+		return 0, ErrOriginalMetadataUnavailable
+	}
+	s := a.source
+	if e := s.enter(); e != nil {
+		return 0, e
+	}
+	a.mu.Lock()
+	if a.closed || a.ctx.Err() != nil || a.raw == nil {
+		a.mu.Unlock()
+		s.pending.Done()
+		return 0, ErrOriginalMetadataUnavailable
+	}
+	a.pending.Add(1)
+	a.mu.Unlock()
+	pending = true
+	if e := s.checkPhysical(a.ctx); e != nil {
+		a.physicalFailure(e)
+		a.SignalClose()
+		return 0, e
+	}
+	a.readMu.Lock()
+	if a.remaining == 0 {
+		a.readMu.Unlock()
+		return 0, io.EOF
+	}
+	if int64(len(p)) > a.remaining {
+		p = p[:int(a.remaining)]
+	}
+	n, err = a.raw.Read(p)
+	a.remaining -= int64(n)
+	a.readMu.Unlock()
+	if s.afterRead != nil {
+		s.afterRead()
+	}
+	if e := s.checkPhysical(a.ctx); e != nil {
+		a.physicalFailure(e)
+		a.SignalClose()
+		return 0, e
+	}
+	if err != nil && err != io.EOF {
+		if a.ctx.Err() == nil {
+			s.SignalClose()
+		}
+		a.SignalClose()
+	}
+	return n, err
+}
+
+func (OriginalMetadataAttempt) Format(f fmt.State, _ rune) {
+	_, _ = f.Write([]byte("OriginalMetadataAttempt(opaque)"))
+}
+func (OriginalMetadataAttempt) MarshalJSON() ([]byte, error) { return []byte("null"), nil }
+func (*OriginalMetadataAttempt) UnmarshalJSON([]byte) error  { return ErrOriginalMetadataUnavailable }

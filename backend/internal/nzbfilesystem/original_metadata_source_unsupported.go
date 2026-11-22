@@ -15,6 +15,7 @@ type OriginalMetadataInfo struct{ Size int64 }
 type OriginalMetadataNamespace struct{}
 type OriginalMetadataSource struct{}
 type OriginalMetadataStream struct{}
+type OriginalMetadataAttempt struct{}
 
 func (*NzbFilesystem) CaptureOriginalMetadataNamespace(context.Context) (*OriginalMetadataNamespace, error) {
 	return nil, ErrOriginalMetadataUnavailable
@@ -40,6 +41,9 @@ func (*OriginalMetadataSource) Info(context.Context) (OriginalMetadataInfo, erro
 func (*OriginalMetadataSource) Open(context.Context, int64, int64) (*OriginalMetadataStream, error) {
 	return nil, ErrOriginalMetadataUnavailable
 }
+func (*OriginalMetadataSource) OpenAttempt(context.Context, int64, int64) (*OriginalMetadataAttempt, error) {
+	return nil, ErrOriginalMetadataUnavailable
+}
 func (*OriginalMetadataSource) SignalClose()             {}
 func (*OriginalMetadataSource) CloseAndJoin() error      { return ErrOriginalMetadataUnavailable }
 func (*OriginalMetadataStream) Read([]byte) (int, error) { return 0, ErrOriginalMetadataUnavailable }
@@ -49,6 +53,18 @@ func (*OriginalMetadataStream) Context() context.Context {
 func (*OriginalMetadataStream) Check(context.Context) error  { return ErrOriginalMetadataUnavailable }
 func (*OriginalMetadataStream) Close() error                 { return ErrOriginalMetadataUnavailable }
 func (*OriginalMetadataStream) CleanupDone() <-chan struct{} { return nil }
+func (*OriginalMetadataAttempt) Read(p []byte) (int, error) {
+	clear(p)
+	return 0, ErrOriginalMetadataUnavailable
+}
+func (*OriginalMetadataAttempt) Context() context.Context {
+	return (*OriginalMetadataSource)(nil).Context()
+}
+func (*OriginalMetadataAttempt) Check(context.Context) error  { return ErrOriginalMetadataUnavailable }
+func (*OriginalMetadataAttempt) SignalClose()                 {}
+func (*OriginalMetadataAttempt) CloseAndJoin() error          { return ErrOriginalMetadataUnavailable }
+func (*OriginalMetadataAttempt) Close() error                 { return ErrOriginalMetadataUnavailable }
+func (*OriginalMetadataAttempt) CleanupDone() <-chan struct{} { return nil }
 
 func (OriginalMetadataNamespace) Format(f fmt.State, _ rune) {
 	_, _ = f.Write([]byte("OriginalMetadataNamespace(opaque)"))
@@ -67,3 +83,8 @@ func (OriginalMetadataStream) Format(f fmt.State, _ rune) {
 }
 func (OriginalMetadataStream) MarshalJSON() ([]byte, error) { return []byte("null"), nil }
 func (*OriginalMetadataStream) UnmarshalJSON([]byte) error  { return ErrOriginalMetadataUnavailable }
+func (OriginalMetadataAttempt) Format(f fmt.State, _ rune) {
+	_, _ = f.Write([]byte("OriginalMetadataAttempt(opaque)"))
+}
+func (OriginalMetadataAttempt) MarshalJSON() ([]byte, error) { return []byte("null"), nil }
+func (*OriginalMetadataAttempt) UnmarshalJSON([]byte) error  { return ErrOriginalMetadataUnavailable }

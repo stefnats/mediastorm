@@ -11,6 +11,7 @@ import (
 
 	"novastream/config"
 	"novastream/internal/datastore"
+	"novastream/internal/integration"
 	"novastream/internal/settingscommit"
 )
 
@@ -27,6 +28,18 @@ type Startup struct {
 	err                       error
 	mu                        sync.Mutex
 	finishing                 bool
+	finishCompleted           bool
+	familyNZBRoot             *config.FamilyNZBRoot
+	familyNZBRootErr          error
+	familyNZBPreparing        bool
+	familyNZBRootPrepared     bool
+	familyNZBReady            chan struct{}
+	familyNZBBuilding         bool
+	familyNZBClosing          bool
+	familyNZBStore            *datastore.DataStore
+	familyNZBOriginal         *integration.NzbSystem
+	familyNZBSources          *datastore.FamilyNZBSources
+	familyNZBBuildErr         error
 	operations                sync.WaitGroup
 	recordingProgress         recordingProgressCleanup
 	sharePlayback             *datastore.ShareLinkRedeemer
@@ -50,6 +63,15 @@ func begin(ctx context.Context, manager *config.Manager, override string, recove
 	if ctx == nil || ctx.Err() != nil || manager == nil {
 		return nil, config.ErrSecurityCoordinator
 	}
+	// Capture the physical original cwd before any namespace or dependency work.
+	// Unsupported purpose preparation does not change unrelated startup modes.
+	nzbRoot, nzbRootErr := config.CaptureFamilyNZBWorkingDirectory(ctx, manager)
+	rootOwned := false
+	defer func() {
+		if !rootOwned && nzbRoot != nil {
+			_ = nzbRoot.Close()
+		}
+	}()
 	settings, _, err := config.ReadManagedBootstrap(ctx, manager)
 	if err != nil {
 		return nil, err
@@ -73,8 +95,9 @@ func begin(ctx context.Context, manager *config.Manager, override string, recove
 		return nil, err
 	}
 	life, cancel := context.WithCancel(ctx)
-	s := &Startup{manager: manager, objects: objects, ctx: life, cancel: cancel}
+	s := &Startup{manager: manager, objects: objects, ctx: life, cancel: cancel, familyNZBRoot: nzbRoot, familyNZBRootErr: nzbRootErr}
 	s.self = s
+	rootOwned = true
 	fail := func(err error) (*Startup, error) { _ = s.Close(); return nil, err }
 	var options []datastore.Option
 	if !recovery {
@@ -223,6 +246,10 @@ func (s *Startup) Finish() error {
 				s.err = err
 			}
 		}
+		// This is published only after real admitted work and native release.
+		s.mu.Lock()
+		s.finishCompleted = true
+		s.mu.Unlock()
 	})
 	return s.err
 }
@@ -235,6 +262,7 @@ func (s *Startup) Close() error {
 			s.cancel()
 		}
 		_ = s.Finish()
+		s.closeFamilyNZB()
 		s.closeRecordingProgress()
 		s.closeSharePlayback()
 		s.closeWatchRoom()
