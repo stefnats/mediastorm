@@ -5235,6 +5235,10 @@ paths:
         Optional explicit check against an owner-configured local whisper.cpp
         service. Existing release-report options expose
         `audioLanguageCheckAvailable` and the current `sourceVersion`.
+        `autoCheckAudioLanguage` in those options reflects the profile's
+        explicit automatic-check choice, inheriting the server default when
+        unset. It defaults to false and has no device override. Supported
+        players wait for sustained actual playback before an automatic check.
         Samples the selected container audio track in two non-overlapping
         20-second windows. Results are hints, not full-soundtrack, regional-dub
         or lip-sync verification. No report, exclusion, search or replacement

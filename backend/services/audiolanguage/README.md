@@ -17,7 +17,8 @@ perform one check after sustained playback when the profile explicitly enables
 `playback.autoCheckAudioLanguage` (default false; an unset profile inherits the
 server default). A profile's explicit false remains an opt-out. Automatic checks
 never run in a standby player or while browsing, and uncertain results are silent.
-A likely mismatch may offer a prepared alternative, with adoption still explicit.
+A likely mismatch offers audio/source review; preparing an alternative remains
+an explicit action.
 
 Playback continues. Two non-overlapping
 20-second, mono 16-kHz PCM windows must agree with sufficient speech evidence and

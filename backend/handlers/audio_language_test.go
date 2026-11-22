@@ -186,8 +186,19 @@ func TestAudioLanguageAutomaticOptInUsesSelectedProfile(t *testing.T) {
 }
 
 func TestAudioLanguageAutomaticChoiceIsProfileOnly(t *testing.T) {
-	if _, ok := clientSettingPath("playback.autoCheckAudioLanguage"); ok {
+	path := "playback.autoCheckAudioLanguage"
+	schema := userEditableSettingsSchema([]string{path})[path]
+	if len(schema.Scopes) != 1 || schema.Scopes[0] != "profile" {
 		t.Fatal("profile-only speech choice advertised as an unsupported device override")
+	}
+	cfg := config.NewManager(filepath.Join(t.TempDir(), "settings.json"))
+	settings := config.DefaultSettings()
+	settings.UI.UserEditableSettings = []string{path}
+	if err := cfg.Save(settings); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := decodeClientFrontendSettingPatch(json.NewDecoder(strings.NewReader(`{"path":"playback.autoCheckAudioLanguage","value":false}`)), cfg); err == nil {
+		t.Fatal("unsupported device patch accepted")
 	}
 	if err := validateUserEditableSettingValue("playback.autoCheckAudioLanguage", json.RawMessage(`false`)); err != nil {
 		t.Fatal("valid profile opt-out rejected", err)
