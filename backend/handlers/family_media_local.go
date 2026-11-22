@@ -106,6 +106,16 @@ func (h *familyLocalRawHandler) ServeHTTP(w http.ResponseWriter, r *http.Request
 		familyLocalRawDeny(w, profileunlock.ErrFamilyMediaUnavailable)
 		return
 	}
+	w.Header().Set("Cache-Control", "private, no-store")
+	w.Header().Set("Allow", "GET, HEAD, OPTIONS")
+	if r.Method == http.MethodOptions {
+		w.WriteHeader(http.StatusNoContent)
+		return
+	}
+	if r.Method != http.MethodGet && r.Method != http.MethodHead {
+		http.Error(w, "GET or HEAD is required.", http.StatusMethodNotAllowed)
+		return
+	}
 	ctx, finish, err := h.begin(r.Context())
 	if err != nil {
 		familyLocalRawDeny(w, err)
@@ -304,16 +314,6 @@ func (h *familyLocalRawHandler) open(r *familyMediaRuntime, setup context.Contex
 }
 
 func (h *familyLocalRawHandler) serveHTTP(w http.ResponseWriter, r *http.Request) {
-	w.Header().Set("Cache-Control", "private, no-store")
-	w.Header().Set("Allow", "GET, HEAD, OPTIONS")
-	if r.Method == http.MethodOptions {
-		w.WriteHeader(http.StatusNoContent)
-		return
-	}
-	if r.Method != http.MethodGet && r.Method != http.MethodHead {
-		http.Error(w, "GET or HEAD is required.", http.StatusMethodNotAllowed)
-		return
-	}
 	if h == nil || h.installation == nil || h.installation.Boundary == nil || h.opener == nil {
 		familyLocalRawDeny(w, profileunlock.ErrFamilyMediaUnavailable)
 		return
