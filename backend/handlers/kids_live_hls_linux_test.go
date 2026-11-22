@@ -140,6 +140,11 @@ func TestKidsLiveActualEncoderUsesFixedProgrammeEnd(t *testing.T) {
 		defer manager.mu.RUnlock()
 		return manager.sessions[result.SessionID] == nil
 	})
+	// CleanupSession unregisters and joins the encoder before removing its output.
+	ordinaryLifeWait(t, "fixed-end programme output was not removed", func() bool {
+		_, statErr := os.Stat(session.OutputDir)
+		return os.IsNotExist(statErr)
+	})
 	if _, err = os.Stat(session.OutputDir); !os.IsNotExist(err) {
 		t.Fatal("old programme output remains", err)
 	}

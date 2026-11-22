@@ -3,6 +3,7 @@ package handlers
 import (
 	"bytes"
 	"context"
+	"encoding/binary"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -22,6 +23,7 @@ import (
 	"novastream/internal/parentauth"
 	"novastream/models"
 	"novastream/services/accounts"
+	"novastream/services/audiolanguage"
 	"novastream/services/clients"
 	"novastream/services/customlists"
 	"novastream/services/playback"
@@ -797,6 +799,57 @@ func TestOpenAPIContract(t *testing.T) {
 		}
 		exercise(t, v, contractCall{method: http.MethodGet, target: "/api/playback/prequeue/missing",
 			vars: map[string]string{"prequeueID": "missing"}}, h.GetStatus, http.StatusNotFound)
+	})
+
+	t.Run("audio_language_check", func(t *testing.T) {
+		h, entry, registry := releaseReportFixture(t)
+		h.users = fallbackProfiles{models.User{ID: entry.UserID, AccountID: contractAccountID}}
+		inference := httptest.NewServer(http.HandlerFunc(languageFixtureReply))
+		defer inference.Close()
+		manager := config.NewManager(filepath.Join(t.TempDir(), "settings.json"))
+		settings := config.DefaultSettings()
+		settings.Playback.AudioLanguageCheckURL = inference.URL + "/inference"
+		if err := manager.Save(settings); err != nil {
+			t.Fatal(err)
+		}
+		h.SetConfigManager(manager)
+		var offsets []float64
+		h.fullProber = spokenLanguageFixtureProber{run: func(_ context.Context, path string, index int, offset float64) ([]byte, error) {
+			if path != entry.StreamPath || index != 2 {
+				t.Fatal("contract check sampled a different source or container track")
+			}
+			offsets = append(offsets, offset)
+			pcm := make([]byte, audiolanguage.SampleBytes)
+			for i := 0; i < len(pcm); i += 2 {
+				binary.LittleEndian.PutUint16(pcm[i:], 2000)
+			}
+			return pcm, nil
+		}}
+		track := 2
+		request := audioLanguageRequest{SourceVersion: sourceReportVersion(entry), AudioTrackIndex: &track, StartOffset: 590}
+		rec := exercise(t, v, contractCall{method: http.MethodPost,
+			target: "/api/playback/prequeue/" + entry.ID + "/audio-language",
+			vars:   map[string]string{"prequeueID": entry.ID}, body: request,
+			headers: map[string]string{"X-Client-ID": "fixture-device"}}, h.CheckAudioLanguage, http.StatusOK)
+		result := decodeContract[struct {
+			audiolanguage.Result
+			SourceVersion   string `json:"sourceVersion"`
+			AudioTrackIndex int    `json:"audioTrackIndex"`
+		}](t, rec)
+		if result.Status != "likely_mismatch" || result.RequestedLanguage != "deu" || result.DetectedLanguage != "spa" ||
+			result.Samples != 2 || result.SourceVersion != request.SourceVersion || result.AudioTrackIndex != track {
+			t.Fatalf("unexpected selected-audio contract response: %+v", result)
+		}
+		if len(offsets) != 2 || offsets[0] != 545 || offsets[1] != 580 {
+			t.Fatalf("contract samples did not use the bounded windows: %v", offsets)
+		}
+		if registry.MatchFor(*entry.SelectedResult, h.vodReportContext(entry, "fixture-device")) != nil {
+			t.Fatal("language contract check saved a release report")
+		}
+		current, ok := h.store.Get(entry.ID)
+		if !ok || sourceReportVersion(current) != request.SourceVersion || current.Status != playback.PrequeueStatusReady {
+			t.Fatal("language contract check changed the active source")
+		}
 	})
 
 	t.Run("resolve", func(t *testing.T) {
