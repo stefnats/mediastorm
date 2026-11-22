@@ -1159,6 +1159,10 @@
       <select id="releaseReportTrack"></select>
     </div>
     <p id="releaseReportScope" role="status"></p>
+    <div id="releaseReportHistoryRow" hidden>
+      <label><input id="releaseReportResetHistory" type="checkbox"> Reset progress and mark this movie or episode unwatched for this profile</label>
+      <p>This clears its saved position and watched status, including any earlier valid position for this same item. Earlier positions cannot be restored. Other episodes and profiles are unchanged. The current source pauses and stops saving progress; a replacement starts fresh.</p>
+    </div>
     <p id="releaseReportError" role="alert"></p>
     <section id="releaseReplacementReady" hidden aria-labelledby="releaseReplacementTitle">
       <h3 id="releaseReplacementTitle">Prepared alternative</h3>
@@ -1297,6 +1301,8 @@
     let webPlayerDebugSessionId = `web-player-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
     let keepaliveTimer = null;
     let progressTimer = null;
+    const webProgressDiscardedSources = new Set();
+    const webProgressRequests = new Map();
     let lastProgressSentAt = 0;
     let lastProgressPosition = 0;
     let lastKnownPositivePosition = 0;
@@ -4874,6 +4880,7 @@
         position: currentAbsoluteTime(),
         duration: currentDuration(),
         completion: buildProgressPayload(currentDuration(), currentDuration(), true, false, true),
+        progressSource: { profileId: activeProfileId, sourcePath, prequeueId: webPlayerActivePrequeueId },
       };
       try {
         const status = await ensureNextEpisodePrequeueReady();
@@ -4892,7 +4899,7 @@
           await startWebPlayerFromSource({ startOffset: 0, throwOnError: true });
           await waitForWebPlayerUsable();
         }
-        await sendCapturedWebProgress(previous.completion);
+        await sendCapturedWebProgress(previous.completion, previous.progressSource);
         await sendCapturedWebProgress(buildProgressPayload(0, currentDuration(), false, false, false));
         webPlayerActivePrequeueId = status.prequeueId || nextEpisodePrequeue?.prequeueId || '';
         syncPlaybackUrlToHistory();
@@ -4951,9 +4958,9 @@
       });
     }
 
-    function sendCapturedWebProgress(payload) {
-      if (SHARE_MODE || !activeProfileId || !payload) return Promise.resolve(null);
-      return apiCall('/users/' + encodeURIComponent(activeProfileId) + '/history/progress', { method:'POST', body:JSON.stringify(payload) }).catch((error) => {
+    function sendCapturedWebProgress(payload, context = webProgressSourceContext()) {
+      if (SHARE_MODE || !activeProfileId || !payload || context.profileId !== activeProfileId || webProgressDiscardedSources.has(webProgressSourceKey(context))) return Promise.resolve(null);
+      return trackWebProgressRequest(apiCall('/users/' + encodeURIComponent(context.profileId) + '/history/progress', { method:'POST', body:JSON.stringify(payload) }), webProgressSourceKey(context)).catch((error) => {
         console.warn('[web-player] captured progress failed', error);
         return null;
       });
@@ -5022,6 +5029,37 @@
       }
     }
 
+    function webProgressSourceContext() {
+      return { profileId: activeProfileId, sourcePath, prequeueId: webPlayerActivePrequeueId };
+    }
+
+    function webProgressSourceKey(context = webProgressSourceContext()) {
+      return JSON.stringify([context.profileId, context.sourcePath, context.prequeueId]);
+    }
+
+    function trackWebProgressRequest(request, key = webProgressSourceKey()) {
+      let pending = webProgressRequests.get(key);
+      if (!pending) { pending = new Set(); webProgressRequests.set(key, pending); }
+      const tracked = Promise.resolve(request).finally(() => {
+        pending.delete(tracked);
+        if (!pending.size) webProgressRequests.delete(key);
+      });
+      pending.add(tracked);
+      return tracked;
+    }
+
+    async function discardWebPlayerProgress(context) {
+      const key = webProgressSourceKey(context);
+      webProgressDiscardedSources.add(key);
+      if (key === webProgressSourceKey()) {
+        stopProgressTracking();
+        document.getElementById('webPlayer')?.pause();
+      }
+      // Wait for writes already sent before resetting their stored result.
+      // Keeping the discarded source blocked also covers pause/end/pagehide.
+      await Promise.allSettled(Array.from(webProgressRequests.get(key) || []));
+    }
+
     function startProgressTracking() {
       if (WATCH_PARTY_MODE && watchPartyEndMessage) return;
       stopProgressTracking();
@@ -5084,6 +5122,7 @@
     }
 
     function sendWebPlayerProgress(options = {}) {
+      if (webProgressDiscardedSources.has(webProgressSourceKey())) return Promise.resolve(null);
       if (sourcePath.startsWith('recording:')) return Promise.resolve(null);
       // Share-link viewers must not write into the sharer's watch history.
       if (SHARE_MODE) return sendSharePlaybackProgress(options);
@@ -5118,15 +5157,15 @@
         lastProgressPosition = position;
         lastProgressPaused = isPaused;
         lastProgressBuffering = isBuffering;
-        return fetch(apiUrl(endpoint, { appendToken: false }), {
+        return trackWebProgressRequest(fetch(apiUrl(endpoint, { appendToken: false }), {
           credentials: 'same-origin',
           headers: apiAuthHeaders({ 'Content-Type': 'application/json' }),
           ...fetchOptions,
           keepalive: true,
-        }).catch(() => null);
+        })).catch(() => null);
       }
 
-      return apiCall(endpoint, fetchOptions).then((result) => {
+      return trackWebProgressRequest(apiCall(endpoint, fetchOptions)).then((result) => {
         if (reportProfile !== activeProfileId || reportSourceKey !== webPostPlayKey()) return result;
         lastProgressSentAt = Date.now();
         lastProgressPosition = position;

@@ -7,6 +7,7 @@ let releaseReportBusy = false;
 let lastReleaseReportId = '';
 let lastReleaseReportProfile = '';
 let lastReleaseReportGeneration = 0;
+let lastReleaseReportHistoryReset = false;
 const releaseReportRequestTimeoutMs = 15000;
 
 function releaseReportLanguageName(code) {
@@ -78,6 +79,7 @@ function refreshReleaseUndo() {
 function rememberReleaseReport(action, response) {
   if (!response?.report?.id || action.state.profileId !== activeProfileId || action.generation < lastReleaseReportGeneration) return;
   lastReleaseReportId = response.report.id;
+  lastReleaseReportHistoryReset = Boolean(response.historyReset);
   lastReleaseReportProfile = action.state.profileId;
   lastReleaseReportGeneration = action.generation;
   refreshReleaseUndo();
@@ -95,6 +97,7 @@ async function openReleaseReport() {
   const dialog = document.getElementById('releaseReportDialog');
   document.getElementById('releaseReportError').textContent = '';
   document.getElementById('releaseReportReason').value = '';
+  document.getElementById('releaseReportResetHistory').checked = false;
   document.getElementById('releaseReplacementReady').hidden = true;
   document.getElementById('releaseReplacementResume').value = 'rewind';
   dialog.showModal();
@@ -144,6 +147,11 @@ function updateReleaseReportScope() {
   };
   const locked = releaseReportBusy || Boolean(releaseReportAction);
   document.getElementById('releaseReportTrackRow').hidden = reason !== 'audio_problem';
+  const wrongContent = ['wrong_title', 'wrong_episode'].includes(reason);
+  const resetHistory = document.getElementById('releaseReportResetHistory');
+  document.getElementById('releaseReportHistoryRow').hidden = !wrongContent;
+  resetHistory.disabled = locked || !state?.canResetHistory || !wrongContent;
+  if (!wrongContent) resetHistory.checked = false;
   document.getElementById('releaseReportScope').textContent = (releaseReportAction && !releaseReportAction.reporting ?
     'Manual source change: this preparation creates no permanent report.' : (messages[reason] || 'A manual source change does not create a permanent report.')) +
     (WATCH_PARTY_MODE ? ' Shared playback supports reporting only.' : '');
@@ -167,19 +175,31 @@ async function performReleaseAction(reporting, retry) {
   if (!releaseReportContextMatches(state)) { invalidateReleaseSelection(); return; }
   const reason = document.getElementById('releaseReportReason').value;
   if (reporting && !reason) return;
-  const action = { state, reason, reporting, generation: ++releaseReportGeneration, replacementId: '', canceled: false, ready: null, transferred: false, responseReceived: false, deferredCleanup: new Set() };
+  const resetHistory = reporting && ['wrong_title', 'wrong_episode'].includes(reason) && Boolean(state.canResetHistory) && document.getElementById('releaseReportResetHistory').checked;
+  const action = { state, reason, reporting, resetHistory, generation: ++releaseReportGeneration, replacementId: '', canceled: false, ready: null, transferred: false, responseReceived: false, deferredCleanup: new Set() };
   releaseReportAction = action;
   setReleaseReportBusy(true);
   document.getElementById('releaseReportError').textContent = '';
   action.monitor = setInterval(() => {
     if (!action.transferred && action === releaseReportAction && !releaseReportContextMatches(state)) invalidateReleaseSelection();
   }, 250);
+  if (resetHistory) {
+    try {
+      await releaseReportWait(discardWebPlayerProgress(state));
+    } catch {
+      if (releaseActionCurrent(action)) document.getElementById('releaseReportError').textContent = 'Could not finish earlier progress updates. No report or history reset was sent. The current source remains paused without saving progress; try again.';
+      cancelReleaseAction(action);
+      setReleaseReportBusy(false);
+      return;
+    }
+    if (!releaseActionCurrent(action)) { cancelReleaseAction(action); setReleaseReportBusy(false); return; }
+  }
   const request = apiCall('/playback/prequeue/' + encodeURIComponent(state.prequeueId) + (reporting ? '/report' : '/retry'), {
     method: 'POST',
     body: JSON.stringify({
       ...(reporting ? { reason, audioLanguage: state.audioLanguage || '' } : {}), sourceVersion: state.sourceVersion,
       ...(reporting && reason === 'audio_problem' ? { audioTrackIndex: Number(document.getElementById('releaseReportTrack').value) } : {}),
-      retry, startOffset: 0, skipHLS: true, clientId: CLIENT_ID,
+      retry, ...(resetHistory ? { resetHistory: true } : {}), startOffset: 0, skipHLS: true, clientId: CLIENT_ID,
     }),
   });
   // Observe this exact action, including responses received after cancellation.
@@ -195,9 +215,14 @@ async function performReleaseAction(reporting, retry) {
   try {
     const response = await releaseReportWait(request);
     if (!releaseActionCurrent(action)) { cancelReleaseAction(action); return; }
+    if (response.historyResetError || resetHistory && !response.historyReset) {
+      cancelReleaseAction(action);
+      document.getElementById('releaseReportError').textContent = 'Report saved, but the history reset could not be confirmed. Check history and try the reset again. The old source remains paused without saving progress.';
+      return;
+    }
     if (!retry) {
       cancelReleaseAction(action);
-      document.getElementById('releaseReportError').textContent = 'Report saved. Playback can continue; the exclusion applies to future choices.';
+      document.getElementById('releaseReportError').textContent = resetHistory ? 'Report saved. This item is now unwatched and its saved position is cleared. The old source remains paused without saving progress.' : 'Report saved. Playback can continue; the exclusion applies to future choices.';
       return;
     }
     if (!action.replacementId) throw new Error('No alternative preparation was returned.');
@@ -316,7 +341,7 @@ async function undoReleaseReport() {
   try {
     await releaseReportWait(apiCall('/playback/bad-streams/' + encodeURIComponent(id) + '?profileId=' + encodeURIComponent(profile), { method: 'DELETE' }));
     if (id === lastReleaseReportId && profile === lastReleaseReportProfile) lastReleaseReportId = '';
-    if (profile === activeProfileId && generation === releaseReportGeneration) document.getElementById('releaseReportError').textContent = 'Report removed.';
+    if (profile === activeProfileId && generation === releaseReportGeneration) document.getElementById('releaseReportError').textContent = lastReleaseReportHistoryReset ? 'Report removed. The history reset is not undone.' : 'Report removed.';
   } catch { if (profile === activeProfileId && generation === releaseReportGeneration) document.getElementById('releaseReportError').textContent = 'Could not remove the report.'; }
   finally { if (generation === releaseReportGeneration) setReleaseReportBusy(false); else refreshReleaseUndo(); }
 }

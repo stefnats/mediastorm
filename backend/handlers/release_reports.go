@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"os"
 	"strings"
@@ -15,6 +16,7 @@ import (
 	"novastream/internal/profileaccess"
 	"novastream/models"
 	"novastream/services/badstreams"
+	"novastream/services/history"
 	"novastream/services/kidsvod"
 	"novastream/services/playback"
 	"novastream/utils/language"
@@ -26,6 +28,7 @@ type releaseReportRequest struct {
 	SourceVersion   string  `json:"sourceVersion"`
 	AudioTrackIndex *int    `json:"audioTrackIndex,omitempty"`
 	Retry           bool    `json:"retry"`
+	ResetHistory    bool    `json:"resetHistory,omitempty"`
 	StartOffset     float64 `json:"startOffset,omitempty"`
 	SkipHLS         bool    `json:"skipHLS,omitempty"`
 	ClientID        string  `json:"clientId,omitempty"`
@@ -122,7 +125,7 @@ func (h *PrequeueHandler) ReleaseReportOptions(w http.ResponseWriter, r *http.Re
 		return
 	}
 	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(map[string]any{"sourceVersion": sourceReportVersion(entry), "releaseName": entry.SelectedResult.Title, "audioLanguage": ctx.AudioLanguage, "audioTracks": entry.AudioTracks, "selectedAudioTrack": entry.SelectedAudioTrack, "canShare": h.canShareReleaseReport(r, entry.UserID), "hasEpisode": entry.TargetEpisode != nil})
+	_ = json.NewEncoder(w).Encode(map[string]any{"sourceVersion": sourceReportVersion(entry), "releaseName": entry.SelectedResult.Title, "audioLanguage": ctx.AudioLanguage, "audioTracks": entry.AudioTracks, "selectedAudioTrack": entry.SelectedAudioTrack, "canShare": h.canShareReleaseReport(r, entry.UserID), "hasEpisode": entry.TargetEpisode != nil, "canResetHistory": h.historySvc != nil})
 }
 
 func (h *PrequeueHandler) ReportRelease(w http.ResponseWriter, r *http.Request) {
@@ -145,6 +148,14 @@ func (h *PrequeueHandler) releaseAction(w http.ResponseWriter, r *http.Request, 
 	decoder.DisallowUnknownFields()
 	if err := decoder.Decode(&req); err != nil {
 		http.Error(w, "invalid release report", http.StatusBadRequest)
+		return
+	}
+	if req.ResetHistory && (!reporting || (req.Reason != "wrong_title" && req.Reason != "wrong_episode")) {
+		http.Error(w, "history reset requires a wrong-content report", http.StatusBadRequest)
+		return
+	}
+	if req.ResetHistory && h.historySvc == nil {
+		http.Error(w, "history reset unavailable", http.StatusServiceUnavailable)
 		return
 	}
 	if req.SourceVersion == "" || req.SourceVersion != sourceReportVersion(entry) {
@@ -209,6 +220,21 @@ func (h *PrequeueHandler) releaseAction(w http.ResponseWriter, r *http.Request, 
 			return
 		}
 		response["report"] = report
+		if req.ResetHistory {
+			if err := h.resetReportedHistory(entry); err != nil {
+				// The report is already saved. Keep this partial outcome explicit,
+				// and do not prepare a replacement until the reset is confirmed.
+				response["historyReset"] = false
+				response["historyResetError"] = "history_reset_failed"
+				if !h.vodBoundary.recheckHTTP(w, r, actionOwner, operation) {
+					return
+				}
+				w.Header().Set("Content-Type", "application/json")
+				_ = json.NewEncoder(w).Encode(response)
+				return
+			}
+			response["historyReset"] = true
+		}
 	} else {
 		if req.Reason != "" {
 			http.Error(w, "a manual retry does not submit a report", http.StatusBadRequest)
@@ -326,4 +352,29 @@ func (h *PrequeueHandler) vodReportContext(entry *playback.PrequeueEntry, client
 		return h.reportContextForPrequeue(entry.ID, entry.UserID, client, entry.TargetEpisode)
 	}
 	return reportContext(h.trackPreferenceResolver(), entry.UserID, client, entry.TitleID, entry.TargetEpisode)
+}
+
+// resetReportedHistory reuses manual unwatch semantics for exactly the requested
+// movie or episode. There is no prior-position snapshot to roll back to.
+func (h *PrequeueHandler) resetReportedHistory(entry *playback.PrequeueEntry) error {
+	if strings.TrimSpace(entry.TitleID) == "" || entry.TargetEpisode == nil && entry.MediaType != "movie" {
+		return fmt.Errorf("a movie or specific episode is required for history reset")
+	}
+	unwatched := false
+	update := models.WatchHistoryUpdate{MediaType: "movie", ItemID: entry.TitleID, Name: entry.TitleName, Year: entry.Year, Watched: &unwatched}
+	if episode := entry.TargetEpisode; episode != nil {
+		update.MediaType = "episode"
+		update.SeriesID, update.SeriesName = entry.TitleID, entry.TitleName
+		update.SeasonNumber, update.EpisodeNumber = episode.SeasonNumber, episode.EpisodeNumber
+		update.Name = episode.Title
+		update.ItemID = episode.ItemID
+		if update.ItemID == "" {
+			update.ItemID = history.EpisodeItemID(entry.TitleID, nil, episode.SeasonNumber, episode.EpisodeNumber)
+		}
+		if episode.TvdbID != "" {
+			update.ExternalIDs = map[string]string{"episodeTvdb": episode.TvdbID}
+		}
+	}
+	_, err := h.historySvc.UpdateWatchHistory(entry.UserID, update)
+	return err
 }
