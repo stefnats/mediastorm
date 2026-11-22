@@ -47,7 +47,8 @@ func (s *Service) FindPlaybackCandidates(ctx context.Context, query models.Local
 			if !fallbackIdentityMatches(item, query) {
 				continue
 			}
-			if libraryType == models.LocalMediaLibraryTypeShow && (item.SeasonNumber != episode.SeasonNumber || item.EpisodeNumber != episode.EpisodeNumber) {
+			s.matchDateEpisode(ctx, &item)
+			if libraryType == models.LocalMediaLibraryTypeShow && (!dateEpisodeMatchesOrdering(item, episode) || item.SeasonNumber != episode.SeasonNumber || item.EpisodeNumber != episode.EpisodeNumber) {
 				continue
 			}
 			candidates = append(candidates, item)

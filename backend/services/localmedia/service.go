@@ -1373,6 +1373,11 @@ func (s *Service) enrichEpisodeMetadata(ctx context.Context, items []models.Loca
 	seriesItems := make(map[seriesKey][]*models.LocalMediaItem)
 	for i := range items {
 		item := &items[i]
+		// Date-only matches use the existing catalogue, not another details
+		// fetch merely because a library page is being displayed.
+		if _, _, dated := localEpisodeAirDate(item.FileName); dated && item.MatchStatus != models.LocalMediaMatchStatusManual {
+			continue
+		}
 		if item.LibraryType != models.LocalMediaLibraryTypeShow || item.SeasonNumber <= 0 || item.EpisodeNumber <= 0 {
 			continue
 		}
@@ -1471,6 +1476,7 @@ func (s *Service) GetItem(ctx context.Context, itemID string) (*models.LocalMedi
 	copy := *item
 	copy.FilePath = cleanFilePath
 	hydrateLocalMediaItemExternalIDs(&copy)
+	s.matchDateEpisode(ctx, &copy)
 	return &copy, nil
 }
 
@@ -2034,6 +2040,7 @@ func (s *Service) buildItem(ctx context.Context, library models.LocalMediaLibrar
 		existing.LastSeenScanID = scanID
 		existing.LastScannedAt = &now
 		existing.UpdatedAt = now
+		s.matchDateEpisode(ctx, &existing)
 		return existing, true, nil
 	}
 
@@ -2091,6 +2098,7 @@ func (s *Service) buildItem(ctx context.Context, library models.LocalMediaLibrar
 		}
 	}
 	item.ModifiedAt = &modifiedAt
+	s.matchDateEpisode(ctx, &item)
 	return item, false, nil
 }
 
@@ -2210,13 +2218,14 @@ func (s *Service) detectTitlesForFiles(filePaths []string, libraryType models.Lo
 }
 
 type detectedTitle struct {
-	title   string
-	year    int
-	season  int
-	episode int
-	imdbID  string
-	tmdbID  int64
-	tvdbID  int64
+	airedDate string
+	title     string
+	year      int
+	season    int
+	episode   int
+	imdbID    string
+	tmdbID    int64
+	tvdbID    int64
 }
 
 type localMediaMatch struct {
@@ -2253,6 +2262,13 @@ func (s *Service) matchMetadata(ctx context.Context, libraryType models.LocalMed
 		}
 	}
 
+	if detected.airedDate != "" {
+		for _, result := range results {
+			if result.Title.ID != best.Title.ID && metadataConfidence(detected, result) >= bestScore {
+				return localMediaMatch{status: models.LocalMediaMatchStatusLowConfidence}
+			}
+		}
+	}
 	match := localMediaMatch{
 		confidence: roundConfidence(bestScore),
 		titleID:    best.Title.ID,
@@ -2529,6 +2545,25 @@ const (
 )
 
 func detectTitle(libraryType models.LocalMediaLibraryType, fileName string, parsed *parsett.ParsedTitle) detectedTitle {
+	if libraryType == models.LocalMediaLibraryTypeShow && (parsed == nil || len(parsed.Episodes) == 0) {
+		if date, prefix, ok := localEpisodeAirDate(fileName); ok && prefix != "" {
+			result := detectTitle(libraryType, prefix+".mkv", nil)
+			result.airedDate = date
+			result.imdbID, result.tmdbID, result.tvdbID = extractExternalIDs(fileName)
+			if parsed != nil {
+				if parsed.IMDBID != "" {
+					result.imdbID = parsed.IMDBID
+				}
+				if parsed.TMDBID > 0 {
+					result.tmdbID = parsed.TMDBID
+				}
+				if parsed.TVDBID > 0 {
+					result.tvdbID = parsed.TVDBID
+				}
+			}
+			return result
+		}
+	}
 	if parsed != nil {
 		result := detectedTitle{
 			title:  strings.TrimSpace(parsed.Title),
