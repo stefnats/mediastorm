@@ -275,8 +275,11 @@ func (p *streamPool) activatePreparedMedia() error {
 	return nil
 }
 func (p *streamPool) beginOpen(caller context.Context) (context.Context, func(), error) {
-	if p == nil || caller == nil || caller.Err() != nil {
+	if p == nil || caller == nil {
 		return nil, nil, errPreparedMediaLifetime
+	}
+	if err := caller.Err(); err != nil {
+		return nil, nil, err
 	}
 	p.mu.Lock()
 	if p.closed || p.prepared && !p.active || p.runtime == nil || p.runtime.Err() != nil {

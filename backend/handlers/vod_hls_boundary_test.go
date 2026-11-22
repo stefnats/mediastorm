@@ -279,6 +279,26 @@ func TestHLSBoundaryAlreadyCancelledCreatorsAllocateNothing(t *testing.T) {
 	}
 }
 
+func TestHLSBoundaryExpiredLiveCreatorAllocatesNothing(t *testing.T) {
+	m := newHLSLifecycleManager(t)
+	ctx, cancel := context.WithDeadline(context.Background(), time.Now().Add(-time.Second))
+	defer cancel()
+	session, err := m.CreateLiveSession(ctx, "synthetic", "m3u", "synthetic", "profile", "", "", "", LiveTuningSettings{}, false)
+	if !errors.Is(err, context.DeadlineExceeded) || session != nil {
+		t.Fatalf("expired creator returned session=%v error=%v", session, err)
+	}
+	entries, err := os.ReadDir(m.baseDir)
+	if err != nil || len(entries) != 0 {
+		t.Fatal("expired creator allocated directory")
+	}
+	m.mu.RLock()
+	count := len(m.sessions)
+	m.mu.RUnlock()
+	if count != 0 {
+		t.Fatal("expired creator published a session")
+	}
+}
+
 func TestHLSBoundaryRevokedRuntimeRemainsOwnedCleanupOnly(t *testing.T) {
 	f := newRootHLSSessionFixture(t, vodAccountActive, false)
 	revokeLiveSession(f.session)

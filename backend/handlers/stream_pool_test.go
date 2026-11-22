@@ -948,10 +948,15 @@ func TestStreamPoolCreatesUnrelatedPathsConcurrently(t *testing.T) {
 
 func TestStreamPoolCanceledWaiterEscapesPathCreationGate(t *testing.T) {
 	pool := newStreamPool(nil)
-	defer pool.close()
+	t.Cleanup(pool.close)
 	provider := newBlockingOpenProvider()
+	var releaseOnce sync.Once
+	release := func() { releaseOnce.Do(func() { close(provider.release) }) }
 	firstResult := make(chan error, 1)
+	firstDone := make(chan struct{})
+	t.Cleanup(func() { release(); <-firstDone })
 	go func() {
+		defer close(firstDone)
 		_, err := pool.getOrCreate("/test/cancel-wait.mp4", 0, provider)
 		firstResult <- err
 	}()
@@ -959,13 +964,15 @@ func TestStreamPoolCanceledWaiterEscapesPathCreationGate(t *testing.T) {
 	select {
 	case <-provider.started:
 	case <-time.After(time.Second):
-		close(provider.release)
 		t.Fatal("first provider open did not start")
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
 	secondResult := make(chan error, 1)
+	secondDone := make(chan struct{})
+	t.Cleanup(func() { cancel(); release(); <-secondDone })
 	go func() {
+		defer close(secondDone)
 		_, _, err := pool.acquire(ctx, "/test/cancel-wait.mp4", 0, provider)
 		secondResult <- err
 	}()
@@ -977,13 +984,46 @@ func TestStreamPoolCanceledWaiterEscapesPathCreationGate(t *testing.T) {
 			t.Fatalf("waiting acquire error = %v, want context.Canceled", err)
 		}
 	case <-time.After(time.Second):
-		close(provider.release)
 		t.Fatal("canceled waiter remained blocked on creation gate")
 	}
 
-	close(provider.release)
+	release()
 	if err := <-firstResult; err != nil {
 		t.Fatalf("first getOrCreate: %v", err)
+	}
+}
+
+func TestStreamPoolAlreadyCanceledAcquireAllocatesNothing(t *testing.T) {
+	for _, kind := range []string{"canceled", "expired"} {
+		t.Run(kind, func(t *testing.T) {
+			pool := newStreamPool(nil)
+			t.Cleanup(pool.close)
+			provider := newMockStreamProvider(100*1024*1024, nil)
+			ctx, cancel := context.WithCancel(context.Background())
+			want := error(context.Canceled)
+			if kind == "expired" {
+				cancel()
+				ctx, cancel = context.WithDeadline(context.Background(), time.Now().Add(-time.Second))
+				want = context.DeadlineExceeded
+			}
+			cancel()
+			slot, readerID, err := pool.acquire(ctx, "/test/already-canceled.mp4", 0, provider)
+			if !errors.Is(err, want) || slot != nil || readerID != 0 {
+				t.Fatalf("acquire returned slot=%v reader=%d error=%v, want %v", slot, readerID, err, want)
+			}
+			provider.mu.Lock()
+			calls := provider.calls
+			provider.mu.Unlock()
+			pool.mu.RLock()
+			files := len(pool.files)
+			pool.mu.RUnlock()
+			pool.creationMu.Lock()
+			gates := len(pool.creationGates)
+			pool.creationMu.Unlock()
+			if calls != 0 || files != 0 || gates != 0 {
+				t.Fatal("already canceled acquire opened a provider or retained pool work")
+			}
+		})
 	}
 }
 

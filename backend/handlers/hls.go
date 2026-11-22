@@ -2915,8 +2915,11 @@ func (m *HLSManager) CreateLiveSession(ctx context.Context, liveURL, provider, b
 		return nil, errVODOwner
 	}
 
-	if ctx == nil || ctx.Err() != nil {
+	if ctx == nil {
 		return nil, errOrdinaryHLSClosed
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
 	}
 	ordinary, err := m.ordinaryControl().reserve(ctx)
 	if err != nil {
