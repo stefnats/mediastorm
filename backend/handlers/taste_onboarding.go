@@ -192,7 +192,16 @@ func (h *MetadataHandler) tasteMediaTypes(profile string) []string {
 	if !user.IsKidsProfile {
 		return []string{"movie", "series"}
 	}
-	if user.KidsMode != "rating" {
+	if !kids.IsRatingMode(user.KidsMode) {
+		return types
+	}
+	if user.KidsMode == kids.GermanMetadataMode {
+		if kids.ValidGermanAge(user.KidsMaxMovieRating) {
+			types = append(types, "movie")
+		}
+		if kids.ValidGermanAge(user.KidsMaxTVRating) {
+			types = append(types, "series")
+		}
 		return types
 	}
 	movie, tv, limited := h.kidsRatingLimits(profile)

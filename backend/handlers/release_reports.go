@@ -244,6 +244,17 @@ func (h *PrequeueHandler) releaseAction(w http.ResponseWriter, r *http.Request, 
 	}
 
 	if req.Retry {
+		if err := checkGermanProfileTitle(r.Context(), h.users, h.germanMetadata, entry.UserID, entry.TitleID, entry.MediaType); err != nil {
+			if reporting {
+				// The report was saved; its separate replacement was not started.
+				response["retryError"] = err.Error()
+				w.Header().Set("Content-Type", "application/json")
+				_ = json.NewEncoder(w).Encode(response)
+			} else {
+				writeGermanAgeError(w, err)
+			}
+			return
+		}
 		owner := actionOwner
 		if !h.vodBoundary.selectClient(w, owner, client) || !h.vodBoundary.recheckHTTP(w, r, owner, vodDemand) {
 			return

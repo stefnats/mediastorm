@@ -3607,8 +3607,12 @@ paths:
       operationId: setKidsModeWithParentConfirmation
       summary: Save only the existing kids restriction mode
       description: |
-        The explicit mode is exactly empty, rating or content_list. This changes
-        neither isKidsProfile, account/source rights nor the existing default.
+        The explicit mode is exactly empty, rating, rating_de or content_list.
+        rating_de uses retained German TMDB movie/series metadata and separate
+        canonical age limits 0, 6, 12, 16 or 18. Missing, stale or conflicting
+        metadata is blocked. A series rating does not verify individual episodes
+        or official FSK editions. Confirm the mode before saving its age limits.
+        This changes neither isKidsProfile, account/source rights nor the existing default.
         PostgreSQL mode requires a fresh current account password even for a
         genuine master. Existing profile ownership and PIN gates still apply.
 
@@ -3669,8 +3673,12 @@ paths:
       operationId: setAdminKidsModeWithParentConfirmation
       summary: Save only the existing kids restriction mode
       description: |
-        The explicit mode is exactly empty, rating or content_list. This changes
-        neither isKidsProfile, account/source rights nor the existing default.
+        The explicit mode is exactly empty, rating, rating_de or content_list.
+        rating_de uses retained German TMDB movie/series metadata and separate
+        canonical age limits 0, 6, 12, 16 or 18. Missing, stale or conflicting
+        metadata is blocked. A series rating does not verify individual episodes
+        or official FSK editions. Confirm the mode before saving its age limits.
+        This changes neither isKidsProfile, account/source rights nor the existing default.
         PostgreSQL mode requires a fresh current account password even for a
         genuine master. Existing profile ownership and PIN gates still apply.
 
@@ -3731,8 +3739,12 @@ paths:
       operationId: setAccountKidsModeWithParentConfirmation
       summary: Save only the existing kids restriction mode
       description: |
-        The explicit mode is exactly empty, rating or content_list. This changes
-        neither isKidsProfile, account/source rights nor the existing default.
+        The explicit mode is exactly empty, rating, rating_de or content_list.
+        rating_de uses retained German TMDB movie/series metadata and separate
+        canonical age limits 0, 6, 12, 16 or 18. Missing, stale or conflicting
+        metadata is blocked. A series rating does not verify individual episodes
+        or official FSK editions. Confirm the mode before saving its age limits.
+        This changes neither isKidsProfile, account/source rights nor the existing default.
         PostgreSQL mode requires a fresh current account password even for a
         genuine master. Existing profile ownership and PIN gates still apply.
 
@@ -7609,14 +7621,14 @@ components:
       type: object
       nullable: true
       additionalProperties: true
-      description: Case-insensitive rating field; real decoder rejects unknown fields. Missing/null initially selects empty; scalar duplicate null behavior is preserved.
+      description: Case-insensitive rating field; real decoder rejects unknown fields. Missing/null initially selects empty; scalar duplicate null behavior is preserved. In rating_de a saved value must be canonical 0, 6, 12, 16 or 18; legacy US strings are not converted.
       properties:
         rating: {type: string, nullable: true}
     ParentRatingPairRequest:
       type: object
       minProperties: 2
       additionalProperties: true
-      description: Both final decoded movieRating/tvRating strings required, case-insensitively. Empty allowed; final null rejected. Schema allows field-name casing; real decoder rejects unknown fields.
+      description: Both final decoded movieRating/tvRating strings required, case-insensitively. Empty allowed in legacy modes; final null rejected. In rating_de both values must be canonical 0, 6, 12, 16 or 18; missing or invalid separate limits block that media type without generic fallback. Schema allows field-name casing; real decoder rejects unknown fields.
       properties:
         movieRating: {type: string}
         tvRating: {type: string}
@@ -7628,7 +7640,7 @@ components:
       properties:
         mode:
           type: string
-          enum: ['', rating, content_list]
+          enum: ['', rating, rating_de, content_list]
     ParentKidsFlagRequest:
       type: object
       nullable: true
@@ -7743,7 +7755,7 @@ components:
           enum: [shared, shared_anonymous, not_shared]
         kidsMode:
           type: string
-          description: '`rating`, `content_list`, or empty (disabled).'
+          description: '`rating` (legacy US), `rating_de` (German TMDB movie/series metadata), `content_list`, or empty (disabled). German series metadata is not individual-episode or official edition proof.'
         kidsMaxRating:
           type: string
           deprecated: true

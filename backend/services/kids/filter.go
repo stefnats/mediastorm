@@ -99,7 +99,7 @@ func FilterTrendingByRatings(items []models.TrendingItem, maxMovieRating, maxTVR
 			result = append(result, item)
 			continue
 		}
-		if IsRatingAllowed(item.Title.Certification, maxRating, item.Title.MediaType) {
+		if IsTitleRatingAllowed(item.Title, maxRating) {
 			result = append(result, item)
 		}
 	}
@@ -124,7 +124,7 @@ func FilterTitlesByRatings(titles []models.Title, maxMovieRating, maxTVRating st
 			result = append(result, title)
 			continue
 		}
-		if IsRatingAllowed(title.Certification, maxRating, title.MediaType) {
+		if IsTitleRatingAllowed(title, maxRating) {
 			result = append(result, title)
 		}
 	}
@@ -139,7 +139,7 @@ func FilterTitlesByRating(titles []models.Title, maxRating string) []models.Titl
 
 	result := make([]models.Title, 0, len(titles))
 	for _, title := range titles {
-		if IsRatingAllowed(title.Certification, maxRating, title.MediaType) {
+		if IsTitleRatingAllowed(title, maxRating) {
 			result = append(result, title)
 		}
 	}
@@ -178,7 +178,7 @@ func GetDefaultRatingForMode(mode string) string {
 // ValidateKidsMode checks if a mode string is valid.
 func ValidateKidsMode(mode string) bool {
 	switch mode {
-	case "", "rating", "content_list":
+	case "", "rating", GermanMetadataMode, "content_list":
 		return true
 	default:
 		return false
@@ -206,7 +206,7 @@ func FilterSearchByRatings(results []models.SearchResult, maxMovieRating, maxTVR
 			filtered = append(filtered, r)
 			continue
 		}
-		if IsRatingAllowed(r.Title.Certification, maxRating, r.Title.MediaType) {
+		if IsTitleRatingAllowed(r.Title, maxRating) {
 			filtered = append(filtered, r)
 		}
 	}
@@ -244,7 +244,7 @@ func IsLibraryGroupAllowed(group models.LocalMediaItemGroup, maxMovieRating, max
 	if strings.TrimSpace(maxRating) == "" {
 		return true
 	}
-	return IsRatingAllowed(group.Certification, maxRating, mediaType)
+	return IsTitleRatingAllowed(models.Title{MediaType: mediaType, TMDBID: group.TMDBID, Certification: group.Certification, CertificationEvidence: group.CertificationEvidence}, maxRating)
 }
 
 // ValidateRating checks if a rating string is valid (known MPAA or TV rating).

@@ -49,8 +49,8 @@ func decodeParentMode(w http.ResponseWriter, r *http.Request) (string, error) {
 	if err = decoder.Decode(&trailing); !errors.Is(err, io.EOF) {
 		return "", errors.New("unexpected trailing JSON")
 	}
-	if !found || mode != "" && mode != "rating" && mode != "content_list" {
-		return "", errors.New("invalid mode, must be 'rating', 'content_list', or empty")
+	if !found || mode != "" && mode != "rating" && mode != "rating_de" && mode != "content_list" {
+		return "", errors.New("invalid mode, must be 'rating', 'rating_de', 'content_list', or empty")
 	}
 	return mode, nil
 }

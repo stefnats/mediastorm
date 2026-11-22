@@ -19,6 +19,7 @@ import (
 
 	"novastream/internal/auth"
 	"novastream/models"
+	"novastream/services/kids"
 )
 
 var (
@@ -492,6 +493,19 @@ func (ds *DataStore) commitParentRating(kind parentRatingAction, i *ParentRating
 	}
 	if !sameParentModeTuple(current, s.tuple) {
 		return empty, ErrParentRatingChanged
+	}
+	var selected struct {
+		Mode string `json:"kids_mode"`
+	}
+	if json.Unmarshal(current.profile.raw, &selected) != nil {
+		return empty, ErrParentRatingUnavailable
+	}
+	if selected.Mode == kids.GermanMetadataMode && kind >= parentRatingGeneric && kind <= parentRatingPair {
+		for _, value := range s.desired {
+			if !kids.ValidGermanAge(value) {
+				return empty, ErrParentRatingPayload
+			}
+		}
 	}
 	var regional *models.RegionalChildPolicy
 	if kind == parentRatingRegional {

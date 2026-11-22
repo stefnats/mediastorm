@@ -103,7 +103,7 @@ func (h *MetadataHandler) RecheckSource(w http.ResponseWriter, r *http.Request) 
 				if title.MediaType == "movie" {
 					limit = movie
 				}
-				if user.KidsMode != "rating" || !limited || limit == "" || !kids.IsRatingAllowed(title.Certification, limit, title.MediaType) {
+				if !kids.IsRatingMode(user.KidsMode) || !limited || limit == "" || !kids.IsTitleRatingAllowed(title, limit) {
 					http.NotFound(w, r)
 					return
 				}

@@ -319,7 +319,7 @@ func (s *Server) trendingTitles(ctx context.Context, profile models.User, mediaT
 	if err != nil {
 		return nil
 	}
-	if profile.IsKidsProfile {
+	if profile.IsKidsProfile && profile.KidsMode != kids.GermanMetadataMode {
 		items = append([]models.TrendingItem(nil), items...)
 		s.deps.Metadata.EnrichTrendingCertifications(ctx, items)
 	}
@@ -340,7 +340,7 @@ func (s *Server) searchTitles(ctx context.Context, profile models.User, term, me
 	if err != nil {
 		return nil
 	}
-	if profile.IsKidsProfile {
+	if profile.IsKidsProfile && profile.KidsMode != kids.GermanMetadataMode {
 		s.deps.Metadata.EnrichSearchCertifications(ctx, results)
 	}
 	out := make([]titleInfo, 0, len(results))
@@ -366,6 +366,28 @@ func isCuratedKidsProfile(profile models.User) bool {
 // filterForProfile applies kids-profile rating limits with the main app's
 // rules (services/kids): titles without a known certification are hidden.
 func (s *Server) filterForProfile(ctx context.Context, profile models.User, titles []titleInfo) []titleInfo {
+	if profile.IsKidsProfile && profile.KidsMode == kids.GermanMetadataMode {
+		movie, series, _ := kids.RatingLimits(profile)
+		lookup := make([]models.Title, len(titles))
+		for i, t := range titles {
+			id, _ := strconv.ParseInt(t.ExternalIDs["tmdb"], 10, 64)
+			lookup[i] = models.Title{ID: t.ID, MediaType: t.MediaType, TMDBID: id, CertificationEvidence: models.CopyCertificationEvidence(t.CertificationEvidence)}
+		}
+		if cached, ok := s.deps.Metadata.(interface{ EnrichCachedTitleCertifications([]models.Title) }); ok {
+			cached.EnrichCachedTitleCertifications(lookup)
+		}
+		out := titles[:0:0]
+		for i, t := range titles {
+			limit := movie
+			if t.MediaType == "series" {
+				limit = series
+			}
+			if kids.IsTitleRatingAllowed(lookup[i], limit) {
+				out = append(out, t)
+			}
+		}
+		return out
+	}
 	if !profile.IsKidsProfile || profile.KidsMode != "rating" {
 		return titles
 	}

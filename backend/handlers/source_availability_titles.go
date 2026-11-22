@@ -90,7 +90,7 @@ func (h *MetadataHandler) TitleSourceHints(w http.ResponseWriter, r *http.Reques
 	if len(body.Titles) > 0 && h.UsersService != nil {
 		if user, exists := h.UsersService.Get(profile); exists && user.IsKidsProfile {
 			movieRating, tvRating, limited := h.kidsRatingLimits(profile)
-			if user.KidsMode != "rating" || !limited {
+			if !kids.IsRatingMode(user.KidsMode) || !limited {
 				http.NotFound(w, r)
 				return
 			}
@@ -99,7 +99,7 @@ func (h *MetadataHandler) TitleSourceHints(w http.ResponseWriter, r *http.Reques
 				if title.MediaType == "movie" {
 					maxRating = movieRating
 				}
-				if maxRating == "" || !kids.IsRatingAllowed(title.Certification, maxRating, title.MediaType) {
+				if maxRating == "" || !kids.IsTitleRatingAllowed(title, maxRating) {
 					http.NotFound(w, r)
 					return
 				}

@@ -241,6 +241,17 @@ func (h *MetadataHandler) writePersonalizedRecommendations(
 	response.Items = append(make([]models.TrendingItem, 0, len(response.Items)), response.Items...)
 	response.Movies = append(make([]models.TrendingItem, 0, len(response.Movies)), response.Movies...)
 	response.Series = append(make([]models.TrendingItem, 0, len(response.Series)), response.Series...)
+	if h.germanProfile(userID) {
+		movie, series, _ := h.kidsRatingLimits(userID)
+		filter := func(items []models.TrendingItem) []models.TrendingItem {
+			h.enrichKidsTrending(r.Context(), userID, service, items)
+			return kids.FilterTrendingByRatings(items, movie, series)
+		}
+		response.Items = filter(response.Items)
+		response.Movies = filter(response.Movies)
+		response.Series = filter(response.Series)
+		response.Total = len(response.Items)
+	}
 	deferArtwork := parseShelfLoadOptions(r).DeferArtwork
 	enrichPersonalizedArtwork(r.Context(), response.Items, service, deferArtwork)
 	enrichPersonalizedArtwork(r.Context(), response.Movies, service, true)
@@ -404,15 +415,10 @@ func (h *MetadataHandler) personalizedKidsRatingFilter(userID string) personaliz
 	}
 
 	user, ok := h.UsersService.Get(userID)
-	if !ok || !user.IsKidsProfile || user.KidsMode != "rating" {
+	if !ok || !user.IsKidsProfile || !kids.IsRatingMode(user.KidsMode) {
 		return personalizedKidsRatingFilter{}
 	}
-	movieRating := user.KidsMaxMovieRating
-	tvRating := user.KidsMaxTVRating
-	if movieRating == "" && tvRating == "" && user.KidsMaxRating != "" {
-		movieRating = user.KidsMaxRating
-		tvRating = user.KidsMaxRating
-	}
+	movieRating, tvRating, _ := kids.RatingLimits(user)
 
 	return personalizedKidsRatingFilter{
 		enabled:        strings.TrimSpace(movieRating) != "" || strings.TrimSpace(tvRating) != "",
@@ -563,6 +569,13 @@ func (h *MetadataHandler) buildPersonalizedRecommendations(
 			return
 		}
 		title.MediaType = mediaType
+		if h.germanProfile(userID) {
+			if cached, ok := service.(cachedGermanTitles); ok {
+				copy := []models.Title{title}
+				cached.EnrichCachedTitleCertifications(copy)
+				title = copy[0]
+			}
+		}
 		if kidsRatingFilter.enabled && !isPersonalizedRatingAllowed(title, kidsRatingFilter) {
 			return
 		}
@@ -786,7 +799,7 @@ func isPersonalizedRatingAllowed(title models.Title, filter personalizedKidsRati
 	if strings.TrimSpace(maxRating) == "" {
 		return true
 	}
-	return kids.IsRatingAllowed(title.Certification, maxRating, title.MediaType)
+	return kids.IsTitleRatingAllowed(title, maxRating)
 }
 
 func buildPersonalizedSeeds(userID string, history []models.WatchHistoryItem, progress []models.PlaybackProgress, cutoff, now time.Time, limit int, additional ...personalizedSeed) []personalizedSeed {

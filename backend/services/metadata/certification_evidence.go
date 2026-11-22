@@ -1,6 +1,7 @@
 package metadata
 
 import (
+	"context"
 	"fmt"
 	"strconv"
 	"strings"
@@ -132,5 +133,42 @@ func allowsSeriesCertificationEvidence(title *models.Title) bool {
 		return true
 	default:
 		return false
+	}
+}
+
+// EnrichCachedTitleCertifications reuses only retained normal metadata responses.
+// A DE catalogue filter must not create one provider request per visible card.
+func (s *Service) EnrichCachedTitleCertifications(titles []models.Title) {
+	for i := range titles {
+		s.hydrateCachedCertificationEvidence(&titles[i])
+	}
+}
+
+// EnrichGermanTitleCertification is for one explicitly opened DE-profile title.
+// Normal catalogue filtering uses only EnrichCachedTitleCertifications instead.
+func (s *Service) EnrichGermanTitleCertification(ctx context.Context, title *models.Title) {
+	if s == nil || s.tmdb == nil || title == nil || title.TMDBID <= 0 || ctx == nil || ctx.Err() != nil {
+		return
+	}
+	s.hydrateCachedCertificationEvidence(title)
+	now := time.Now().UTC()
+	for _, fact := range title.CertificationEvidence {
+		if fact.Country == "DE" && fact.Source == "tmdb" && !fact.RetrievedAt.IsZero() && !fact.RetrievedAt.After(now) && fact.ExpiresAt != nil && fact.ExpiresAt.After(now) {
+			return
+		}
+	}
+	read, cancel := context.WithTimeout(ctx, 8*time.Second)
+	defer cancel()
+	var observed *models.Title
+	switch strings.ToLower(title.MediaType) {
+	case "movie":
+		observed, _ = s.tmdb.movieDetails(read, title.TMDBID)
+	case "series", "tv":
+		observed, _ = s.tmdb.seriesDetails(read, title.TMDBID)
+	default:
+		return
+	}
+	if observed != nil && read.Err() == nil {
+		title.CertificationEvidence = models.MergeCertificationEvidence(observed.CertificationEvidence, title.CertificationEvidence)
 	}
 }

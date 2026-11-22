@@ -30,6 +30,7 @@ type thumbnailPrewarmer interface {
 
 // PlaybackHandler resolves NZB candidates into playable streams via the local registry.
 type PlaybackHandler struct {
+	germanMetadata     germanAgeMetadata
 	vodBoundary        *vodBoundary
 	Service            playbackService
 	SubtitleExtractor  SubtitlePreExtractor // For pre-extracting subtitles
@@ -233,6 +234,9 @@ func (h *PlaybackHandler) Resolve(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	if !writeGermanAgeError(w, checkGermanProfileTitle(r.Context(), h.Users, h.germanMetadata, request.ProfileID, request.TitleID, "")) {
+		return
+	}
 	resolution, err := h.Service.Resolve(r.Context(), request.Result)
 	if err != nil {
 		log.Printf("[playback-handler] TIMING: resolve failed after %v: %v", time.Since(handlerStart), err)
@@ -338,6 +342,9 @@ func (h *PlaybackHandler) ResolveBatch(w http.ResponseWriter, r *http.Request) {
 		request.Result.Attributes["clientId"] = owner.client
 	}
 
+	if !writeGermanAgeError(w, checkGermanProfileTitle(r.Context(), h.Users, h.germanMetadata, request.Result.Attributes["profileId"], request.Result.Attributes["titleId"], "series")) {
+		return
+	}
 	resp, err := h.Service.ResolveBatch(r.Context(), request.Result, request.Episodes)
 	if err != nil {
 		log.Printf("[playback-handler] batch resolve failed after %v: %v", time.Since(handlerStart), err)
@@ -384,6 +391,9 @@ func (h *PlaybackHandler) QueueStatus(w http.ResponseWriter, r *http.Request) {
 	}
 	defer owner.release()
 	if !h.vodBoundary.recheckHTTP(w, r, owner, vodQueue) {
+		return
+	}
+	if !writeGermanAgeError(w, checkGermanProfileTitle(r.Context(), h.Users, h.germanMetadata, r.URL.Query().Get("profileId"), r.URL.Query().Get("titleId"), "")) {
 		return
 	}
 	status, err := h.Service.QueueStatus(r.Context(), queueID)

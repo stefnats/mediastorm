@@ -1353,8 +1353,8 @@ function showEditProfileModal(profileId) {
                     ${p.isKidsProfile ? `
                     <div style="margin-top: 0.75rem; padding: 0.75rem; background: var(--bg-tertiary); border-radius: var(--radius);">
                         <p style="color: var(--text-secondary); font-size: 0.875rem; margin: 0 0 0.5rem 0;">
-                            Mode: <strong>${p.kidsMode === 'rating' ? 'Rating Restricted' : p.kidsMode === 'content_list' ? 'Curated Lists' : p.kidsMode === 'both' ? 'Both' : 'Not Set'}</strong>
-                            ${p.kidsMaxRating ? ' (Max: ' + p.kidsMaxRating + ')' : ''}
+                            Mode: <strong>${p.kidsMode === 'rating_de' ? 'German TMDB movie/series ratings' : p.kidsMode === 'rating' ? 'Rating Restricted' : p.kidsMode === 'content_list' ? 'Curated Lists' : p.kidsMode === 'both' ? 'Both' : 'Not Set'}</strong>
+                            ${p.kidsMode === 'rating_de' ? ' (Movie age: ' + (['0','6','12','16','18'].includes(p.kidsMaxMovieRating) ? p.kidsMaxMovieRating : 'unavailable') + '; series age: ' + (['0','6','12','16','18'].includes(p.kidsMaxTVRating) ? p.kidsMaxTVRating : 'unavailable') + ')' : p.kidsMaxRating ? ' (Max: ' + p.kidsMaxRating + ')' : ''}
                         </p>
                         <a href="${basePath}/kids-settings?profileId=${p.id}" class="btn btn-sm btn-secondary">
                             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="width: 14px; height: 14px;">

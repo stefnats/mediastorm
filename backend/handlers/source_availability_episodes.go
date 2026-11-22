@@ -14,6 +14,7 @@ import (
 	"novastream/internal/auth"
 	"novastream/internal/profileaccess"
 	"novastream/models"
+	"novastream/services/kids"
 	"novastream/services/sourceavailability"
 )
 
@@ -144,7 +145,7 @@ func (h *MetadataHandler) resolveSourceEpisodes(parent context.Context, profile 
 		if h.UsersService != nil {
 			if user, exists := h.UsersService.Get(profile); exists && user.IsKidsProfile {
 				_, _, limited := h.kidsRatingLimits(profile)
-				if user.KidsMode != "rating" || !limited || len(h.filterTitlesByKids(ctx, profile, metadata, []models.Title{title})) == 0 {
+				if !kids.IsRatingMode(user.KidsMode) || !limited || len(h.filterTitlesByKids(ctx, profile, metadata, []models.Title{title})) == 0 {
 					return title, episodes, http.StatusNotFound, errors.New("series unavailable")
 				}
 			}

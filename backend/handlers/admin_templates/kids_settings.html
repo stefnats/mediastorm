@@ -48,6 +48,10 @@
                             <span style="color: var(--text-secondary); font-size: 0.875rem;">Filter content by MPAA/TV ratings (G, PG, TV-Y, etc.)</span>
                         </div>
                     </label>
+                    <label class="mode-option" style="display: flex; align-items: flex-start; gap: 0.75rem; padding: 1rem; background: var(--bg-tertiary); border: 2px solid var(--border); border-radius: var(--radius); cursor: pointer;">
+                        <input type="radio" name="kidsMode" value="rating_de" style="margin-top: 0.25rem;">
+                        <div><strong>German TMDB ratings</strong><br><span>Use retained TMDB Germany movie and series age ratings. Missing, conflicting or expired data is blocked. Series ratings do not verify individual episodes or played editions.</span></div>
+                    </label>
                     <label class="mode-option" style="display: flex; align-items: flex-start; gap: 0.75rem; padding: 1rem; background: var(--bg-tertiary); border: 2px solid var(--border); border-radius: var(--radius); cursor: pointer; transition: all 0.2s;">
                         <input type="radio" name="kidsMode" value="content_list" style="margin-top: 0.25rem;">
                         <div>
@@ -67,6 +71,7 @@
         </div>
     </div>
 
+    <p id="german-rating-note" style="display:none">First save the German TMDB mode with parent confirmation, then explicitly save both age limits. Until a separate limit is valid, that media type is unavailable. This is provider metadata, not an official FSK verification.</p>
     <!-- Rating Settings -->
     <div class="card" id="rating-section">
         <div class="card-header">
@@ -332,6 +337,18 @@
 <script>
 const profileId = new URLSearchParams(window.location.search).get('profileId');
 let profile = null;
+const legacyRatingOptions = Object.fromEntries(['movieRating', 'tvRating'].map(id => [id, [...document.getElementById(id).options].map(option => [option.value, option.textContent])]));
+function configureRatingChoices(german) {
+    ['movieRating', 'tvRating'].forEach(id => {
+        const select = document.getElementById(id), value = select.value;
+        select.previousElementSibling.textContent = german ? (id === 'movieRating' ? 'Movie age (TMDB Germany)' : 'Series age (TMDB Germany; not episode-specific)') : (id === 'movieRating' ? 'Movie Rating (MPAA)' : 'TV Rating');
+        const choices = german ? [['', 'Unavailable until an age is selected'], ...['0','6','12','16','18'].map(age => [age, 'TMDB DE age ' + age])] : legacyRatingOptions[id];
+        select.replaceChildren(...choices.map(([key,label]) => { const option = document.createElement('option'); option.value = key; option.textContent = label; return option; }));
+        setRatingSelection(select, value);
+    });
+    document.getElementById('german-rating-note').style.display = german ? 'block' : 'none';
+}
+
 let modeAction = null;
 let modeGeneration = 0;
 let modePageGeneration = 0;
@@ -670,9 +687,10 @@ async function loadProfile() {
 function updateSectionVisibility() {
     const mode = document.querySelector('input[name="kidsMode"]:checked')?.value || 'rating';
     const ratingSection = document.getElementById('rating-section');
+    configureRatingChoices(mode === 'rating_de');
     const listsSection = document.getElementById('lists-section');
 
-    if (mode === 'rating') {
+    if (mode === 'rating' || mode === 'rating_de') {
         ratingSection.style.display = 'block';
         listsSection.style.display = 'none';
     } else if (mode === 'content_list') {
@@ -742,7 +760,7 @@ function renderLists() {
 
 async function saveMode() {
     const mode = modeSelection();
-    if (!['rating', 'content_list'].includes(mode)) {
+    if (!['rating', 'rating_de', 'content_list'].includes(mode)) {
         showToast('Please select a mode', 'error');
         return;
     }
@@ -802,6 +820,12 @@ async function saveMode() {
 }
 
 async function saveRating() {
+    if (modeSelection() !== profile?.kidsMode && (modeSelection() === 'rating_de' || profile?.kidsMode === 'rating_de')) {
+        showToast('Confirm and save the selected mode first, then save its separate age limits.', 'error'); return;
+    }
+    if (profile?.kidsMode === 'rating_de' && !['movieRating','tvRating'].every(id => ['0','6','12','16','18'].includes(document.getElementById(id).value))) {
+        showToast('Select a German TMDB age for both movies and series.', 'error'); return;
+    }
     if (profileRecoveryAction || usersWriteBlocked || profileModeUnsupported || ratingPairAction || ratingPairUncertain || modePageRetired || modeProfileLoading) return;
     const form = document.getElementById('rating-section');
     const movie = document.getElementById('movieRating');
@@ -1055,7 +1079,7 @@ async function loadContentPreview() {
         }
 
         // For rating mode, show trending content
-        if (mode === 'rating') {
+        if (mode === 'rating' || mode === 'rating_de') {
             const moviesRes = await fetch(basePath + '/api/discover/new?type=movie&limit=12&userId=' + encodeURIComponent(profileId));
             const moviesData = moviesRes.ok ? await moviesRes.json() : { items: [] };
             const movies = moviesData.items || [];

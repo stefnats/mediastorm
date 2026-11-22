@@ -79,6 +79,7 @@ type prequeuePlaybackService interface {
 
 // PrequeueHandler handles prequeue requests for pre-loading playback streams
 type PrequeueHandler struct {
+	germanMetadata        germanAgeMetadata
 	vodBoundary           *vodBoundary
 	vodCurrentWorker      *vodOwnerContext
 	workerLife            *prequeueWorkerLifetimes
@@ -1291,6 +1292,9 @@ func (h *PrequeueHandler) Prequeue(w http.ResponseWriter, r *http.Request) {
 		clientID = normalizeClientID(r.Header.Get("X-Client-ID"))
 	}
 
+	if !h.checkGermanAge(w, r, req.UserID, req.TitleID, mediaType) {
+		return
+	}
 	log.Printf("[prequeue] Received request: titleId=%s titleName=%q userId=%s clientId=%s mediaType=%s", req.TitleID, titleName, req.UserID, clientID, mediaType)
 
 	// For series, determine the target episode based on watch history
@@ -1584,6 +1588,9 @@ func (h *PrequeueHandler) GetStatus(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if !h.checkGermanAge(w, r, entry.UserID, entry.TitleID, entry.MediaType) {
+		return
+	}
 	resp := entry.ToResponse()
 	resp.MediaEvidence = h.currentPreparationEvidence(r, entry)
 
@@ -1645,6 +1652,9 @@ func (h *PrequeueHandler) ManualPrequeueStatus(w http.ResponseWriter, r *http.Re
 			return
 		}
 		http.Error(w, "user not found", http.StatusNotFound)
+		return
+	}
+	if entry != nil && !h.checkGermanAge(w, r, entry.UserID, entry.TitleID, entry.MediaType) {
 		return
 	}
 	response := manualPrequeueStatusResponse{Prequeued: entry != nil}
@@ -1737,6 +1747,9 @@ func (h *PrequeueHandler) AdoptMigration(w http.ResponseWriter, r *http.Request)
 	var req adoptMigrationRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	if !h.checkGermanAge(w, r, current.UserID, current.TitleID, current.MediaType) {
 		return
 	}
 	req.StreamPath = strings.TrimSpace(req.StreamPath)
@@ -2192,6 +2205,10 @@ func (h *PrequeueHandler) runPrequeueWorkerJob(work *prequeueWorkerLifetime, pre
 		h = &copy
 	}
 
+	if err := checkGermanProfileTitle(work.ctx, h.users, h.germanMetadata, userID, titleID, mediaType); err != nil {
+		h.failPrequeue(prequeueID, err.Error())
+		return
+	}
 	evidenceConfigurationKey := h.preparationConfigurationKey()
 	var kidsProof *kidsVODLibraryProof
 	var kidsCatalogue *models.Title

@@ -82,13 +82,24 @@ func (h *PrequeueHandler) localItemAllowed(item models.LocalMediaItem, userID st
 	}
 	// Content-list membership is not part of the local catalog. Do not silently
 	// substitute a local item when its list authorization cannot be established.
-	if profile.KidsMode != "rating" || item.Metadata == nil {
+	if !kids.IsRatingMode(profile.KidsMode) || item.Metadata == nil {
 		return false
 	}
 	mediaType, limit := "movie", profile.KidsMaxMovieRating
 	if item.LibraryType == models.LocalMediaLibraryTypeShow {
 		mediaType, limit = "series", profile.KidsMaxTVRating
 	}
+	if profile.KidsMode == kids.GermanMetadataMode {
+		movie, series, _ := kids.RatingLimits(profile)
+		limit = movie
+		if mediaType == "series" {
+			limit = series
+		}
+		title := *item.Metadata
+		title.MediaType = mediaType
+		return kids.IsTitleRatingAllowed(title, limit)
+	}
+	// Keep this existing per-type US fallback and stored-library media type.
 	if limit == "" {
 		limit = profile.KidsMaxRating
 	}

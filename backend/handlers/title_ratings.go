@@ -118,15 +118,23 @@ func (h *MetadataHandler) ratingTitleAllowed(profile string, title models.Title)
 	if !user.IsKidsProfile {
 		return true
 	}
-	if user.KidsMode != "rating" || title.Adult {
+	if !kids.IsRatingMode(user.KidsMode) || title.Adult {
 		return false
+	}
+	if user.KidsMode == kids.GermanMetadataMode {
+		// Durable preferences stay bare. Only this decision copy reads current cache facts.
+		if cached, ok := h.serviceForUser(profile).(cachedGermanTitles); ok {
+			copy := []models.Title{title}
+			cached.EnrichCachedTitleCertifications(copy)
+			title = copy[0]
+		}
 	}
 	movie, tv, limited := h.kidsRatingLimits(profile)
 	limit := tv
 	if title.MediaType == "movie" {
 		limit = movie
 	}
-	return limited && limit != "" && kids.IsRatingAllowed(title.Certification, limit, title.MediaType)
+	return limited && limit != "" && kids.IsTitleRatingAllowed(title, limit)
 }
 
 func (h *MetadataHandler) ratingRecommendationSeeds(ctx context.Context, profile string) ([]personalizedSeed, error) {

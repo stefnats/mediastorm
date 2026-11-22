@@ -175,15 +175,10 @@ func (h *LocalMediaHandler) kidsRatingCaps(r *http.Request) (movieRating, tvRati
 		return "", ""
 	}
 	user, ok := h.usersSvc.Get(profileID)
-	if !ok || !user.IsKidsProfile || user.KidsMode != "rating" {
+	if !ok || !user.IsKidsProfile || !kids.IsRatingMode(user.KidsMode) {
 		return "", ""
 	}
-	movieRating = user.KidsMaxMovieRating
-	tvRating = user.KidsMaxTVRating
-	if movieRating == "" && tvRating == "" && user.KidsMaxRating != "" {
-		movieRating = user.KidsMaxRating
-		tvRating = user.KidsMaxRating
-	}
+	movieRating, tvRating, _ = kids.RatingLimits(user)
 	return movieRating, tvRating
 }
 

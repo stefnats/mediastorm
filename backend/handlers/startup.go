@@ -1428,13 +1428,21 @@ func (h *StartupHandler) applyFilters(items []models.TrendingItem, userID string
 	// Apply kids rating filter
 	if userID != "" && h.usersProvider != nil {
 		if user, ok := h.usersProvider.Get(userID); ok && user.IsKidsProfile {
-			if user.KidsMode == "rating" {
-				movieRating := user.KidsMaxMovieRating
-				tvRating := user.KidsMaxTVRating
-				if movieRating == "" && tvRating == "" && user.KidsMaxRating != "" {
-					movieRating = user.KidsMaxRating
-					tvRating = user.KidsMaxRating
+			if kids.IsRatingMode(user.KidsMode) {
+				if user.KidsMode == kids.GermanMetadataMode {
+					if cached, ok := h.metadata.(cachedGermanTitles); ok {
+						titles := make([]models.Title, len(items))
+						for i := range items {
+							titles[i] = items[i].Title
+						}
+						cached.EnrichCachedTitleCertifications(titles)
+						items = append([]models.TrendingItem(nil), items...)
+						for i := range items {
+							items[i].Title = titles[i]
+						}
+					}
 				}
+				movieRating, tvRating, _ := kids.RatingLimits(user)
 				items = kids.FilterTrendingByRatings(items, movieRating, tvRating)
 			}
 		}

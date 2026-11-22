@@ -1300,7 +1300,7 @@ func (h *UsersHandler) SetKidsMode(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var body struct {
-		Mode string `json:"mode"` // "rating", "content_list", or ""
+		Mode string `json:"mode"` // "rating", "rating_de", "content_list", or ""
 	}
 	dec := json.NewDecoder(r.Body)
 	dec.DisallowUnknownFields()
@@ -1310,9 +1310,9 @@ func (h *UsersHandler) SetKidsMode(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Validate mode
-	validModes := map[string]bool{"": true, "rating": true, "content_list": true}
+	validModes := map[string]bool{"": true, "rating": true, "rating_de": true, "content_list": true}
 	if !validModes[body.Mode] {
-		http.Error(w, "invalid mode, must be 'rating', 'content_list', or empty", http.StatusBadRequest)
+		http.Error(w, "invalid mode, must be 'rating', 'rating_de', 'content_list', or empty", http.StatusBadRequest)
 		return
 	}
 
@@ -1368,6 +1368,9 @@ func (h *UsersHandler) SetKidsMaxRating(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
+	if !h.validGermanRatings(w, id, body.Rating) {
+		return
+	}
 	user, err := h.Service.SetKidsMaxRating(id, body.Rating)
 	if err != nil {
 		status := http.StatusInternalServerError
@@ -1416,6 +1419,9 @@ func (h *UsersHandler) SetKidsMaxMovieRating(w http.ResponseWriter, r *http.Requ
 		return
 	}
 
+	if !h.validGermanRatings(w, id, body.Rating) {
+		return
+	}
 	user, err := h.Service.SetKidsMaxMovieRating(id, body.Rating)
 	if err != nil {
 		status := http.StatusInternalServerError
@@ -1464,6 +1470,9 @@ func (h *UsersHandler) SetKidsMaxTVRating(w http.ResponseWriter, r *http.Request
 		return
 	}
 
+	if !h.validGermanRatings(w, id, body.Rating) {
+		return
+	}
 	user, err := h.Service.SetKidsMaxTVRating(id, body.Rating)
 	if err != nil {
 		status := http.StatusInternalServerError
@@ -1510,6 +1519,9 @@ func (h *UsersHandler) SetKidsRatings(w http.ResponseWriter, r *http.Request) {
 	pair, ok := h.Service.(parentRatingJSONPair)
 	if !ok {
 		http.Error(w, "rating pair persistence unavailable", http.StatusServiceUnavailable)
+		return
+	}
+	if !h.validGermanRatings(w, id, movie, tv) {
 		return
 	}
 	user, err := pair.SetKidsMaxRatings(id, movie, tv)

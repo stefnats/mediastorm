@@ -99,7 +99,7 @@ func (s *Service) original(r *http.Request, target string, entry entryKind, poli
 	return observation.Correlation()
 }
 func safeProfile(value models.User) (Profile, error) {
-	if value.ID == "" || value.KidsMode != "" && value.KidsMode != "rating" && value.KidsMode != "content_list" {
+	if value.ID == "" || value.KidsMode != "" && value.KidsMode != "rating" && value.KidsMode != "rating_de" && value.KidsMode != "content_list" {
 		return Profile{}, datastore.ErrProfileRecoveryUnavailable
 	}
 	lists := append([]string{}, value.KidsAllowedLists...)

@@ -79,7 +79,7 @@ func (i *ParentModeIntent) Close() {
 	}
 }
 func parentModeValid(mode string) bool {
-	return mode == "" || mode == "rating" || mode == "content_list"
+	return mode == "" || mode == "rating" || mode == "rating_de" || mode == "content_list"
 }
 func parentModeRequestBoundary(r *http.Request) (string, string, string, error) {
 	return parentConfirmationRequestBoundary(r, http.MethodPut)

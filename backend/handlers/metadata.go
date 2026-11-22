@@ -268,19 +268,10 @@ func (h *MetadataHandler) kidsRatingLimits(userID string) (movieRating, tvRating
 		return "", "", false
 	}
 	user, found := h.UsersService.Get(userID)
-	if !found || !user.IsKidsProfile || user.KidsMode != "rating" {
+	if !found {
 		return "", "", false
 	}
-	movieRating = user.KidsMaxMovieRating
-	tvRating = user.KidsMaxTVRating
-	if movieRating == "" && tvRating == "" && user.KidsMaxRating != "" {
-		movieRating = user.KidsMaxRating
-		tvRating = user.KidsMaxRating
-	}
-	if movieRating == "" && tvRating == "" {
-		return "", "", false
-	}
-	return movieRating, tvRating, true
+	return kids.RatingLimits(user)
 }
 
 // filterTrendingByKids enriches certifications and filters trending items by the
@@ -292,7 +283,7 @@ func (h *MetadataHandler) filterTrendingByKids(ctx context.Context, userID strin
 		return items
 	}
 	// Populate certifications so items without one aren't all fail-closed.
-	service.EnrichTrendingCertifications(ctx, items)
+	h.enrichKidsTrending(ctx, userID, service, items)
 	return kids.FilterTrendingByRatings(items, movieRating, tvRating)
 }
 
@@ -303,7 +294,7 @@ func (h *MetadataHandler) filterTitlesByKids(ctx context.Context, userID string,
 	if !ok {
 		return titles
 	}
-	service.EnrichTitleCertifications(ctx, titles)
+	h.enrichKidsTitles(ctx, userID, service, titles)
 	return kids.FilterTitlesByRatings(titles, movieRating, tvRating)
 }
 
@@ -424,12 +415,10 @@ func (h *MetadataHandler) DiscoverNew(w http.ResponseWriter, r *http.Request) {
 	// Apply kids rating filter if user is a kids profile
 	if userID != "" && h.UsersService != nil {
 		if user, ok := h.UsersService.Get(userID); ok && user.IsKidsProfile {
-			if user.KidsMode == "rating" {
-				movieRating := user.KidsMaxMovieRating
-				tvRating := user.KidsMaxTVRating
-				if movieRating == "" && tvRating == "" && user.KidsMaxRating != "" {
-					movieRating = user.KidsMaxRating
-					tvRating = user.KidsMaxRating
+			if kids.IsRatingMode(user.KidsMode) {
+				movieRating, tvRating, _ := kids.RatingLimits(user)
+				if user.KidsMode == kids.GermanMetadataMode {
+					h.enrichKidsTrending(r.Context(), userID, service, items)
 				}
 				items = kids.FilterTrendingByRatings(items, movieRating, tvRating)
 			}
@@ -533,16 +522,11 @@ func (h *MetadataHandler) Search(w http.ResponseWriter, r *http.Request) {
 
 	// Apply kids rating filter if user is a kids profile with rating mode
 	if userID != "" && h.UsersService != nil {
-		if user, ok := h.UsersService.Get(userID); ok && user.IsKidsProfile && user.KidsMode == "rating" {
+		if user, ok := h.UsersService.Get(userID); ok && user.IsKidsProfile && kids.IsRatingMode(user.KidsMode) {
 			// Enrich results with certification data
-			service.EnrichSearchCertifications(r.Context(), results)
+			h.enrichKidsSearch(r.Context(), userID, service, results)
 
-			movieRating := user.KidsMaxMovieRating
-			tvRating := user.KidsMaxTVRating
-			if movieRating == "" && tvRating == "" && user.KidsMaxRating != "" {
-				movieRating = user.KidsMaxRating
-				tvRating = user.KidsMaxRating
-			}
+			movieRating, tvRating, _ := kids.RatingLimits(user)
 			results = kids.FilterSearchByRatings(results, movieRating, tvRating)
 		}
 	}
@@ -620,6 +604,13 @@ func (h *MetadataHandler) SeriesDetails(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
+	if details != nil && h.germanProfile(query.Get("userId")) {
+		enrichGermanDetail(r.Context(), service, &details.Title)
+	}
+	if details != nil && h.germanProfile(query.Get("userId")) && len(h.filterTitlesByKids(r.Context(), query.Get("userId"), service, []models.Title{details.Title})) == 0 {
+		writeGermanAgeError(w, errors.New("German TMDB series age rating is unavailable or exceeds this profile limit; this is a series rating, not individual-episode proof"))
+		return
+	}
 	w.Header().Set("Content-Type", "application/json")
 	h.encodeMetadata(w, r, details)
 }
@@ -642,6 +633,14 @@ func (h *MetadataHandler) BatchSeriesDetails(w http.ResponseWriter, r *http.Requ
 		results = service.BatchSeriesDetails(r.Context(), req.Queries)
 	}
 
+	if h.germanProfile(r.URL.Query().Get("userId")) {
+		for i := range results {
+			if results[i].Details != nil && len(h.filterTitlesByKids(r.Context(), r.URL.Query().Get("userId"), service, []models.Title{results[i].Details.Title})) == 0 {
+				results[i].Details = nil
+				results[i].Error = "German TMDB series age rating unavailable or above profile limit"
+			}
+		}
+	}
 	response := models.BatchSeriesDetailsResponse{
 		Results: results,
 	}
@@ -741,6 +740,13 @@ func (h *MetadataHandler) MovieDetails(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if details != nil && h.germanProfile(query.Get("userId")) {
+		enrichGermanDetail(r.Context(), service, details)
+	}
+	if details != nil && h.germanProfile(query.Get("userId")) && len(h.filterTitlesByKids(r.Context(), query.Get("userId"), service, []models.Title{*details})) == 0 {
+		writeGermanAgeError(w, errors.New("German TMDB movie age rating is unavailable or exceeds this profile limit; no edition verification is claimed"))
+		return
+	}
 	w.Header().Set("Content-Type", "application/json")
 	h.encodeMetadata(w, r, details)
 }

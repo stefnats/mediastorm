@@ -903,6 +903,8 @@ func main() {
 	prequeueHandler.SetLocalFallback(localMediaService, libraryAccessService)
 	prequeueHandler.SetRemoteFallback(remoteMediaService)
 	playbackHandler.SetUsersService(userService)
+	playbackHandler.SetGermanAgeMetadata(metadataService)
+	prequeueHandler.SetGermanAgeMetadata(metadataService)
 	if store != nil {
 		prequeueHandler.GetStore().SetDataStore(store)
 	}
