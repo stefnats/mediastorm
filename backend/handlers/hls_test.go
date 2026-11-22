@@ -330,7 +330,7 @@ func TestNewHLSManager_DefaultBaseDir(t *testing.T) {
 	}
 	defer manager.Shutdown()
 
-	expectedBase := filepath.Join("/tmp", "novastream-hls")
+	expectedBase := filepath.Join(os.TempDir(), "novastream-hls")
 	if manager.baseDir != expectedBase {
 		t.Errorf("default baseDir = %q, want %q", manager.baseDir, expectedBase)
 	}
