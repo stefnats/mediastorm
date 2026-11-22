@@ -200,6 +200,11 @@ func (h *LocalMediaHandler) ListGroups(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "local media service unavailable", http.StatusServiceUnavailable)
 		return
 	}
+	mediaFilters, mediaErr := parseLocalMediaFilters(r)
+	if mediaErr != nil {
+		http.Error(w, mediaErr.Error(), http.StatusBadRequest)
+		return
+	}
 	language, languageErr := parseDisplayListOriginalLanguageQuery(r)
 	if languageErr != nil {
 		http.Error(w, languageErr.Error(), http.StatusBadRequest)
@@ -220,6 +225,7 @@ func (h *LocalMediaHandler) ListGroups(w http.ResponseWriter, r *http.Request) {
 	log.Printf("[localmedia] ListGroups: libraryID=%s limit=%d offset=%d filter=%q sort=%q", libraryID, limit, offset, r.URL.Query().Get("filter"), r.URL.Query().Get("sort"))
 	t0 := time.Now()
 	listQuery := models.LocalMediaItemListQuery{
+		MediaFilters:   mediaFilters,
 		Filter:         r.URL.Query().Get("filter"),
 		Sort:           r.URL.Query().Get("sort"),
 		Dir:            r.URL.Query().Get("dir"),
@@ -238,6 +244,10 @@ func (h *LocalMediaHandler) ListGroups(w http.ResponseWriter, r *http.Request) {
 		if remoteLibrary, remoteErr := h.remote.GetLibrary(r.Context(), libraryID); remoteErr != nil {
 			err = remoteErr
 		} else if remoteLibrary != nil {
+			if mediaFilters.Active() {
+				http.Error(w, "media filters are currently available for local libraries only", http.StatusBadRequest)
+				return
+			}
 			if language.active() {
 				http.Error(w, "original-language filtering is unavailable for remote libraries", http.StatusBadRequest)
 				return
@@ -254,6 +264,8 @@ func (h *LocalMediaHandler) ListGroups(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		log.Printf("[localmedia] ListGroups: libraryID=%s error after %s: %v", libraryID, time.Since(t0).Round(time.Millisecond), err)
 		switch {
+		case errors.Is(err, localmedia.ErrInvalidMediaFilters):
+			http.Error(w, err.Error(), http.StatusBadRequest)
 		case errors.Is(err, localmedia.ErrLibraryNotFound):
 			http.Error(w, "library not found", http.StatusNotFound)
 		default:
@@ -268,7 +280,7 @@ func (h *LocalMediaHandler) ListGroups(w http.ResponseWriter, r *http.Request) {
 	// Stored local-media metadata (including poster artwork) is resolved once at
 	// scan time in the global metadata language. Re-localize artwork for profiles
 	// whose effective language differs so shelves match the profile's setting.
-	if !language.active() {
+	if !language.active() && !mediaFilters.Active() {
 		h.localizeGroupArtwork(r, groups.Groups)
 	}
 

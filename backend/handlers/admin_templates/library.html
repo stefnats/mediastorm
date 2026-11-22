@@ -179,6 +179,21 @@
                 </select>
                 <button class="btn btn-secondary" type="button" id="applyItemsFiltersBtn">Apply</button>
             </div>
+            <details id="libraryMediaFilters" style="margin-top:0.75rem">
+              <summary>Stored media filters (local libraries)</summary>
+              <p>These filters read saved scan information only. They do not check providers or guarantee that a device can play a file. Older scans may have unknown languages. A normal scan reuses unchanged files; languages are saved only when a file is actually probed again. There is currently no separate refresh for an unchanged file.</p>
+              <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,180px),1fr));gap:0.75rem">
+                <label>Audio language<input id="mediaAudioLanguage" class="form-input" placeholder="e.g. fr, en, spa" maxlength="32"></label>
+                <label>Subtitle language<input id="mediaSubtitleLanguage" class="form-input" placeholder="e.g. fr, en, spa" maxlength="32"></label>
+                <label>Audio codec<select id="mediaAudioCodec" class="form-select"><option value="">Any</option><option value="aac">AAC</option><option value="ac3">AC-3</option><option value="eac3">E-AC-3</option><option value="dts">DTS</option><option value="truehd">TrueHD</option><option value="opus">Opus</option><option value="flac">FLAC</option></select></label>
+                <label>Video codec<select id="mediaVideoCodec" class="form-select"><option value="">Any</option><option value="h264">H.264</option><option value="hevc">HEVC</option><option value="av1">AV1</option><option value="vp9">VP9</option><option value="mpeg2video">MPEG-2</option></select></label>
+                <label>Minimum height<select id="mediaMinHeight" class="form-select"><option value="">Any</option><option value="720">720p</option><option value="1080">1080p</option><option value="2160">2160p</option></select></label>
+                <label>HDR metadata<select id="mediaHDR" class="form-select"><option value="">Any</option><option value="hdr10">HDR10</option><option value="dolby_vision">Dolby Vision</option></select></label>
+                <label>Embedded subtitles<select id="mediaSubtitles" class="form-select"><option value="">Any</option><option value="present">Present</option><option value="absent">None</option></select></label>
+                <label>Unknown information<select id="mediaUnknown" class="form-select"><option value="include">Include unknown results</option><option value="exclude">Known matches only</option><option value="only">Unknown results only</option></select></label>
+              </div>
+              <p>Use Apply above. All selected features must occur in the same version; audio language and codec must occur in the same audio track. Unknown is evaluated for the selected features.</p>
+            </details>
             <div id="itemsSummaryPills" class="summary-pills"></div>
         </div>
         <div id="itemsMeta" style="margin: 0.9rem 0 0.6rem; color: var(--text-muted); font-size: 0.85rem;"></div>
@@ -951,6 +966,7 @@ const itemsPageSize = 50;
 let currentItemQuery = '';
 let currentSort = 'updated';
 let currentSortDir = 'desc';
+let currentMediaFilters = {};
 let expandedItems = new Set();
 let activeMatchTarget = null;
 let currentItemsById = new Map();
@@ -1454,6 +1470,7 @@ async function loadItems(libraryId) {
   const prevBtn = document.getElementById('itemsPrevBtn');
   const nextBtn = document.getElementById('itemsNextBtn');
   updateSelectedLibrarySummary(library);
+  document.getElementById('libraryMediaFilters').hidden = Boolean(library?.sourceType && library.sourceType !== 'local');
   itemsMeta.textContent = '';
   itemsList.innerHTML = '<div class="loading"><div class="spinner"></div></div>';
   pagination.style.display = 'none';
@@ -1472,6 +1489,7 @@ async function loadItems(libraryId) {
       offset: String(currentItemsOffset),
     });
     if (currentItemQuery) params.set('query', currentItemQuery);
+    if (!library?.sourceType || library.sourceType === 'local') for (const [name, value] of Object.entries(currentMediaFilters)) if (value) params.set(name, value);
     const endpoint = currentGrouped ? 'groups' : 'items';
     const res = await fetch(basePath + '/api/library/libraries/' + encodeURIComponent(libraryId) + '/' + endpoint + '?' + params.toString());
     if (!res.ok) throw new Error(await res.text());
@@ -1849,8 +1867,10 @@ function renderExpandedItemDetails(item, meta, probe, options = {}) {
         <span>Detected year: ${item.detectedYear || 'Unknown'}</span>
         <span>Episode: ${item.episodeTitle ? `${episodeLabel} · ${escapeHtml(item.episodeTitle)}` : episodeLabel}</span>
         <span>Audio: ${probe.audioCodecs?.length ? probe.audioCodecs.map(escapeHtml).join(', ') : 'Unknown'}</span>
-        <span>HDR: ${probe.hdrFormat ? escapeHtml(probe.hdrFormat) : 'None'}</span>
-        <span>Subtitles: ${probe.subtitleStreams || 0}</span>
+        <span>Audio languages: ${probe.audioTracks?.length ? Array.from(new Set(probe.audioTracks.map(track => track.language || 'Unknown'))).map(escapeHtml).join(', ') : 'Unknown'}</span>
+        <span>Subtitle languages: ${probe.subtitleTracks?.length ? Array.from(new Set(probe.subtitleTracks.map(track => track.language || 'Unknown'))).map(escapeHtml).join(', ') : 'Unknown'}</span>
+        <span>HDR: ${probe.hdrFormat ? escapeHtml(probe.hdrFormat) : 'Unknown'}</span>
+        <span>Subtitles: ${probe.subtitleStreams > 0 || probe.tracksScanned ? (probe.subtitleStreams || 0) : 'Unknown'}</span>
         <span>Updated: ${formatDate(item.updatedAt)}</span>
       </div>
       ${item.isMissing ? `<div style="color: var(--danger); font-size: 0.85rem;">Missing since: ${formatDate(item.missingSince)}</div>` : ''}
@@ -1905,6 +1925,11 @@ function toggleEpisodeGroupExpanded(groupId) {
 }
 
 function applyItemFilters() {
+  currentMediaFilters = {};
+  for (const [name, id] of [['audioLanguage','mediaAudioLanguage'],['subtitleLanguage','mediaSubtitleLanguage'],['audioCodec','mediaAudioCodec'],['videoCodec','mediaVideoCodec'],['minHeight','mediaMinHeight'],['hdr','mediaHDR'],['subtitles','mediaSubtitles'],['mediaUnknown','mediaUnknown']]) {
+    const value = document.getElementById(id).value.trim();
+    if (value) currentMediaFilters[name] = value;
+  }
   currentItemQuery = document.getElementById('itemsSearchInput').value.trim();
   currentSort = document.getElementById('itemsSortSelect').value;
   currentSortDir = document.getElementById('itemsSortDirSelect').value;
@@ -2471,6 +2496,7 @@ function persistLibraryUIState() {
       currentItemQuery,
       currentSort,
       currentSortDir,
+      currentMediaFilters,
       currentView,
       currentGrouped,
     }));
@@ -2488,6 +2514,13 @@ function restoreLibraryUIState() {
     currentItemQuery = typeof saved.currentItemQuery === 'string' ? saved.currentItemQuery : '';
     currentSort = typeof saved.currentSort === 'string' ? saved.currentSort : 'updated';
     currentSortDir = typeof saved.currentSortDir === 'string' ? saved.currentSortDir : 'desc';
+    currentMediaFilters = {};
+    for (const [name, id] of [['audioLanguage','mediaAudioLanguage'],['subtitleLanguage','mediaSubtitleLanguage'],['audioCodec','mediaAudioCodec'],['videoCodec','mediaVideoCodec'],['minHeight','mediaMinHeight'],['hdr','mediaHDR'],['subtitles','mediaSubtitles'],['mediaUnknown','mediaUnknown']]) {
+      if (typeof saved.currentMediaFilters?.[name] === 'string') {
+        document.getElementById(id).value = saved.currentMediaFilters[name];
+        currentMediaFilters[name] = document.getElementById(id).value;
+      }
+    }
     currentView = saved.currentView === 'poster' ? 'poster' : 'list';
     currentGrouped = saved.currentGrouped !== false;
   } catch (_) {}

@@ -520,6 +520,9 @@ func (s *Service) DeleteLibrary(ctx context.Context, id string) error {
 }
 
 func (s *Service) ListItems(ctx context.Context, libraryID string, query models.LocalMediaItemListQuery) (*models.LocalMediaItemListResult, error) {
+	if err := ValidateMediaFilters(query.MediaFilters); err != nil {
+		return nil, err
+	}
 	work, finishWork, workErr := s.beginLocalWork(ctx)
 	if workErr != nil {
 		return nil, workErr
@@ -553,6 +556,9 @@ func (s *Service) ListItems(ctx context.Context, libraryID string, query models.
 		query.Offset = 0
 	}
 
+	if query.MediaFilters.Active() {
+		return s.listMediaFilteredItems(ctx, libraryID, query)
+	}
 	result, err := s.repo.ListItemsByLibrary(ctx, libraryID, query)
 	if err != nil {
 		return nil, err
@@ -578,6 +584,9 @@ func (s *Service) ListItems(ctx context.Context, libraryID string, query models.
 }
 
 func (s *Service) ListGroups(ctx context.Context, libraryID string, query models.LocalMediaItemListQuery) (*models.LocalMediaGroupListResult, error) {
+	if err := ValidateMediaFilters(query.MediaFilters); err != nil {
+		return nil, err
+	}
 	work, finishWork, workErr := s.beginLocalWork(ctx)
 	if workErr != nil {
 		return nil, workErr
@@ -623,10 +632,13 @@ func (s *Service) ListGroups(ctx context.Context, libraryID string, query models
 
 	filtered := make([]models.LocalMediaItem, 0, len(result.Items))
 	for _, item := range result.Items {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
 		if !query.IncludeMissing && item.IsMissing {
 			continue
 		}
-		if localMediaItemMatchesQuery(item, query.Filter, query.Query) {
+		if localMediaItemMatchesQuery(item, query.Filter, query.Query) && localMediaMatchesFilters(item.Probe, query.MediaFilters) {
 			filtered = append(filtered, item)
 		}
 	}
@@ -670,6 +682,10 @@ func (s *Service) ListGroups(ctx context.Context, libraryID string, query models
 			Offset:                          query.Offset,
 			AlphabetBuckets:                 alphabetBuckets,
 		}, nil
+	}
+
+	if query.MediaFilters.Active() {
+		return &models.LocalMediaGroupListResult{Groups: pageGroups, Total: total, Limit: query.Limit, Offset: query.Offset, AlphabetBuckets: alphabetBuckets}, nil
 	}
 
 	// Enrich only items in the current page so we don't make TMDB/TVDB calls
@@ -2421,6 +2437,7 @@ func (s *Service) fetchMetadataDetails(ctx context.Context, title models.Title, 
 
 type ffprobeResponse struct {
 	Streams []struct {
+		Index          int               `json:"index"`
 		CodecType      string            `json:"codec_type"`
 		CodecName      string            `json:"codec_name"`
 		Width          int               `json:"width"`
@@ -2475,8 +2492,9 @@ func (s *Service) probeLocalFileWithError(ctx context.Context, path string, file
 	}
 
 	probe := &models.LocalMediaProbe{
-		FormatName: resp.Format.FormatName,
-		SizeBytes:  fileSize,
+		TracksScanned: true,
+		FormatName:    resp.Format.FormatName,
+		SizeBytes:     fileSize,
 	}
 	if v, err := strconv.ParseFloat(resp.Format.Duration, 64); err == nil {
 		probe.DurationSeconds = v
@@ -2496,11 +2514,13 @@ func (s *Service) probeLocalFileWithError(ctx context.Context, path string, file
 				probe.HDRFormat = detectHDRFormat(stream.ColorTransfer, stream.ColorPrimaries, stream.SideDataList)
 			}
 		case "audio":
+			probe.AudioTracks = append(probe.AudioTracks, models.MediaAudioFacts{Index: stream.Index, Language: models.NormalizeEvidenceLanguage(stream.Tags["language"]), Codec: strings.ToLower(strings.TrimSpace(stream.CodecName))})
 			probe.AudioStreams++
 			if codec := strings.TrimSpace(stream.CodecName); codec != "" {
 				audioSet[codec] = struct{}{}
 			}
 		case "subtitle":
+			probe.SubtitleTracks = append(probe.SubtitleTracks, models.MediaSubtitleFacts{Index: stream.Index, Language: models.NormalizeEvidenceLanguage(stream.Tags["language"]), Codec: strings.ToLower(strings.TrimSpace(stream.CodecName))})
 			probe.SubtitleStreams++
 			if codec := strings.TrimSpace(stream.CodecName); codec != "" {
 				subSet[codec] = struct{}{}

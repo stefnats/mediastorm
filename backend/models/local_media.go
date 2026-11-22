@@ -66,18 +66,38 @@ type LocalMediaLibrary struct {
 	Access             *LibraryAccessPolicy  `json:"access,omitempty"`
 }
 
+// LocalMediaFilters use only stored scan facts. Unknown controls whether missing
+// facts stay visible, are excluded, or are shown on their own.
+type LocalMediaFilters struct {
+	AudioLanguage    string `json:"audioLanguage,omitempty"`
+	SubtitleLanguage string `json:"subtitleLanguage,omitempty"`
+	AudioCodec       string `json:"audioCodec,omitempty"`
+	VideoCodec       string `json:"videoCodec,omitempty"`
+	MinHeight        int    `json:"minHeight,omitempty"`
+	HDR              string `json:"hdr,omitempty"`
+	Subtitles        string `json:"subtitles,omitempty"`
+	Unknown          string `json:"unknown,omitempty"`
+}
+
+func (f LocalMediaFilters) Active() bool {
+	return f.AudioLanguage != "" || f.SubtitleLanguage != "" || f.AudioCodec != "" || f.VideoCodec != "" || f.MinHeight != 0 || f.HDR != "" || f.Subtitles != ""
+}
+
 type LocalMediaProbe struct {
-	FormatName      string   `json:"formatName,omitempty"`
-	DurationSeconds float64  `json:"durationSeconds,omitempty"`
-	SizeBytes       int64    `json:"sizeBytes,omitempty"`
-	VideoCodec      string   `json:"videoCodec,omitempty"`
-	Width           int      `json:"width,omitempty"`
-	Height          int      `json:"height,omitempty"`
-	HDRFormat       string   `json:"hdrFormat,omitempty"`
-	AudioCodecs     []string `json:"audioCodecs,omitempty"`
-	SubtitleCodecs  []string `json:"subtitleCodecs,omitempty"`
-	AudioStreams    int      `json:"audioStreams,omitempty"`
-	SubtitleStreams int      `json:"subtitleStreams,omitempty"`
+	AudioTracks     []MediaAudioFacts    `json:"audioTracks,omitempty"`
+	SubtitleTracks  []MediaSubtitleFacts `json:"subtitleTracks,omitempty"`
+	TracksScanned   bool                 `json:"tracksScanned,omitempty"`
+	FormatName      string               `json:"formatName,omitempty"`
+	DurationSeconds float64              `json:"durationSeconds,omitempty"`
+	SizeBytes       int64                `json:"sizeBytes,omitempty"`
+	VideoCodec      string               `json:"videoCodec,omitempty"`
+	Width           int                  `json:"width,omitempty"`
+	Height          int                  `json:"height,omitempty"`
+	HDRFormat       string               `json:"hdrFormat,omitempty"`
+	AudioCodecs     []string             `json:"audioCodecs,omitempty"`
+	SubtitleCodecs  []string             `json:"subtitleCodecs,omitempty"`
+	AudioStreams    int                  `json:"audioStreams,omitempty"`
+	SubtitleStreams int                  `json:"subtitleStreams,omitempty"`
 }
 
 type LocalMediaExternalIDs struct {
@@ -124,6 +144,7 @@ type LocalMediaItem struct {
 }
 
 type LocalMediaItemListQuery struct {
+	MediaFilters LocalMediaFilters `json:"mediaFilters,omitempty"`
 	// OriginalLanguageMatches is a request-local cache predicate for catalogue
 	// assignments, never a source, file, audio, or age authorization.
 	OriginalLanguageMatches func(titleID, mediaType string) bool `json:"-"`
