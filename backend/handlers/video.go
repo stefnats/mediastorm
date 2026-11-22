@@ -44,6 +44,7 @@ import (
 	"novastream/models"
 	"novastream/services/credits"
 	"novastream/services/debrid"
+	"novastream/services/epg"
 	"novastream/services/libraryaccess"
 	"novastream/services/playback"
 	"novastream/services/streaming"
@@ -169,6 +170,7 @@ type VideoHandler struct {
 	clientSettingsSvc ClientSettingsProvider
 	configManager     ConfigProvider
 	liveChannels      LiveChannelProvider
+	kidsLiveEPG       *epg.Service
 
 	// Metadata response cache for /video/metadata endpoint
 	// Prevents repeated ffprobe calls during playback
@@ -5522,6 +5524,13 @@ func resolveStremioLiveStreamResource(ctx context.Context, streamResourceURL, pr
 
 // StartLiveHLSSession creates a new HLS session for live TV streams
 func (h *VideoHandler) StartLiveHLSSession(w http.ResponseWriter, r *http.Request) {
+	if h.isKidsLiveProfile(r) {
+		kidsLiveDeny(w, "use the programme-limited kids Live player")
+		return
+	}
+	h.startLiveHLSSession(w, r, nil)
+}
+func (h *VideoHandler) startLiveHLSSession(w http.ResponseWriter, r *http.Request, programme *kidsLiveProgramme) {
 	if shareMediaFrom(r.Context()) != nil {
 		apierror.Write(w, http.StatusNotImplemented, "share_source_unsupported", "Shared playback is unavailable for this source.")
 		return
@@ -5537,6 +5546,9 @@ func (h *VideoHandler) StartLiveHLSSession(w http.ResponseWriter, r *http.Reques
 	}
 
 	liveURL := r.URL.Query().Get("url")
+	if programme != nil {
+		liveURL = programme.channel.URL
+	}
 	if liveURL == "" {
 		http.Error(w, "missing url parameter", http.StatusBadRequest)
 		return
@@ -5573,7 +5585,10 @@ func (h *VideoHandler) StartLiveHLSSession(w http.ResponseWriter, r *http.Reques
 	}
 	admission := liveAdmissionForRequest(r, h.usersSvc, liveURL)
 	admission.bindSettings(r, h.configManager, h.userSettingsSvc)
-	stationPlan := h.liveStationPlan(r, liveURL)
+	var stationPlan *liveStationFailover
+	if programme == nil {
+		stationPlan = h.liveStationPlan(r, liveURL)
+	}
 	if target.Provider != "m3u" && target.Provider != "xtream" {
 		stationPlan = nil
 	}
@@ -5598,10 +5613,10 @@ func (h *VideoHandler) StartLiveHLSSession(w http.ResponseWriter, r *http.Reques
 	// A client asking for timeshift gets an HLS session that keeps the admin's window
 	// (hls_live_timeshift.go); with timeshift off it is an ordinary tune.
 	timeshiftWindow := time.Duration(0)
-	if parseOptionalBool(r.URL.Query().Get("timeshift")) {
+	if programme == nil && parseOptionalBool(r.URL.Query().Get("timeshift")) {
 		timeshiftWindow = h.liveTimeshiftWindow()
 	}
-	forceHLS := (admission.Policy.AllowLive || admission.Policy.AllowRecording) && admission.Owner.RevocationKey != "" || stationPlan != nil || timeshiftWindow > 0 ||
+	forceHLS := programme != nil || (admission.Policy.AllowLive || admission.Policy.AllowRecording) && admission.Owner.RevocationKey != "" || stationPlan != nil || timeshiftWindow > 0 ||
 		strings.EqualFold(strings.TrimSpace(r.URL.Query().Get("format")), "hls") ||
 		strings.EqualFold(strings.TrimSpace(r.URL.Query().Get("target")), "web") ||
 		(hdHomeRunInput && strings.EqualFold(strings.TrimSpace(r.URL.Query().Get("target")), "cast"))
@@ -5717,6 +5732,7 @@ func (h *VideoHandler) StartLiveHLSSession(w http.ResponseWriter, r *http.Reques
 	log.Printf("[video] creating live HLS session for URL: %s (provider=%s bucket=%s profile=%s)", requestsecurity.URLForLog(liveURL), target.Provider, target.BucketKey, profileID)
 
 	tuning := LiveTuningSettings{
+		kidsProgramme:      programme,
 		StationFailover:    stationPlan,
 		Capacity:           admission,
 		MaxStreams:         target.MaxStreams,
@@ -5732,6 +5748,9 @@ func (h *VideoHandler) StartLiveHLSSession(w http.ResponseWriter, r *http.Reques
 	playbackTarget := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("target")))
 	clientID := requestClientID(r)
 	liveCCEnabled := h.liveClosedCaptionExtractionEnabled(profileID, clientID)
+	if programme != nil {
+		liveCCEnabled = false
+	}
 	session, err := h.hlsManager.CreateLiveSession(r.Context(), liveURL, target.Provider, target.BucketKey, profileID, profileName, getClientIP(r), playbackTarget, tuning, liveCCEnabled)
 	if err != nil {
 		if writeLiveAdmissionError(w, target, err) {
@@ -5739,6 +5758,11 @@ func (h *VideoHandler) StartLiveHLSSession(w http.ResponseWriter, r *http.Reques
 		}
 		log.Printf("[video] failed to create live HLS session: %v", err)
 		http.Error(w, fmt.Sprintf("failed to create live HLS session: %v", err), http.StatusInternalServerError)
+		return
+	}
+	if programme != nil && !programme.current(time.Now().UTC()) {
+		h.hlsManager.CleanupSession(session.ID)
+		kidsLiveDeny(w, "the selected programme ended while the stream was starting")
 		return
 	}
 	session.mu.Lock()
@@ -5758,6 +5782,12 @@ func (h *VideoHandler) StartLiveHLSSession(w http.ResponseWriter, r *http.Reques
 		"hasClosedCaptions": false,
 		// Nonzero when this session keeps a timeshift window (asked for with timeshift=1).
 		"timeshiftWindowSeconds": int(timeshiftWindow.Seconds()),
+	}
+	if programme != nil {
+		response["playlistUrl"] = fmt.Sprintf("/video/hls/%s/stream.m3u8?%s", session.ID, url.Values{"profileId": {profileID}}.Encode())
+		response["programmeEndsAt"] = programme.program.Stop
+		response["programmeRemainingMillis"] = programme.remainingMillis(time.Now().UTC())
+		response["programme"] = programme.description()
 	}
 	if resolvedStremioIndex >= 0 {
 		response["stremioStreamIndex"] = resolvedStremioIndex

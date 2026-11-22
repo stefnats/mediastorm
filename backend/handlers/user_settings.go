@@ -10,7 +10,9 @@ import (
 
 	"novastream/config"
 	"novastream/internal/auth"
+	"novastream/internal/parentauth"
 	"novastream/models"
+	"novastream/services/epg"
 	user_settings "novastream/services/user_settings"
 
 	"github.com/gorilla/mux"
@@ -39,13 +41,15 @@ type localLibraryLister interface {
 }
 
 type UserSettingsHandler struct {
-	GuideChanged  func()
-	Service       userSettingsService
-	Users         userService
-	ConfigManager *config.Manager
-	LocalMedia    localLibraryLister
-	PrequeueStore userPrequeueClearer
-	SearchCache   userSearchCacheClearer
+	GuideChanged    func()
+	Service         userSettingsService
+	Users           userService
+	ConfigManager   *config.Manager
+	LocalMedia      localLibraryLister
+	PrequeueStore   userPrequeueClearer
+	SearchCache     userSearchCacheClearer
+	kidsLiveParents *parentauth.Guard
+	kidsLiveEPG     *epg.Service
 }
 
 func NewUserSettingsHandler(service userSettingsService, users userService, configManager *config.Manager) *UserSettingsHandler {
@@ -147,8 +151,10 @@ func (h *UserSettingsHandler) PutSettings(w http.ResponseWriter, r *http.Request
 	// Dedicated preferences retain their current stored values regardless of
 	// the body; return those values, including an absent last station bookmark.
 	if saved, err := h.Service.Get(userID); err == nil {
+		settings.LiveTV.KidsAgeLimit = models.KidsLiveAgePolicy{}
 		settings.LiveTV.FavoriteStationIDs = nil
 		if saved != nil {
+			settings.LiveTV.KidsAgeLimit = saved.LiveTV.KidsAgeLimit
 			settings.LiveTV.FavoriteStationIDs = append([]string(nil), saved.LiveTV.FavoriteStationIDs...)
 			settings.Playback.IntroAutoSkip = saved.Playback.IntroAutoSkip
 			settings.Playback.RecapAutoSkip = saved.Playback.RecapAutoSkip

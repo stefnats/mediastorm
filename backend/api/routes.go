@@ -631,6 +631,10 @@ func Register(
 	protected.HandleFunc("/library/items/{itemID}/playback", localMediaHandler.GetPlayback).Methods(http.MethodGet)
 	protected.HandleFunc("/library/items/{itemID}/playback", handleOptions).Methods(http.MethodOptions)
 	protected.HandleFunc("/library/items/{itemID}/artwork/{kind}", localMediaHandler.GetArtwork).Methods(http.MethodGet)
+	protected.HandleFunc("/live/kids/channels", videoHandler.KidsLiveChannels).Methods(http.MethodGet)
+	protected.HandleFunc("/live/kids/channels", handleOptions).Methods(http.MethodOptions)
+	protected.HandleFunc("/live/kids/hls/start", RateLimitHandlerFunc(hlsStartLimiter, videoHandler.StartKidsLiveHLSSession)).Methods(http.MethodGet)
+	protected.HandleFunc("/live/kids/hls/start", handleOptions).Methods(http.MethodOptions)
 	protected.HandleFunc("/live/hls/start", RateLimitHandlerFunc(hlsStartLimiter, videoHandler.StartLiveHLSSession)).Methods(http.MethodGet, http.MethodOptions)
 	protected.HandleFunc("/video/live-direct/{ticket}/stream.ts", videoHandler.ServeLiveDirect).Methods(http.MethodGet, http.MethodHead)
 	protected.HandleFunc("/live/usage", videoHandler.GetLiveUsage).Methods(http.MethodGet)
@@ -952,6 +956,9 @@ func Register(
 			`}`))
 	}).Methods(http.MethodGet, http.MethodOptions)
 
+	if videoHandler != nil {
+		videoHandler.ConfigureKidsLive(epgHandler, userSettingsHandler, accountsSvc)
+	}
 	// User profile routes (with ownership validation)
 	profileProtected.HandleFunc("", usersHandler.List).Methods(http.MethodGet)
 	profileProtected.HandleFunc("", RateLimitHandlerFunc(profileCreateLimiter, usersHandler.Create)).Methods(http.MethodPost)
@@ -984,6 +991,8 @@ func Register(
 	profileProtected.HandleFunc("/{userID}/kids-profile", usersHandler.SetKidsProfile).Methods(http.MethodPut)
 	profileProtected.HandleFunc("/{userID}/kids-profile", usersHandler.Options).Methods(http.MethodOptions)
 	// Kids profile content restriction configuration
+	profileProtected.HandleFunc("/{userID}/kids/live-policy", userSettingsHandler.KidsLivePolicy).Methods(http.MethodGet, http.MethodPut)
+	profileProtected.HandleFunc("/{userID}/kids/live-policy", userSettingsHandler.Options).Methods(http.MethodOptions)
 	profileProtected.HandleFunc("/{userID}/kids/regional-policy", usersHandler.RegionalChildPolicy).Methods(http.MethodGet, http.MethodPut)
 	profileProtected.HandleFunc("/{userID}/kids/regional-policy", usersHandler.Options).Methods(http.MethodOptions)
 	profileProtected.HandleFunc("/{userID}/kids/mode", usersHandler.SetKidsMode).Methods(http.MethodPut)

@@ -450,6 +450,8 @@ func (t *throttledReader) Read(p []byte) (n int, err error) {
 
 // HLSSession represents an active HLS transcoding session
 type HLSSession struct {
+	kidsProgramme      *kidsLiveProgramme
+	kidsProgrammeTimer *time.Timer
 	liveSupervisorDone chan struct{} // actual original outer live actor only
 	ordinary           *ordinaryHLSSession
 	shareOwned         *shareHLSOwned
@@ -682,6 +684,7 @@ type HLSSession struct {
 
 // LiveTuningSettings contains FFmpeg tuning parameters for live TV sessions.
 type LiveTuningSettings struct {
+	kidsProgramme      *kidsLiveProgramme
 	StationFailover    *liveStationFailover
 	Capacity           *liveCapacityAdmission
 	MaxStreams         int // Provider-account capacity; zero keeps the existing unconfigured policy.
@@ -2936,6 +2939,9 @@ func (m *HLSManager) CreateLiveSession(ctx context.Context, liveURL, provider, b
 			ordinary.finishOperation()
 		}
 	}()
+	if tuning.kidsProgramme != nil && !tuning.kidsProgramme.current(time.Now().UTC()) {
+		return nil, errors.New("current programme is not permitted")
+	}
 	admission := tuning.Capacity
 	lease, err := admission.acquire(ctx, bucketKey, liveUpstreamShareKey(liveURL, tuning), tuning.MaxStreams)
 	tuning.Capacity = nil
@@ -2966,6 +2972,7 @@ func (m *HLSManager) CreateLiveSession(ctx context.Context, liveURL, provider, b
 	now := time.Now()
 	session := &HLSSession{
 		liveSupervisorDone:      make(chan struct{}),
+		kidsProgramme:           tuning.kidsProgramme,
 		vodDirectory:            claim,
 		ID:                      sessionID,
 		Path:                    liveURL,
@@ -3001,6 +3008,10 @@ func (m *HLSManager) CreateLiveSession(ctx context.Context, liveURL, provider, b
 		subtitleExtractOffsets:  make(map[int]float64),
 	}
 	bgCtx := ordinary.attach(session)
+	var stopProgramme context.CancelFunc
+	if session.kidsProgramme != nil {
+		bgCtx, stopProgramme = context.WithDeadline(bgCtx, session.kidsProgramme.program.Stop)
+	}
 	session.Cancel = ordinary.current().cancel
 	if admission != nil {
 		session.liveCapacityOwner = admission.Owner
@@ -3026,6 +3037,9 @@ func (m *HLSManager) CreateLiveSession(ctx context.Context, liveURL, provider, b
 	// The original generation owns the actual supervisor through its return.
 	if !ordinaryHLSGo(bgCtx, session, func() {
 		defer close(session.liveSupervisorDone)
+		if stopProgramme != nil {
+			defer stopProgramme()
+		}
 		// The supervisor joins FFmpeg and closes its upstream before releasing.
 		defer func() { session.mu.RLock(); last := session.liveCapacityLease; session.mu.RUnlock(); last.Release() }()
 		if err := m.superviseOriginalLiveTranscoding(bgCtx, session); err != nil {
@@ -3052,6 +3066,9 @@ func (m *HLSManager) CreateLiveSession(ctx context.Context, liveURL, provider, b
 		return nil, errOrdinaryHLSClosed
 	}
 	publishedLease = true
+	if session.kidsProgramme != nil {
+		m.armKidsProgrammeEnd(session)
+	}
 
 	// Detect closed captions in background when extraction is enabled.
 	// Continuous extraction is lazy — starts on first captions.srt request.
@@ -6640,25 +6657,28 @@ func (m *HLSManager) clearSessionSegments(session *HLSSession) error {
 
 // HLSSessionStatus represents the status of an HLS session for frontend polling
 type HLSSessionStatus struct {
-	LiveSourceID              string  `json:"liveSourceId,omitempty"`
-	LiveSourceName            string  `json:"liveSourceName,omitempty"`
-	LiveFailoverAttempts      int     `json:"liveFailoverAttempts,omitempty"`
-	SessionID                 string  `json:"sessionId"`
-	Status                    string  `json:"status"` // "active", "completed", "error"
-	FatalError                string  `json:"fatalError,omitempty"`
-	FatalErrorTime            int64   `json:"fatalErrorTime,omitempty"` // Unix timestamp
-	Duration                  float64 `json:"duration,omitempty"`
-	SegmentsCreated           int     `json:"segmentsCreated"`
-	MaxSegmentRequested       int     `json:"maxSegmentRequested"` // Highest segment requested by player
-	Paused                    bool    `json:"paused"`              // True if FFmpeg is paused (rate limited)
-	BitstreamErrors           int     `json:"bitstreamErrors"`
-	HDRMetadataDisabled       bool    `json:"hdrMetadataDisabled"`
-	DVDisabled                bool    `json:"dvDisabled"`
-	RecoveryAttempts          int     `json:"recoveryAttempts"`
-	VideoEncoder              string  `json:"videoEncoder,omitempty"`
-	ToneMapper                string  `json:"toneMapper,omitempty"`
-	HardwareEncode            bool    `json:"hardwareEncode"`
-	HardwareFallbackAttempted bool    `json:"hardwareFallbackAttempted"`
+	ProgrammeRemainingMillis  *int64     `json:"programmeRemainingMillis,omitempty"`
+	ProgrammeEndsAt           *time.Time `json:"programmeEndsAt,omitempty"`
+	Programme                 any        `json:"programme,omitempty"`
+	LiveSourceID              string     `json:"liveSourceId,omitempty"`
+	LiveSourceName            string     `json:"liveSourceName,omitempty"`
+	LiveFailoverAttempts      int        `json:"liveFailoverAttempts,omitempty"`
+	SessionID                 string     `json:"sessionId"`
+	Status                    string     `json:"status"` // "active", "completed", "error"
+	FatalError                string     `json:"fatalError,omitempty"`
+	FatalErrorTime            int64      `json:"fatalErrorTime,omitempty"` // Unix timestamp
+	Duration                  float64    `json:"duration,omitempty"`
+	SegmentsCreated           int        `json:"segmentsCreated"`
+	MaxSegmentRequested       int        `json:"maxSegmentRequested"` // Highest segment requested by player
+	Paused                    bool       `json:"paused"`              // True if FFmpeg is paused (rate limited)
+	BitstreamErrors           int        `json:"bitstreamErrors"`
+	HDRMetadataDisabled       bool       `json:"hdrMetadataDisabled"`
+	DVDisabled                bool       `json:"dvDisabled"`
+	RecoveryAttempts          int        `json:"recoveryAttempts"`
+	VideoEncoder              string     `json:"videoEncoder,omitempty"`
+	ToneMapper                string     `json:"toneMapper,omitempty"`
+	HardwareEncode            bool       `json:"hardwareEncode"`
+	HardwareFallbackAttempted bool       `json:"hardwareFallbackAttempted"`
 }
 
 // GetSessionStatus returns the current status of an HLS session
@@ -6698,6 +6718,13 @@ func (m *HLSManager) GetSessionStatus(w http.ResponseWriter, r *http.Request, se
 		HardwareFallbackAttempted: session.HardwareFallbackAttempted,
 	}
 
+	if session.kidsProgramme != nil {
+		end := session.kidsProgramme.program.Stop
+		status.ProgrammeEndsAt = &end
+		remaining := session.kidsProgramme.remainingMillis(time.Now().UTC())
+		status.ProgrammeRemainingMillis = &remaining
+		status.Programme = session.kidsProgramme.description()
+	}
 	if session.FatalError != "" {
 		status.Status = "error"
 		status.FatalError = session.FatalError
@@ -8313,6 +8340,11 @@ func (m *HLSManager) CleanupSession(sessionID string) {
 }
 
 func (m *HLSManager) cleanupDetachedHLSSession(sessionID string, session *HLSSession, outputDir string) {
+	session.mu.Lock()
+	if session.kidsProgrammeTimer != nil {
+		session.kidsProgrammeTimer.Stop()
+	}
+	session.mu.Unlock()
 	if session.shareOwned != nil {
 		session.shareOwned.close()
 		return

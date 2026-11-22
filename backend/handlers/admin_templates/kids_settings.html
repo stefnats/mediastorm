@@ -126,6 +126,26 @@
         </div>
     </div>
 
+    <div class="card" id="kids-live-policy" data-profile-id="">
+        <div class="card-header"><h2>Programme-limited Live TV</h2></div>
+        <div class="card-body">
+            <p>Live TV stays off until you explicitly enable it and choose a loaded guide. FSK ages are claims from that guide, not an independent classification of the broadcast. Unknown and higher-rated programmes remain blocked.</p>
+            <form id="kids-live-policy-form">
+                <fieldset id="kids-live-fields" disabled>
+                    <div class="form-group"><label><input type="checkbox" id="kids-live-enabled"> Enable programme-limited Live TV</label></div>
+                    <div class="form-group"><label class="form-label" for="kids-live-age">Maximum German FSK age</label>
+                        <select class="form-select" id="kids-live-age"><option value="0">FSK 0</option><option value="6" selected>FSK 6</option><option value="12">FSK 12</option><option value="16">FSK 16</option><option value="18">FSK 18</option></select>
+                    </div>
+                    <div class="form-group"><label class="form-label" for="kids-live-guide">Guide to use for the decision</label><select class="form-select" id="kids-live-guide"><option value="">Choose a loaded guide</option></select></div>
+                    <p>Playback ends with the selected programme. Direct streams, catch-up and timeshift stay unavailable in this mode. The player must support the programme stop time.</p>
+                    <button class="btn btn-primary" type="submit" id="kids-live-save">Save Live TV rule</button>
+                </fieldset>
+            </form>
+            <button class="btn btn-secondary btn-sm" type="button" id="kids-live-reload">Reload saved Live TV rule and guides</button>
+            <p id="kids-live-status" role="status" aria-live="polite">Loading saved Live TV rule…</p>
+        </div>
+    </div>
+
     <!-- Allowed Lists -->
     <div class="card" id="lists-section">
         <div class="card-header">
@@ -1120,4 +1140,5 @@ async function loadContentPreview() {
 
 loadProfile();
 </script>
+<script src="{{.ServerBasePath}}/api/static/kids-live-policy-v1.js"></script>
 {{end}}

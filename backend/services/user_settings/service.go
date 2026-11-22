@@ -774,6 +774,8 @@ func (s *Service) Update(userID string, settings models.UserSettings) error {
 	settings.SportsPreferences = s.settings[userID].SportsPreferences
 	// Station bookmarks change only through the dedicated idempotent endpoint.
 	settings.LiveTV.FavoriteStationIDs = append([]string(nil), s.settings[userID].LiveTV.FavoriteStationIDs...)
+	// Parental Live choices cannot be replaced by general profile preferences.
+	settings.LiveTV.KidsAgeLimit = s.settings[userID].LiveTV.KidsAgeLimit
 	// Intro, recap and next-episode autoplay change only through UpdateSkipping (PATCH
 	// /settings/skipping). Clients send back the whole document they last
 	// read, often from a cache older than the latest toggle, so a full PUT
@@ -924,7 +926,8 @@ func isSettingsEmpty(s models.UserSettings) bool {
 	}
 
 	// Check LiveTV
-	if len(s.LiveTV.HiddenChannels) > 0 ||
+	if s.LiveTV.KidsAgeLimit != (models.KidsLiveAgePolicy{}) ||
+		len(s.LiveTV.HiddenChannels) > 0 ||
 		len(s.LiveTV.FavoriteChannels) > 0 ||
 		len(s.LiveTV.FavoriteStationIDs) > 0 ||
 		len(s.LiveTV.SelectedCategories) > 0 ||

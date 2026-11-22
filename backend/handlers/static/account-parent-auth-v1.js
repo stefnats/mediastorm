@@ -13,7 +13,7 @@
     function passwordPrompt(signal, completed, explanationText) {
         const dialog = document.createElement('dialog');
         dialog.setAttribute('aria-label', 'Confirm account password');
-        dialog.style.cssText = 'max-width:26rem;width:calc(100% - 3rem);padding:1.5rem;border:1px solid #444;border-radius:12px;background:#18181b;color:#fafafa;';
+        dialog.style.cssText = 'box-sizing:border-box;max-width:26rem;width:calc(100% - 3rem);padding:1.5rem;border:1px solid #444;border-radius:12px;background:#18181b;color:#fafafa;';
         const form = document.createElement('form');
         const title = document.createElement('h2');
         title.textContent = 'Parent confirmation';

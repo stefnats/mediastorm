@@ -3,6 +3,7 @@ package epg
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -36,6 +37,46 @@ func validGermanAge(age int) bool { return age == 0 || age == 6 || age == 12 || 
 // EPG display offset before calling. The interval includes Start and excludes
 // Stop. A result describes EPG metadata only and grants no Live TV playback.
 func (s *Service) CurrentProgramAgeDecision(channelID string, maximumAge int, guideTime time.Time) models.EPGAgeDecision {
+	return s.currentProgramAgeDecision(channelID, "", maximumAge, guideTime)
+}
+
+// CurrentProgramAgeDecisionForSource never applies the presentation time offset.
+// Playback callers supply actual UTC time and the deliberately chosen cached guide.
+// Only the exact imported channel ID is accepted (case-normalized as on import).
+func (s *Service) CurrentProgramAgeDecisionForSource(channelID, sourceID string, maximumAge int, now time.Time) models.EPGAgeDecision {
+	if sourceID == "" {
+		return models.EPGAgeDecision{State: "unknown", Reason: "rating_source_unknown", Country: "DE", MaximumAge: maximumAge, ChannelID: channelID, At: now}
+	}
+	return s.currentProgramAgeDecision(channelID, sourceID, maximumAge, now)
+}
+
+// CachedProgrammeSources lists descriptive origins already present in memory.
+// It does not refresh guides or expose provider URLs.
+func (s *Service) CachedProgrammeSources() []models.EPGProgramSource {
+	result := []models.EPGProgramSource{}
+	if s == nil {
+		return result
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if s.schedule == nil {
+		return result
+	}
+	seen := map[string]bool{}
+	for _, programmes := range s.schedule.Programs {
+		for _, programme := range programmes {
+			source := programme.Source
+			if source == nil || source.ID == "" || source.Type == "" || source.ObservedAt.IsZero() || seen[source.ID] {
+				continue
+			}
+			seen[source.ID] = true
+			result = append(result, *source)
+		}
+	}
+	sort.Slice(result, func(i, j int) bool { return result[i].ID < result[j].ID })
+	return result
+}
+func (s *Service) currentProgramAgeDecision(channelID, sourceID string, maximumAge int, guideTime time.Time) models.EPGAgeDecision {
 	result := models.EPGAgeDecision{State: "unknown", Reason: "invalid_age_limit", Country: "DE", MaximumAge: maximumAge, ChannelID: channelID, At: guideTime}
 	if !validGermanAge(maximumAge) {
 		return result
@@ -49,7 +90,15 @@ func (s *Service) CurrentProgramAgeDecision(channelID string, maximumAge int, gu
 	if s.schedule == nil {
 		return result
 	}
-	resolved, reason := ageProgrammeChannel(s.schedule, channelID)
+	var resolved, reason string
+	if sourceID != "" {
+		resolved = strings.ToLower(strings.TrimSpace(channelID))
+		if _, exists := s.schedule.Programs[resolved]; resolved == "" || !exists {
+			reason = "channel_unknown"
+		}
+	} else {
+		resolved, reason = ageProgrammeChannel(s.schedule, channelID)
+	}
 	if reason != "" {
 		result.Reason = reason
 		return result
@@ -57,6 +106,9 @@ func (s *Service) CurrentProgramAgeDecision(channelID string, maximumAge int, gu
 	result.ChannelID = resolved
 	var current *models.EPGProgram
 	for _, program := range s.schedule.Programs[resolved] {
+		if sourceID != "" && (program.Source == nil || program.Source.ID != sourceID) {
+			continue
+		}
 		if program.Start.IsZero() || program.Stop.IsZero() || !program.Stop.After(program.Start) {
 			continue
 		}

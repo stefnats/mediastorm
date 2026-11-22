@@ -44,6 +44,9 @@ func (h *VideoHandler) requireHLSSessionAccess(w http.ResponseWriter, r *http.Re
 	if !profileaccess.CheckResource(w, r, profileID, resource) {
 		return false
 	}
+	if !h.checkKidsLiveSession(w, r, session) {
+		return false
+	}
 	session.mu.RLock()
 	revoked := session.LiveRevoked
 	session.mu.RUnlock()

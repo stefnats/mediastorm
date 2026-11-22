@@ -267,7 +267,7 @@ func CurrentMiddleware(owns func(*http.Request, string) (bool, error)) mux.Middl
 func CurrentKidsLiveTV(isKids func(*http.Request, string) (bool, error)) mux.MiddlewareFunc {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			if r.Method == http.MethodOptions || auth.IsShareLinkRequest(r) || !KidsLiveTVPath(r.URL.Path) {
+			if KidsProgrammeStartPath(r) || r.Method == http.MethodOptions || auth.IsShareLinkRequest(r) || !KidsLiveTVPath(r.URL.Path) {
 				next.ServeHTTP(w, r)
 				return
 			}

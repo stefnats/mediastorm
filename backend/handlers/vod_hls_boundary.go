@@ -348,6 +348,16 @@ func hlsScope(r *http.Request) *vodHLSScope {
 	return s
 }
 func checkHLSSessionHTTP(w http.ResponseWriter, r *http.Request, id string) bool {
+	if ref := ordinaryHTTPRef(r); ref != nil && ref.owner.session != nil {
+		ref.owner.session.mu.RLock()
+		programme := ref.owner.session.kidsProgramme
+		ref.owner.session.mu.RUnlock()
+		if programme != nil && !programme.current(time.Now().UTC()) {
+			kidsLiveDeny(w, "the selected programme ended or changed")
+			return false
+		}
+	}
+
 	if ref := ordinaryHTTPRef(r); ref != nil {
 		if ref.owner.session == nil || ref.owner.session.ID != id || ref.check() != nil {
 			http.Error(w, "HLS operation unavailable", 503)

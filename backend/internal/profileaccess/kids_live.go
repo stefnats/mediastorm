@@ -42,7 +42,7 @@ func BlockKidsFromLiveTV(isKids func(profileID string) bool) mux.MiddlewareFunc 
 			return next
 		}
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			if r.Method == http.MethodOptions || auth.IsShareLinkRequest(r) || !KidsLiveTVPath(r.URL.Path) {
+			if KidsProgrammeStartPath(r) || r.Method == http.MethodOptions || auth.IsShareLinkRequest(r) || !KidsLiveTVPath(r.URL.Path) {
 				next.ServeHTTP(w, r)
 				return
 			}
@@ -71,4 +71,10 @@ func BlockKidsFromLiveTV(isKids func(profileID string) bool) mux.MiddlewareFunc 
 			next.ServeHTTP(w, r)
 		})
 	}
+}
+
+// KidsProgrammeStartPath is the one programme-limited HLS entry. It is not an
+// age decision; its handler must select the catalog channel and current guide.
+func KidsProgrammeStartPath(r *http.Request) bool {
+	return r.Method == http.MethodGet && (strings.HasSuffix(r.URL.Path, "/api/live/kids/hls/start") || strings.HasSuffix(r.URL.Path, "/api/live/kids/channels"))
 }

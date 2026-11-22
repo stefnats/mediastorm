@@ -244,10 +244,12 @@ type AppearanceSettings struct {
 
 // LiveTVSettings contains per-user Live TV preferences.
 type LiveTVSettings struct {
-	HiddenChannels     []string `json:"hiddenChannels"`               // Channel IDs that are hidden
-	FavoriteStationIDs []string `json:"favoriteStationIds,omitempty"` // Profile-wide station bookmarks; individual stream favorites remain separate
-	FavoriteChannels   []string `json:"favoriteChannels"`             // Channel IDs that are favorited
-	SelectedCategories []string `json:"selectedCategories"`           // Selected category filters
+	// KidsAgeLimit changes only through the password-confirmed parental endpoint.
+	KidsAgeLimit       KidsLiveAgePolicy `json:"kidsAgeLimit"`
+	HiddenChannels     []string          `json:"hiddenChannels"`               // Channel IDs that are hidden
+	FavoriteStationIDs []string          `json:"favoriteStationIds,omitempty"` // Profile-wide station bookmarks; individual stream favorites remain separate
+	FavoriteChannels   []string          `json:"favoriteChannels"`             // Channel IDs that are favorited
+	SelectedCategories []string          `json:"selectedCategories"`           // Selected category filters
 	// Per-profile IPTV source override (nil = use global)
 	Mode                    *string              `json:"mode,omitempty"`
 	PlaylistURL             *string              `json:"playlistUrl,omitempty"`

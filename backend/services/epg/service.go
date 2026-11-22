@@ -295,7 +295,18 @@ func collectXMLTVSources(settings config.Settings) []epgXMLTVSource {
 	sort.SliceStable(result, func(i, j int) bool {
 		return result[i].priority < result[j].priority
 	})
-	return result
+	// Legacy settings may expose the same guide globally and on the default
+	// source. Fetching both would duplicate each programme in the merged guide.
+	seen := make(map[string]bool)
+	unique := result[:0]
+	for _, source := range result {
+		key := strings.TrimSpace(source.url) + "\x00" + strings.TrimSpace(source.proxyURL)
+		if !seen[key] {
+			seen[key] = true
+			unique = append(unique, source)
+		}
+	}
+	return unique
 }
 
 func countConfiguredXMLTVSources(settings config.Settings) int {
