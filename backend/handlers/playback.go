@@ -260,9 +260,6 @@ func (h *PlaybackHandler) Resolve(w http.ResponseWriter, r *http.Request) {
 	if request.IncludeTrackSelection {
 		resolution = h.withTrackSelection(r, resolution, request.ProfileID, request.ClientID, firstNonEmpty(request.TitleID, request.Result.Attributes["titleId"]))
 	}
-	if observedResolution(resolution.Probe) > 0 {
-		resolution.QualityAttributes = observedQualityAttributes(request.Result.Attributes, resolution.Probe)
-	}
 
 	if !h.vodBoundary.recheckHTTP(w, r, owner, vodDemand) {
 		return
@@ -274,6 +271,10 @@ func (h *PlaybackHandler) Resolve(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, err.Error(), http.StatusConflict)
 			return
 		}
+	}
+
+	if resolution.Probe != nil {
+		resolution.QualityAttributes = observedQualityAttributes(request.Result.Attributes, resolution.Probe, resolution.TrackSelection.AudioStreamIndex())
 	}
 
 	// Subtitle pre-extraction disabled — the player handles subtitles natively.
@@ -422,8 +423,8 @@ func (h *PlaybackHandler) QueueStatus(w http.ResponseWriter, r *http.Request) {
 	if include, _ := strconv.ParseBool(query.Get("includeTrackSelection")); include {
 		status = h.withTrackSelection(r, status, query.Get("profileId"), query.Get("clientId"), query.Get("titleId"))
 	}
-	if observedResolution(status.Probe) > 0 {
-		status.QualityAttributes = observedQualityAttributes(status.QualityAttributes, status.Probe)
+	if status.Probe != nil {
+		status.QualityAttributes = observedQualityAttributes(status.QualityAttributes, status.Probe, status.TrackSelection.AudioStreamIndex())
 	}
 
 	w.Header().Set("Content-Type", "application/json")

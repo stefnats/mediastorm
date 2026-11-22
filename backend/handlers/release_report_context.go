@@ -129,6 +129,7 @@ func (h *PlaybackHandler) filterResolvedReportedAudio(r *http.Request, result mo
 	}
 	selection.Audio = trackselect.DescribeAudioTrack(probe.AudioStreams, selection.AudioStreamIndex())
 	copy := *resolution
+	copy.Probe = probe
 	copy.TrackSelection = selection
 	return &copy, nil
 }

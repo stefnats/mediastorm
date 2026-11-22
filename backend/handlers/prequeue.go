@@ -1968,7 +1968,7 @@ func (h *PrequeueHandler) refreshAdoptedMigrationMetadataWithProbeContext(parent
 		if metadata.duration > 0 {
 			e.Duration = metadata.duration
 		}
-		e.ResultAttributes = observedQualityAttributes(e.ResultAttributes, metadata.probe)
+		e.ResultAttributes = observedQualityAttributes(e.ResultAttributes, metadata.probe, selectedAudioTrack)
 		e.FrameRate = metadata.avgFrameRate
 		e.HasDolbyVision = metadata.hasDolbyVision
 		e.HasHDR10 = metadata.hasHDR10
@@ -2780,6 +2780,7 @@ func (h *PrequeueHandler) runPrequeueWorkerJob(work *prequeueWorkerLifetime, pre
 			trackPrefs.AudioLanguage, trackPrefs.AllowedLanguages, trackPrefs.SubtitleLanguage, trackPrefs.SubtitleMode)
 
 		// Use combined prober if available (single ffprobe call), otherwise fall back to separate probes
+		qualityProbe := cachedProbeResult
 		var audioStreams []AudioStreamInfo
 		var subtitleStreams []SubtitleStreamInfo
 		var hasDV, hasHDR10 bool
@@ -2817,6 +2818,7 @@ func (h *PrequeueHandler) runPrequeueWorkerJob(work *prequeueWorkerLifetime, pre
 			if err != nil {
 				log.Printf("[prequeue] Unified probe failed (non-fatal): %v", err)
 			} else if fullResult != nil {
+				qualityProbe = fullResult
 				h.recordVODPreparationEvidence(prequeueID, clientID, fullResult, evidenceConfigurationKey)
 				audioStreams = fullResult.AudioStreams
 				subtitleStreams = fullResult.SubtitleStreams
@@ -2897,6 +2899,9 @@ func (h *PrequeueHandler) runPrequeueWorkerJob(work *prequeueWorkerLifetime, pre
 
 		// Store selected tracks and duration
 		h.updateVODWorker(prequeueID, func(e *playback.PrequeueEntry) {
+			if qualityProbe != nil {
+				e.ResultAttributes = observedQualityAttributes(e.ResultAttributes, qualityProbe, selectedAudioTrack)
+			}
 			e.SelectedAudioTrack = selectedAudioTrack
 			e.SelectedSubtitleTrack = selectedSubtitleTrack
 			e.TrackSelection = trackSelection
