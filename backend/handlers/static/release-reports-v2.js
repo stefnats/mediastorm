@@ -254,6 +254,7 @@ function renderPreparedRelease(action) {
   document.getElementById('releaseReplacementName').textContent = status.displayName || status.selectedResult?.title || 'Selected alternative';
   const audio = (status.audioTracks || []).find(track => track.index === status.selectedAudioTrack);
   document.getElementById('releaseReplacementAudio').textContent = audio ? `Selected audio: ${releaseReportLanguageName(audio.language)} / ${audio.codec || 'audio'}` : 'Audio selection follows this playback request.';
+  if (typeof renderWebQualityComparison === 'function') renderWebQualityComparison(document.getElementById('releaseReplacementQuality'), webSourceQualityAttributes(status));
   const resume = document.getElementById('releaseReplacementResume');
   if (reset) resume.value = 'beginning';
   resume.disabled = reset;
@@ -296,7 +297,8 @@ async function startPreparedRelease() {
     webPlayerManualAudioSelection = webPlayerSelectedAudioTrack !== null;
     webPlayerManualSubtitleSelection = true;
     webPlayerMetadataResolved = false;
-    playbackMeta = { ...playbackMeta, displayName: status.displayName || '', dv: Boolean(status.hasDolbyVision), hdr10: Boolean(status.hasHdr10), dvProfile: status.dolbyVisionProfile || '' };
+    playbackMeta = { ...playbackMeta, displayName: status.displayName || '', dv: Boolean(status.hasDolbyVision), hdr10: Boolean(status.hasHdr10), dvProfile: status.dolbyVisionProfile || '', sourceQuality:null };
+    if (typeof setWebSourceQuality === 'function') setWebSourceQuality(sourcePath, webSourceQualityAttributes(status));
     progressCompleted = false;
     lastKnownPositivePosition = offset;
     syncPlaybackUrlToHistory();

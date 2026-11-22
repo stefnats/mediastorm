@@ -1082,6 +1082,7 @@
         <div id="mediaTypeLabel" class="eyebrow">Playback</div>
         <h1 id="title">Loading player</h1>
         <div id="details" class="details"></div>
+        <details id="sourceQuality" class="details" hidden></details>
       </section>
 
       <section class="player-panel">
@@ -1168,6 +1169,7 @@
       <h3 id="releaseReplacementTitle">Prepared alternative</h3>
       <p id="releaseReplacementName"></p>
       <p id="releaseReplacementAudio"></p>
+      <details id="releaseReplacementQuality" class="details"></details>
       <label for="releaseReplacementResume">Start position</label>
       <select id="releaseReplacementResume">
         <option value="rewind">10 seconds back</option>
@@ -1254,6 +1256,7 @@
     let activeProfileId = '';
     let activeProfileName = '';
     let playbackMeta = {};
+    let webSourceQualityRevision = 0;
     let sourcePath = '';
     let directMovieUrl = '';
     let hlsInstance = null;
@@ -1962,6 +1965,85 @@
       document.getElementById('topSubtitle').textContent = SHARE_MODE
         ? 'Shared stream'
         : activeProfileName ? `Playing as ${activeProfileName}` : 'Web player';
+      renderWebSourceQuality();
+    }
+
+    // These values describe one prepared file, not the browser's current decoder or search candidates.
+    function webSourceQualityAttributes(status) {
+      return { ...(status?.selectedResult?.attributes || {}), ...(status?.resultAttributes || {}), ...(status?.qualityAttributes || {}) };
+    }
+
+    function webSourceQualityRows(attributes = {}) {
+      const rows = [];
+      const value = key => typeof attributes[key] === 'string' ? attributes[key].trim() : '';
+      const claim = (key, observed, label) => {
+        const original = value(key);
+        if (original && original.toLowerCase() !== observed.toLowerCase()) rows.push([label, original]);
+      };
+      const codec = raw => ({ h264:'H.264', avc:'H.264', hevc:'HEVC', h265:'HEVC', mpeg2video:'MPEG-2', eac3:'E-AC-3', ac3:'AC-3', truehd:'TrueHD' }[raw.toLowerCase()] || raw.toUpperCase());
+      const knownCodec = raw => raw && !['unknown', 'und', 'none', 'n/a'].includes(raw.toLowerCase());
+      const resolution = value('resolution');
+      if (value('resolutionSource') === 'file_probe' && /^[0-9]{3,4}p$/.test(resolution)) {
+        rows.push(['File resolution', resolution]);
+        claim('advertisedResolution', resolution, 'Advertised resolution');
+      }
+      const video = value('codec');
+      if (value('codecSource') === 'file_probe' && knownCodec(video)) {
+        rows.push(['File video codec', codec(video)]);
+        claim('advertisedCodec', video, 'Advertised video codec');
+      }
+      const audio = value('audio');
+      const index = value('audioStreamIndex');
+      if (value('audioSource') === 'file_probe' && knownCodec(audio) && /^(0|[1-9][0-9]*)$/.test(index) && Number.isSafeInteger(Number(index))) {
+        rows.push(['File audio (prepared track)', `${codec(audio)} · container stream ${index}`]);
+        claim('advertisedAudio', audio, 'Advertised audio');
+      }
+      const hdr = value('hdr');
+      if (value('hdrSource') === 'file_probe' && ['SDR', 'HDR10', 'HDR10+', 'HLG', 'DV'].includes(hdr)) {
+        rows.push(['File dynamic range', hdr === 'DV' ? 'Dolby Vision' : hdr]);
+        claim('advertisedHDR', hdr, 'Advertised dynamic range');
+        const dv = value('hasDV');
+        if (dv === 'true' || dv === 'false') {
+          rows.push(['File Dolby Vision', dv === 'true' ? 'Yes' : 'No']);
+          claim('advertisedHasDV', dv, 'Advertised Dolby Vision');
+        }
+      }
+      return rows;
+    }
+
+    function renderWebQualityComparison(element, attributes) {
+      if (!element) return;
+      const rows = webSourceQualityRows(attributes);
+      const actual = rows.filter(([label]) => label.startsWith('File ')).map(([label, text]) =>
+        label === 'File audio (prepared track)' ? `Prepared audio: ${text}` : label === 'File Dolby Vision' ? `Dolby Vision: ${text}` : text);
+      const summary = actual.length ? `File probe: ${actual.join(' · ')}` : 'File quality not verified';
+      element.innerHTML = `<summary>${escapeHtml(summary)}</summary>` + (rows.length
+        ? `<p>File facts come from the selected file probe. Prepared audio identifies that container track; browser playback may use a different decoder or track.</p><dl>${rows.map(([label, text]) => `<dt>${escapeHtml(label)}</dt><dd>${escapeHtml(text)}</dd>`).join('')}</dl>`
+        : '<p>No confirmed file probe information is available for this source.</p>');
+    }
+
+    function renderWebSourceQuality() {
+      const element = document.getElementById('sourceQuality');
+      if (!element) return;
+      element.hidden = SHARE_MODE || playbackMeta.isLive;
+      if (element.hidden) { element.innerHTML = ''; return; }
+      const quality = playbackMeta.sourceQuality;
+      const attributes = quality?.path === sourcePath && quality?.profileId === activeProfileId ? quality.attributes : {};
+      renderWebQualityComparison(element, attributes);
+    }
+
+    function setWebSourceQuality(path, attributes) {
+      if (path !== sourcePath) return false;
+      webSourceQualityRevision++;
+      playbackMeta.sourceQuality = { path, profileId:activeProfileId, attributes:{ ...attributes } };
+      renderWebSourceQuality();
+      return true;
+    }
+
+    function clearWebSourceQuality() {
+      webSourceQualityRevision++;
+      playbackMeta.sourceQuality = null;
+      renderWebSourceQuality();
     }
 
     async function startManualPath() {
@@ -1969,6 +2051,9 @@
       if (!value) return;
       sourcePath = value;
       directMovieUrl = '';
+      playbackMeta = { ...playbackMeta, sourceQuality:null, displayName:'' };
+      clearWebSourceQuality();
+      renderHeader();
       await startWebPlayerFromSource({ startOffset: 0 });
     }
 
@@ -4475,8 +4560,14 @@
     }
 
     async function initializeWebMigrationState(prequeueId, suppliedStatus) {
-      if (!prequeueId || SHARE_MODE || playbackMeta.isLive || !webPlayerPreferences.streamMigrationEnabled) { webPlayerMigrationState = null; return; }
+      if (!prequeueId || SHARE_MODE || playbackMeta.isLive) { webPlayerMigrationState = null; return; }
+      const requestedPath = sourcePath;
+      const requestedProfile = activeProfileId;
+      const qualityRevision = webSourceQualityRevision;
       const status = suppliedStatus || await apiCall('/playback/prequeue/' + encodeURIComponent(prequeueId)).catch(() => null);
+      if (sourcePath !== requestedPath || activeProfileId !== requestedProfile || webPlayerActivePrequeueId !== prequeueId || qualityRevision !== webSourceQualityRevision) return;
+      if (status?.streamPath === sourcePath) setWebSourceQuality(sourcePath, webSourceQualityAttributes(status));
+      if (!webPlayerPreferences.streamMigrationEnabled) { webPlayerMigrationState = null; return; }
       const candidates = Array.isArray(status?.migrationCandidates) ? status.migrationCandidates : [];
       if (!candidates.length) { webPlayerMigrationState = null; return; }
       webPlayerMigrationState = {
@@ -4710,7 +4801,8 @@
             previous.position = handoffPosition;
             sendWebPlayerProgress({ force:true, isPaused:false, position:handoffPosition });
             sourcePath = nextPath;
-            playbackMeta = { ...previous.meta, displayName:result?.title || previous.meta.displayName };
+            playbackMeta = { ...previous.meta, displayName:result?.title || previous.meta.displayName, sourceQuality:null };
+            setWebSourceQuality(nextPath, { ...(result?.attributes || {}), ...(resolved?.qualityAttributes || {}) });
             applyWebMigrationMetadata(metadata);
             renderHeader();
             await startWebPlayerFromSource({
@@ -4738,12 +4830,14 @@
               error:candidateError?.message || String(candidateError),
             });
             playbackMeta = { ...previous.meta };
+            renderWebSourceQuality();
           }
         }
         throw new Error('No qualified replacement streams are available.');
       } catch (error) {
         sourcePath = previous.path;
         playbackMeta = { ...previous.meta };
+        renderHeader();
         webPlayerSelectedAudioTrack = previous.selectedAudioTrack;
         webPlayerSelectedSubtitleTrack = previous.selectedSubtitleTrack;
         webPlayerManualAudioSelection = previous.manualAudioSelection;
@@ -4820,11 +4914,13 @@
         episodeName: next.name || status.targetEpisode?.title || '',
         title: playbackMeta.seriesTitle || playbackMeta.title || 'Series',
         displayName: status.displayName || '',
+        sourceQuality:null,
         dv: Boolean(status.hasDolbyVision),
         hdr10: Boolean(status.hasHdr10),
         dvProfile: status.dolbyVisionProfile || '',
         forceAAC: true,
       };
+      setWebSourceQuality(sourcePath, webSourceQualityAttributes(status));
       if (Number.isFinite(Number(status.selectedAudioTrack)) && Number(status.selectedAudioTrack) >= 0) {
         webPlayerSelectedAudioTrack = Number(status.selectedAudioTrack);
       } else {
