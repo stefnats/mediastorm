@@ -243,6 +243,8 @@ type LocalMediaItemGroup struct {
 }
 
 type LocalMediaGroupListResult struct {
+	StoredMediaFilterSupported      bool                  `json:"storedMediaFilterSupported,omitempty"`
+	StoredMediaFilterBasis          string                `json:"storedMediaFilterBasis,omitempty"`
 	OriginalLanguageFilterSupported bool                  `json:"originalLanguageFilterSupported,omitempty"`
 	Groups                          []LocalMediaItemGroup `json:"groups"`
 	Total                           int                   `json:"total"`

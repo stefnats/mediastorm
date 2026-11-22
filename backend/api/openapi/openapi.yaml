@@ -894,7 +894,37 @@ paths:
         identity, audio tracks, regional certification or playback permission.
         Remote provider completeness and a cross-request immutable snapshot are
         not claimed. Unfiltered legacy loading/enrichment remains unchanged.
+        Local and stored Plex/Jellyfin groups advertise
+        `storedMediaFilterSupported: true` after a successful group read. Active
+        media criteria also return `storedMediaFilterBasis: stored_library_versions`.
+        These filters use stored file facts before total and pagination, with
+        missing facts handled by `mediaUnknown`; no scan, probe or provider open
+        is introduced. They remain separate from original catalogue language.
       parameters:
+        - name: audioLanguage
+          in: query
+          schema: {type: string, maxLength: 40}
+        - name: subtitleLanguage
+          in: query
+          schema: {type: string, maxLength: 40}
+        - name: audioCodec
+          in: query
+          schema: {type: string, maxLength: 40}
+        - name: videoCodec
+          in: query
+          schema: {type: string, maxLength: 40}
+        - name: minHeight
+          in: query
+          schema: {type: integer, minimum: 144, maximum: 8640}
+        - name: hdr
+          in: query
+          schema: {type: string, enum: [sdr, hdr10, hlg, dolby_vision]}
+        - name: subtitles
+          in: query
+          schema: {type: string, enum: [present, absent]}
+        - name: mediaUnknown
+          in: query
+          schema: {type: string, enum: [include, exclude, only]}
         - name: libraryID
           in: path
           required: true
@@ -7261,6 +7291,15 @@ components:
       type: object
       required: [groups, total, limit, offset]
       properties:
+        storedMediaFilterSupported:
+          type: boolean
+          readOnly: true
+          description: True when this saved-library response supports media filters before total and pagination. Missing or false on older or unsupported responses; clients must not accept an unconfirmed active filter.
+        storedMediaFilterBasis:
+          type: string
+          enum: [stored_library_versions]
+          readOnly: true
+          description: Present only when media criteria are active and evaluated against stored file/version facts. Metadata does not prove spoken dialogue or device playback.
         groups:
           type: array
           items: {$ref: '#/components/schemas/LocalLibraryGroupCard'}
@@ -9102,6 +9141,15 @@ components:
       type: object
       required: [source, items, total]
       properties:
+        storedMediaFilterSupported:
+          type: boolean
+          readOnly: true
+          description: True when this saved-library response supports media filters before total and pagination. Missing or false on older or unsupported responses; clients must not accept an unconfirmed active filter.
+        storedMediaFilterBasis:
+          type: string
+          enum: [stored_library_versions]
+          readOnly: true
+          description: Present only when media criteria are active and evaluated against stored file/version facts. Metadata does not prove spoken dialogue or device playback.
         originalLanguageFilterSupported:
           type: boolean
           readOnly: true
