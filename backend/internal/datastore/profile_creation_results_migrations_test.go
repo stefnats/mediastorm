@@ -35,6 +35,17 @@ func TestProfileCreationResultsMigrationFull081AndEmptyPerStepDown(t *testing.T)
 func TestProfileCreationResultsMigrationRetainedProofRefusesDown(t *testing.T) {
 	f := newParentCreationFixture(t)
 	i, _ := creationResultCreate(t, f, f.ds)
+	// Later DOWN steps commit independently; isolate081 before observing its refusal.
+	creationOperationGoose(t)
+	db := stdlib.OpenDBFromPool(f.ds.pool)
+	if err := goose.DownToContext(t.Context(), db, "migrations", 81); err != nil {
+		db.Close()
+		t.Fatal("prepare exact081 retained proof", err)
+	}
+	db.Close()
+	if version := creationOperationVersion(t, f.ds); version != 81 {
+		t.Fatal("retained proof fixture is not exact081", version)
+	}
 	before := creationOperationExistingRows(t, f.settingsDSFixture)
 	if err := creationOperationDown(t.Context(), f.ds); err == nil {
 		t.Fatal("retained actual created proof discarded")
@@ -52,8 +63,7 @@ func TestProfileCreationResultsMigrationLegacyUpgradeNeverFabricatesCreated(t *t
 	creationOperationUse080(t, f)
 	id, raw := creationOperationSeed(t, f.ds.pool, creationOperationTestMetadata("actor"), "terminal", true)
 	before := creationOperationExistingRows(t, f)
-	f.ds.Close()
-	f.ds = f.open(t)
+	creationOperationUpTo(t, f.ds, 81)
 	var protocol int
 	var outcome string
 	if err := f.ds.pool.QueryRow(t.Context(), `SELECT protocol_version,outcome FROM profile_creation_results WHERE operation_id=$1`, id).Scan(&protocol, &outcome); err != nil || protocol != 0 || outcome != "legacy_unqualified" {
@@ -67,6 +77,23 @@ func TestProfileCreationResultsMigrationLegacyUpgradeNeverFabricatesCreated(t *t
 	}
 	if err := creationOperationDown(t.Context(), f.ds); err == nil || creationOperationVersion(t, f.ds) != 81 {
 		t.Fatal("retained legacy proof Down must refuse", err)
+	}
+	if creationOperationExistingRows(t, f) != before {
+		t.Fatal("refused081 Down changed historical User/Settings")
+	}
+	// New must independently discover every later migration, without upgrading
+	// this legacy result into an invented successful profile creation.
+	latest := latestEmbeddedMigrationVersion(t)
+	f.ds.Close()
+	f.ds = f.open(t)
+	if version := creationOperationVersion(t, f.ds); version != latest {
+		t.Fatalf("legacy restart migration version = %d, want latest embedded %d", version, latest)
+	}
+	if err := f.ds.pool.QueryRow(t.Context(), `SELECT protocol_version,outcome FROM profile_creation_results WHERE operation_id=$1`, id).Scan(&protocol, &outcome); err != nil || protocol != 0 || outcome != "legacy_unqualified" {
+		t.Fatal("latest startup fabricated legacy creation evidence", err)
+	}
+	if creationOperationObserve(t, f.ds, t.Context(), raw).record.state != "terminal" {
+		t.Fatal("latest startup changed legacy executable ledger")
 	}
 }
 func TestProfileCreationResultsMigrationIdentityAndBirthCannotBeCleared(t *testing.T) {

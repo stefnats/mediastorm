@@ -2,6 +2,7 @@ package datastore
 
 import (
 	"context"
+	"reflect"
 	"testing"
 	"time"
 
@@ -36,6 +37,20 @@ func creationOperationDown(ctx context.Context, ds *DataStore) error {
 	defer db.Close()
 	return goose.DownToContext(ctx, db, "migrations", 79)
 }
+
+// Feature migrations must be checked before later schema additions run.
+func creationOperationUpTo(t *testing.T, ds *DataStore, version int64) {
+	t.Helper()
+	creationOperationGoose(t)
+	db := stdlib.OpenDBFromPool(ds.pool)
+	defer db.Close()
+	if err := goose.UpToContext(t.Context(), db, "migrations", version); err != nil {
+		t.Fatal("upgrade exact feature migration", version, err)
+	}
+	if actual := creationOperationVersion(t, ds); actual != version {
+		t.Fatal("feature migration version mismatch", actual, version)
+	}
+}
 func creationOperationVersion(t *testing.T, ds *DataStore) int64 {
 	t.Helper()
 	db := stdlib.OpenDBFromPool(ds.pool)
@@ -67,14 +82,34 @@ func TestProfileCreationOperationsFull080EmptyDownUpgradeAndRestart(t *testing.T
 	f.user(t, "old_profile")
 	f.exec(t, `INSERT INTO user_settings(user_id,settings) VALUES('old_profile','{"future":{"integer":9007199254740993},"display":{"simpleMode":false}}')`)
 	before := creationOperationExistingRows(t, f)
+	creationOperationUpTo(t, f.ds, 80)
+	if creationOperationExistingRows(t, f) != before {
+		t.Fatal("080 upgrade changed existing records")
+	}
+	oldUser, err := f.ds.Users().Get(t.Context(), "old_profile")
+	if err != nil || oldUser == nil {
+		t.Fatal("observe original profile", err)
+	}
+	var oldSettings string
+	if err := f.ds.pool.QueryRow(t.Context(), `SELECT settings::text FROM user_settings WHERE user_id='old_profile'`).Scan(&oldSettings); err != nil {
+		t.Fatal("observe original complete settings", err)
+	}
 	f.ds.Close()
 	f.ds = f.open(t)
 	if version := creationOperationVersion(t, f.ds); version != latest {
 		t.Fatalf("startup migration version = %d, want latest embedded %d", version, latest)
 	}
-	if creationOperationExistingRows(t, f) != before {
-		t.Fatal("080 upgrade changed existing records")
+	currentUser, err := f.ds.Users().Get(t.Context(), "old_profile")
+	var currentSettings string
+	if err != nil || !reflect.DeepEqual(oldUser, currentUser) {
+		t.Fatal("latest startup changed original profile values", err)
 	}
+	if err := f.ds.pool.QueryRow(t.Context(), `SELECT settings::text FROM user_settings WHERE user_id='old_profile'`).Scan(&currentSettings); err != nil || currentSettings != oldSettings {
+		t.Fatal("latest startup changed complete original settings", err)
+	}
+	// Later migrations intentionally add columns, including generated UUIDs.
+	// A no-op restart must still preserve every current column and row version.
+	afterLatest := creationOperationExistingRows(t, f)
 	r := creationOperationReserve(t, f.ds, t.Context(), "correlation_actor")
 	a := creationOperationClaim(t, f.ds, t.Context(), r)
 	held := creationOperationBegin(t, f.ds, t.Context(), a)
@@ -97,7 +132,7 @@ func TestProfileCreationOperationsFull080EmptyDownUpgradeAndRestart(t *testing.T
 	if _, e := f.ds.beginProfileCreationOperation(t.Context(), a); e != errCreationOperationChanged {
 		t.Fatal("restart adopted old execution ticket", e)
 	}
-	if oldDS == f.ds || creationOperationExistingRows(t, f) != before {
+	if oldDS == f.ds || creationOperationExistingRows(t, f) != afterLatest {
 		t.Fatal("restart changed existing data")
 	}
 }
