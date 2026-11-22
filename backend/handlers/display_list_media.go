@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"net/http"
+	historypkg "novastream/services/history"
+	"strconv"
 	"strings"
 
 	"novastream/internal/auth"
@@ -38,9 +40,12 @@ func storedListMediaBasis(active bool) string {
 	}
 	return ""
 }
-func savedListMediaSupported(r *http.Request) bool {
+func storedCatalogueMediaSupported(r *http.Request) bool {
 	switch strings.ToLower(strings.TrimSpace(r.URL.Query().Get("source"))) {
-	case "", "watchlist", "custom-list", "custom_user_list", "custom-user-list":
+	case "", "watchlist", "custom-list", "custom_user_list", "custom-user-list",
+		"permanent-prequeue", "hidden", "loved-stored", "continue-watching-cached",
+		"collection-cached", "similar-cached", "recently-watched-cached",
+		"popular-on-server-cached", "tmdb-public-list-cached", "tmdb-person-credits-cached":
 		return true
 	case "mdblist", "mdblist-url", "mdblist-shelf":
 		return strings.HasPrefix(strings.TrimSpace(r.URL.Query().Get("url")), customListShelfURLPrefix)
@@ -77,7 +82,10 @@ func storedLibraryIdentity(item models.LocalMediaItem, kind string) mediaidentit
 
 // The existential test is per saved file. For a series this means at least one
 // stored episode/version, not that every episode has the requested tracks.
-func (h *DisplayListHandler) filterSavedListMedia(r *http.Request, profile string, items []models.WatchlistItem, filter models.LocalMediaFilters) ([]models.WatchlistItem, error) {
+func (h *DisplayListHandler) storedMediaMatcher(r *http.Request, profile string, filter models.LocalMediaFilters) (*storedTitleMediaMatcher, error) {
+	if !filter.Active() {
+		return &storedTitleMediaMatcher{}, nil
+	}
 	if !h.storedMediaReady() {
 		return nil, errors.New("stored catalogue unavailable")
 	}
@@ -96,6 +104,12 @@ func (h *DisplayListHandler) filterSavedListMedia(r *http.Request, profile strin
 			}
 			for _, key := range identity.IndexKeys() {
 				index[key] = append(index[key], row.Probe)
+			}
+			if kind == "series" && row.SeasonNumber >= 0 && row.EpisodeNumber > 0 {
+				episode := mediaidentity.Resolve(mediaidentity.Input{MediaType: "episode", SeriesID: identity.ID, SeasonNumber: row.SeasonNumber, EpisodeNumber: row.EpisodeNumber, ExternalIDs: identity.ExternalIDs})
+				for _, key := range episode.IndexKeys() {
+					index[key] = append(index[key], row.Probe)
+				}
 			}
 		}
 	}
@@ -148,27 +162,73 @@ func (h *DisplayListHandler) filterSavedListMedia(r *http.Request, profile strin
 			add(storedLibraryKind(library.Type), rows)
 		}
 	}
+	return &storedTitleMediaMatcher{filter: filter, index: index}, nil
+}
+
+// A request reads the saved library inventory once; all catalogue candidates
+// then use the same facts before source-specific sorting, caps and pagination.
+type storedTitleMediaMatcher struct {
+	filter models.LocalMediaFilters
+	index  map[string][]*models.LocalMediaProbe
+}
+
+func (m *storedTitleMediaMatcher) matches(title models.Title) bool {
+	ids := map[string]string{"imdb": title.IMDBID}
+	if title.TMDBID > 0 {
+		ids["tmdb"] = strconv.FormatInt(title.TMDBID, 10)
+	}
+	if title.TVDBID > 0 {
+		ids["tvdb"] = strconv.FormatInt(title.TVDBID, 10)
+	}
+	return m.matchesIdentity(mediaidentity.Resolve(mediaidentity.Input{MediaType: title.MediaType, ID: title.ID, ExternalIDs: ids}))
+}
+func (m *storedTitleMediaMatcher) matchesIdentity(identity mediaidentity.Identity) bool {
+	if !m.filter.Active() {
+		return true
+	}
+	found := false
+	for _, key := range identity.IndexKeys() {
+		for _, probe := range m.index[key] {
+			found = true
+			if localmedia.MatchesMediaFilters(probe, m.filter) {
+				return true
+			}
+		}
+	}
+	return !found && localmedia.MatchesMediaFilters(nil, m.filter)
+}
+
+func (h *DisplayListHandler) requestStoredMediaMatcher(r *http.Request, profile string) (*storedTitleMediaMatcher, error) {
+	filter, err := parseLocalMediaFilters(r)
+	if err != nil {
+		return nil, err
+	}
+	return h.storedMediaMatcher(r, profile, filter)
+}
+
+func (h *DisplayListHandler) filterSavedListMedia(r *http.Request, profile string, items []models.WatchlistItem, filter models.LocalMediaFilters) ([]models.WatchlistItem, error) {
+	matcher, err := h.storedMediaMatcher(r, profile, filter)
+	if err != nil {
+		return nil, err
+	}
 	selected := make([]models.WatchlistItem, 0, len(items))
 	for _, item := range items {
 		if err := r.Context().Err(); err != nil {
 			return nil, err
 		}
-		identity := mediaidentity.Resolve(mediaidentity.Input{MediaType: item.MediaType, ID: item.ID, ExternalIDs: item.ExternalIDs})
-		found, match := false, false
-		for _, key := range identity.IndexKeys() {
-			for _, probe := range index[key] {
-				found = true
-				match = match || localmedia.MatchesMediaFilters(probe, filter)
-			}
-		}
-		if !found {
-			match = localmedia.MatchesMediaFilters(nil, filter)
-		}
-		if match {
+		if matcher.matchesIdentity(mediaidentity.Resolve(mediaidentity.Input{MediaType: item.MediaType, ID: item.ID, ExternalIDs: item.ExternalIDs})) {
 			selected = append(selected, item)
 		}
 	}
 	return selected, nil
+}
+
+func storedMediaQueryKey(key string) bool {
+	switch key {
+	case "audioLanguage", "subtitleLanguage", "audioCodec", "videoCodec", "minHeight", "hdr", "subtitles", "mediaUnknown":
+		return true
+	}
+	return false
 }
 
 func (h *DisplayListHandler) enrichStoredMediaWatchState(profile string, items []models.WatchlistItem) {
@@ -182,4 +242,18 @@ func (h *DisplayListHandler) enrichStoredMediaWatchState(profile string, items [
 	series, _ := h.HistoryService.ListSeriesStates(profile)
 	progress, _ := h.HistoryService.ListPlaybackProgress(profile)
 	enrichWatchlistItems(items, buildWatchStateIndex(history, series, progress), nil, false)
+}
+
+func (m *storedTitleMediaMatcher) matchesWatching(row historypkg.CachedContinueWatchingItem) bool {
+	if !m.filter.Active() {
+		return true
+	}
+	if row.MediaType == "movie" {
+		return m.matchesIdentity(mediaidentity.Resolve(mediaidentity.Input{MediaType: "movie", ID: row.SeriesID, ExternalIDs: row.ExternalIDs}))
+	}
+	next := row.NextEpisode
+	if next == nil || !models.OfficialEpisodeCoordinates(row.SeriesID, &models.EpisodeReference{SeasonNumber: next.SeasonNumber, EpisodeNumber: next.EpisodeNumber, Numbering: next.Numbering}) {
+		return localmedia.MatchesMediaFilters(nil, m.filter)
+	}
+	return m.matchesIdentity(mediaidentity.Resolve(mediaidentity.Input{MediaType: "episode", SeriesID: row.SeriesID, SeasonNumber: next.SeasonNumber, EpisodeNumber: next.EpisodeNumber, ExternalIDs: row.ExternalIDs}))
 }

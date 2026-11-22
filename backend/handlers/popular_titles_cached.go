@@ -158,6 +158,11 @@ func (h *DisplayListHandler) getCachedPopularTitles(w http.ResponseWriter, r *ht
 			group.representativeTie = tie
 		}
 	}
+	media, err := h.requestStoredMediaMatcher(r, viewer)
+	if err != nil {
+		fail(503, "stored_media_unavailable")
+		return
+	}
 	matches := originalLanguageMatcherAt(observation.languages, query.language, at)
 	membership := map[cachedSharedLanguageIdentity]bool{}
 	selected := make([]*cachedPopularGroup, 0, len(groups))
@@ -178,6 +183,9 @@ func (h *DisplayListHandler) getCachedPopularTitles(w http.ResponseWriter, r *ht
 			if watched != nil && watched.Watched {
 				continue
 			}
+		}
+		if !media.matches(group.title) {
+			continue
 		}
 		if query.language.active() {
 			identity := cachedSharedLanguageIdentity{group.languageID, group.title.MediaType}
@@ -246,5 +254,5 @@ func (h *DisplayListHandler) getCachedPopularTitles(w http.ResponseWriter, r *ht
 		return
 	}
 	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(DisplayListResponse{Source: "popular-on-server-cached", Items: items, Total: total, AlphabetBuckets: displayListAlphabetBuckets(facets, displayListQueryOptions{}), OriginalLanguageFilterSupported: true})
+	_ = json.NewEncoder(w).Encode(DisplayListResponse{Source: "popular-on-server-cached", Items: items, Total: total, AlphabetBuckets: displayListAlphabetBuckets(facets, displayListQueryOptions{}), OriginalLanguageFilterSupported: true, StoredMediaFilterSupported: h.storedMediaReady(), StoredMediaFilterBasis: storedListMediaBasis(media.filter.Active())})
 }

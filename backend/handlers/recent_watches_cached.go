@@ -190,6 +190,11 @@ func (h *DisplayListHandler) getCachedRecentWatches(w http.ResponseWriter, r *ht
 	if !observation.captureHidden(w) {
 		return
 	}
+	media, err := h.requestStoredMediaMatcher(r, viewer)
+	if err != nil {
+		fail(503, "stored_media_unavailable")
+		return
+	}
 	membership := map[cachedSharedLanguageIdentity]bool{}
 	matches := originalLanguageMatcherAt(observation.languages, query.language, at)
 	cards := make([]cachedRecentCard, 0, len(snapshot.Items))
@@ -220,6 +225,9 @@ func (h *DisplayListHandler) getCachedRecentWatches(w http.ResponseWriter, r *ht
 			if watched != nil && watched.Watched {
 				continue
 			}
+		}
+		if !media.matches(title) {
+			continue
 		}
 		if query.language.active() {
 			key := cachedSharedLanguageIdentity{title.ID, title.MediaType}
@@ -296,5 +304,5 @@ func (h *DisplayListHandler) getCachedRecentWatches(w http.ResponseWriter, r *ht
 		return
 	}
 	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(DisplayListResponse{Source: "recently-watched-cached", Items: items, Total: total, AlphabetBuckets: alphabet, OriginalLanguageFilterSupported: true})
+	_ = json.NewEncoder(w).Encode(DisplayListResponse{Source: "recently-watched-cached", Items: items, Total: total, AlphabetBuckets: alphabet, OriginalLanguageFilterSupported: true, StoredMediaFilterSupported: h.storedMediaReady(), StoredMediaFilterBasis: storedListMediaBasis(media.filter.Active())})
 }

@@ -105,8 +105,8 @@ func (h *DisplayListHandler) Get(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, mediaErr.Error(), http.StatusBadRequest)
 		return
 	}
-	if mediaFilter.Active() && !savedListMediaSupported(r) {
-		http.Error(w, "stored media filters are supported for My List and saved personal lists only", http.StatusBadRequest)
+	if mediaFilter.Active() && !storedCatalogueMediaSupported(r) {
+		http.Error(w, "stored media filters require a complete saved catalogue source", http.StatusBadRequest)
 		return
 	}
 	if hasCachedTMDBPersonCreditsSource(r) {
@@ -462,7 +462,7 @@ func (h *DisplayListHandler) get(w http.ResponseWriter, r *http.Request) {
 		AlphabetBuckets:                 alphabet,
 		MetadataPending:                 metadataPending,
 		OriginalLanguageFilterSupported: languageSupported,
-		StoredMediaFilterSupported:      h.storedMediaReady() && savedListMediaSupported(r),
+		StoredMediaFilterSupported:      h.storedMediaReady() && storedCatalogueMediaSupported(r),
 		StoredMediaFilterBasis:          storedListMediaBasis(mediaFilter.Active()),
 	})
 }
@@ -482,6 +482,21 @@ func (h *DisplayListHandler) getHiddenManagement(w http.ResponseWriter, r *http.
 		http.Error(w, "hidden items source unavailable", http.StatusServiceUnavailable)
 		return
 	}
+	media, err := h.requestStoredMediaMatcher(r, userID)
+	if err != nil {
+		http.Error(w, "stored media unavailable", 503)
+		return
+	}
+	filteredMedia := make([]models.HiddenItem, 0, len(items))
+	for _, item := range items {
+		if r.Context().Err() != nil {
+			return
+		}
+		if media.matchesIdentity(mediaidentity.Resolve(mediaidentity.Input{MediaType: item.MediaType, ID: item.ID, ExternalIDs: item.ExternalIDs})) {
+			filteredMedia = append(filteredMedia, item)
+		}
+	}
+	items = filteredMedia
 	if language.active() {
 		matches := h.originalLanguageMatcher(userID, language)
 		filtered := make([]models.HiddenItem, 0, len(items))
@@ -508,7 +523,7 @@ func (h *DisplayListHandler) getHiddenManagement(w http.ResponseWriter, r *http.
 	}
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("Cache-Control", "private, no-store")
-	_ = json.NewEncoder(w).Encode(DisplayListResponse{Source: "hidden", Items: items, Total: total, AlphabetBuckets: alphabet, OriginalLanguageFilterSupported: true})
+	_ = json.NewEncoder(w).Encode(DisplayListResponse{Source: "hidden", Items: items, Total: total, AlphabetBuckets: alphabet, OriginalLanguageFilterSupported: true, StoredMediaFilterSupported: h.storedMediaReady(), StoredMediaFilterBasis: storedListMediaBasis(media.filter.Active())})
 }
 
 // lovedStoredItem exposes the saved preference time without adding private
@@ -652,9 +667,20 @@ func (h *DisplayListHandler) getCachedContinueWatching(w http.ResponseWriter, r 
 		fail(503, "continue_watching_reader_unavailable")
 		return
 	}
+	media, err := h.requestStoredMediaMatcher(r, userID)
+	if err != nil {
+		fail(503, "stored_media_unavailable")
+		return
+	}
 	matches := h.originalLanguageMatcher(userID, language)
 	rows := make([]historypkg.CachedContinueWatchingItem, 0, len(pool.Items))
 	for _, row := range pool.Items {
+		if r.Context().Err() != nil {
+			return
+		}
+		if !media.matchesWatching(row) {
+			continue
+		}
 		if suppression.hides(row) {
 			continue
 		}
@@ -703,13 +729,15 @@ func (h *DisplayListHandler) getCachedContinueWatching(w http.ResponseWriter, r 
 		Complete   bool      `json:"complete"`
 	}{pool.ID, pool.ObservedAt, pool.ExpiresAt, true}
 	response := struct {
-		Source          string                                  `json:"source"`
-		Items           []historypkg.CachedContinueWatchingItem `json:"items"`
-		Total           int                                     `json:"total"`
-		AlphabetBuckets []string                                `json:"alphabetBuckets,omitempty"`
-		Supported       bool                                    `json:"originalLanguageFilterSupported"`
-		Pool            any                                     `json:"pool"`
-	}{"continue-watching-cached", rows, total, alphabet, true, observation}
+		Source                     string                                  `json:"source"`
+		Items                      []historypkg.CachedContinueWatchingItem `json:"items"`
+		Total                      int                                     `json:"total"`
+		AlphabetBuckets            []string                                `json:"alphabetBuckets,omitempty"`
+		Supported                  bool                                    `json:"originalLanguageFilterSupported"`
+		Pool                       any                                     `json:"pool"`
+		StoredMediaFilterSupported bool                                    `json:"storedMediaFilterSupported,omitempty"`
+		StoredMediaFilterBasis     string                                  `json:"storedMediaFilterBasis,omitempty"`
+	}{"continue-watching-cached", rows, total, alphabet, true, observation, h.storedMediaReady(), storedListMediaBasis(media.filter.Active())}
 	if r.Context().Err() != nil {
 		return
 	}
@@ -757,8 +785,19 @@ func (h *DisplayListHandler) getCachedCollection(w http.ResponseWriter, r *http.
 	titles := snapshot.Titles()
 	policy := resolveUnreleasedVisibilityPolicy(h.MetadataHandler.CfgManager, h.MetadataHandler.UserSettings, h.MetadataHandler.ClientSettings, userID, requestClientID(r), unreleasedVisibilityLists)
 	titles = filterTitlesByUnreleasedVisibility(titles, policy)
+	media, err := h.requestStoredMediaMatcher(r, userID)
+	if err != nil {
+		cachedCollectionError(w, 503, "stored_media_unavailable")
+		return
+	}
 	visible := make([]models.Title, 0, len(titles))
 	for _, title := range titles {
+		if r.Context().Err() != nil {
+			return
+		}
+		if !media.matches(title) {
+			continue
+		}
 		if !h.HiddenItemsService.ShouldHideTitleMap(userID, map[string]interface{}{"id": title.ID, "name": title.Name, "mediaType": title.MediaType, "tmdbId": strconv.FormatInt(title.TMDBID, 10)}) {
 			visible = append(visible, title)
 		}
@@ -792,7 +831,7 @@ func (h *DisplayListHandler) getCachedCollection(w http.ResponseWriter, r *http.
 		return
 	}
 	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(cachedCollectionBrowseResponse{DisplayListResponse: DisplayListResponse{Source: "collection-cached", Items: items, Total: total, AlphabetBuckets: alphabet, OriginalLanguageFilterSupported: true}, Collection: cachedCollectionBrowseObservation{ID: snapshot.CollectionID, Name: snapshot.Name, MetadataLanguage: snapshot.MetadataLanguage, ObservedAt: snapshot.ObservedAt, ExpiresAt: snapshot.ExpiresAt}})
+	_ = json.NewEncoder(w).Encode(cachedCollectionBrowseResponse{DisplayListResponse: DisplayListResponse{Source: "collection-cached", Items: items, Total: total, AlphabetBuckets: alphabet, OriginalLanguageFilterSupported: true, StoredMediaFilterSupported: h.storedMediaReady(), StoredMediaFilterBasis: storedListMediaBasis(media.filter.Active())}, Collection: cachedCollectionBrowseObservation{ID: snapshot.CollectionID, Name: snapshot.Name, MetadataLanguage: snapshot.MetadataLanguage, ObservedAt: snapshot.ObservedAt, ExpiresAt: snapshot.ExpiresAt}})
 }
 
 type lovedStoredItem struct {
@@ -829,6 +868,11 @@ func (h *DisplayListHandler) getLovedStored(w http.ResponseWriter, r *http.Reque
 		http.Error(w, "could not load personal favorites", http.StatusServiceUnavailable)
 		return
 	}
+	media, err := h.requestStoredMediaMatcher(r, userID)
+	if err != nil {
+		http.Error(w, "stored media unavailable", 503)
+		return
+	}
 	items := make([]lovedStoredItem, 0, len(ratings))
 	for _, rating := range ratings {
 		stored := rating.Title
@@ -838,6 +882,12 @@ func (h *DisplayListHandler) getLovedStored(w http.ResponseWriter, r *http.Reque
 		// Explicitly copy saved presentation/identity fields. In particular, no
 		// scalar language, imported evidence or playback/source context survives.
 		title := models.Title{ID: stored.ID, Name: stored.Name, MediaType: stored.MediaType, Year: stored.Year, TMDBID: stored.TMDBID, IMDBID: stored.IMDBID, TVDBID: stored.TVDBID, Adult: stored.Adult, Certification: stored.Certification, PersonalRating: "love"}
+		if r.Context().Err() != nil {
+			return
+		}
+		if !media.matches(title) {
+			continue
+		}
 		if h.HiddenItemsService.ShouldHideTitleMap(profile, map[string]interface{}{"id": title.ID, "name": title.Name, "mediaType": title.MediaType, "tmdbId": strconv.FormatInt(title.TMDBID, 10), "tvdbId": strconv.FormatInt(title.TVDBID, 10), "imdbId": title.IMDBID}) {
 			continue
 		}
@@ -876,7 +926,7 @@ func (h *DisplayListHandler) getLovedStored(w http.ResponseWriter, r *http.Reque
 	}
 	h.MetadataHandler.TitleRatings.Observe(profile, client, titles)
 	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(DisplayListResponse{Source: "loved-stored", Items: items, Total: total, AlphabetBuckets: alphabet, OriginalLanguageFilterSupported: true})
+	_ = json.NewEncoder(w).Encode(DisplayListResponse{Source: "loved-stored", Items: items, Total: total, AlphabetBuckets: alphabet, OriginalLanguageFilterSupported: true, StoredMediaFilterSupported: h.storedMediaReady(), StoredMediaFilterBasis: storedListMediaBasis(media.filter.Active())})
 }
 
 func permanentPrequeueWatchlistItems(entries []*playback.PrequeueEntry, userID string) []models.WatchlistItem {

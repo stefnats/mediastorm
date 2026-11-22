@@ -4417,7 +4417,7 @@ paths:
       parameters:
         - name: audioLanguage
           in: query
-          description: Stored audio-track language on an accessible library version. Supported for watchlist and saved personal lists only; no browse-time probes or provider lookups. All media features must occur on the same file, with audio language and codec on the same track. A series match means at least one stored episode/version, not all episodes.
+          description: Stored audio-track language on an accessible library version. Supported for saved personal lists, permanent prequeue, hidden management, loved-stored, and complete cached catalogue views (collection, similar, recent activity, popularity, public TMDB lists, person credits and continue watching). No browse-time probes or provider lookups. All media features must occur on the same file, with audio language and codec on the same track. A series card matches at least one stored episode/version, not all episodes; continue watching requires the exact official next episode, with missing or alternative numbering left unknown. Noncached discovery remains unsupported.
           schema: {type: string}
         - name: subtitleLanguage
           in: query

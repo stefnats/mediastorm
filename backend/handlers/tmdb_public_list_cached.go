@@ -152,6 +152,11 @@ func (h *DisplayListHandler) getCachedTMDBPublicList(w http.ResponseWriter, r *h
 		return
 	}
 	// Copy the validated finite pool before independent current observations.
+	media, err := h.requestStoredMediaMatcher(r, viewer)
+	if err != nil {
+		fail(503, "stored_media_unavailable")
+		return
+	}
 	titles := snapshot.Titles()
 	observation := cachedTMDBPublicListObservation{snapshot.ListID, snapshot.MetadataLanguage, snapshot.ObservedAt, snapshot.ExpiresAt, "returned-items"}
 	matches := originalLanguageMatcherAt(context.languages, query.language, at)
@@ -163,6 +168,9 @@ func (h *DisplayListHandler) getCachedTMDBPublicList(w http.ResponseWriter, r *h
 			return
 		}
 		if hidden.hides(title) {
+			continue
+		}
+		if !media.matches(title) {
 			continue
 		}
 		if query.language.active() {
@@ -254,5 +262,5 @@ func (h *DisplayListHandler) getCachedTMDBPublicList(w http.ResponseWriter, r *h
 		return
 	}
 	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(cachedTMDBPublicListResponse{DisplayListResponse{Source: "tmdb-public-list-cached", Items: items, Total: total, AlphabetBuckets: displayListAlphabetBuckets(facets, displayListQueryOptions{}), OriginalLanguageFilterSupported: true}, observation})
+	_ = json.NewEncoder(w).Encode(cachedTMDBPublicListResponse{DisplayListResponse{Source: "tmdb-public-list-cached", Items: items, Total: total, AlphabetBuckets: displayListAlphabetBuckets(facets, displayListQueryOptions{}), OriginalLanguageFilterSupported: true, StoredMediaFilterSupported: h.storedMediaReady(), StoredMediaFilterBasis: storedListMediaBasis(media.filter.Active())}, observation})
 }

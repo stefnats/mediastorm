@@ -605,7 +605,7 @@ func validateCachedCollectionQuery(r *http.Request, q displayListQueryOptions) (
 		return 0, fmt.Errorf("invalid cached collection query")
 	}
 	for key, items := range values {
-		if !allowed[key] {
+		if !allowed[key] && !storedMediaQueryKey(key) || storedMediaQueryKey(key) && len(items) != 1 {
 			return 0, fmt.Errorf("unsupported cached collection requirement: %s", key)
 		}
 		if key == "originalLanguages" || key == "includeUnknownOriginalLanguage" {
@@ -695,7 +695,7 @@ func validateCachedWatchingQuery(r *http.Request, q displayListQueryOptions) err
 		return fmt.Errorf("invalid cached continue watching query")
 	}
 	for key, items := range values {
-		if !allowed[key] {
+		if !allowed[key] && !storedMediaQueryKey(key) || storedMediaQueryKey(key) && len(items) != 1 {
 			return fmt.Errorf("unsupported cached continue watching requirement: %s", key)
 		}
 		if key == "originalLanguages" || key == "includeUnknownOriginalLanguage" {
@@ -755,7 +755,7 @@ func validateCachedRecentWatchesQuery(r *http.Request, viewerID string) (cachedR
 		allowed[key] = true
 	}
 	for key, items := range values {
-		if !allowed[key] || len(items) != 1 {
+		if !allowed[key] && !storedMediaQueryKey(key) || len(items) != 1 {
 			return q, fmt.Errorf("unsupported or duplicate cached recent watches selector")
 		}
 	}
@@ -865,7 +865,7 @@ func validateCachedPopularTitlesQuery(r *http.Request, viewerID string) (cachedP
 		allowed[key] = true
 	}
 	for key, items := range values {
-		if !allowed[key] || len(items) != 1 {
+		if !allowed[key] && !storedMediaQueryKey(key) || len(items) != 1 {
 			return q, fmt.Errorf("unsupported or duplicate cached popular titles selector")
 		}
 	}
@@ -975,7 +975,7 @@ func validateCachedSimilarQuery(r *http.Request, viewer string) (cachedSimilarQu
 		allowed[key] = true
 	}
 	for key, values := range values {
-		if !allowed[key] || len(values) != 1 {
+		if !allowed[key] && !storedMediaQueryKey(key) || len(values) != 1 {
 			return q, fmt.Errorf("unsupported or duplicate cached similar selector")
 		}
 	}
@@ -1047,7 +1047,7 @@ func validateCachedTMDBPublicListQuery(r *http.Request, viewer string) (cachedTM
 		allowed[key] = true
 	}
 	for key, values := range values {
-		if !allowed[key] || len(values) != 1 {
+		if !allowed[key] && !storedMediaQueryKey(key) || len(values) != 1 {
 			return q, fmt.Errorf("unsupported or duplicate cached TMDB public list selector")
 		}
 	}
@@ -1115,7 +1115,7 @@ func validateCachedTMDBPersonCreditsQuery(r *http.Request, viewer string) (cache
 		allowed[key] = true
 	}
 	for key, values := range values {
-		if !allowed[key] || len(values) != 1 {
+		if !allowed[key] && !storedMediaQueryKey(key) || len(values) != 1 {
 			return q, fmt.Errorf("unsupported or duplicate cached TMDB person cast titles selector")
 		}
 	}

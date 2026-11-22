@@ -153,6 +153,11 @@ func (h *DisplayListHandler) getCachedTMDBPersonCredits(w http.ResponseWriter, r
 		return
 	}
 	// Copy the validated finite pool before independent current observations.
+	media, err := h.requestStoredMediaMatcher(r, viewer)
+	if err != nil {
+		fail(503, "stored_media_unavailable")
+		return
+	}
 	titles := snapshot.Titles()
 	observation := cachedTMDBPersonCreditsObservation{snapshot.PersonID, snapshot.SourceType, snapshot.MetadataLanguage, snapshot.ObservedAt, snapshot.ExpiresAt, "returned-cast-titles"}
 	matches := originalLanguageMatcherAt(context.languages, query.language, at)
@@ -164,6 +169,9 @@ func (h *DisplayListHandler) getCachedTMDBPersonCredits(w http.ResponseWriter, r
 			return
 		}
 		if hidden.hides(title) {
+			continue
+		}
+		if !media.matches(title) {
 			continue
 		}
 		if query.language.active() {
@@ -255,5 +263,5 @@ func (h *DisplayListHandler) getCachedTMDBPersonCredits(w http.ResponseWriter, r
 		return
 	}
 	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(cachedTMDBPersonCreditsResponse{DisplayListResponse{Source: "tmdb-person-credits-cached", Items: items, Total: total, AlphabetBuckets: displayListAlphabetBuckets(facets, displayListQueryOptions{}), OriginalLanguageFilterSupported: true}, observation})
+	_ = json.NewEncoder(w).Encode(cachedTMDBPersonCreditsResponse{DisplayListResponse{Source: "tmdb-person-credits-cached", Items: items, Total: total, AlphabetBuckets: displayListAlphabetBuckets(facets, displayListQueryOptions{}), OriginalLanguageFilterSupported: true, StoredMediaFilterSupported: h.storedMediaReady(), StoredMediaFilterBasis: storedListMediaBasis(media.filter.Active())}, observation})
 }

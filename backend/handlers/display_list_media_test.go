@@ -184,7 +184,7 @@ func TestSavedMediaFiltersAccessIdentityUnknownAndNoDiscovery(t *testing.T) {
 	if response.Total != 1 || items[0].ID != "tmdb:movie:4" || local.reads != 1 || remote.reads != 2 {
 		t.Fatalf("library visibility/unknown mismatch: %+v %+v", response, items)
 	}
-	for _, source := range []string{"trending", "hidden", "collection-cached", "similar-cached"} {
+	for _, source := range []string{"trending", "discover", "top-ten", "tmdb-list"} {
 		w := catalogueLanguageGet(t, h, "source="+source+"&audioLanguage=fra")
 		if w.Code != 400 {
 			t.Fatalf("unsupported source %s: %d", source, w.Code)
