@@ -281,6 +281,14 @@ func (state *managedHTTPState) failure(caller context.Context) error {
 	if caller != nil && caller.Err() != nil {
 		return caller.Err()
 	}
+	if caller != nil {
+		// The operation and caller share a deadline, but their timer callbacks
+		// can run in either order. An expired caller is still its own timeout
+		// while Err has not yet been published by that caller's timer.
+		if deadline, bounded := caller.Deadline(); bounded && !deadline.After(time.Now()) {
+			return context.DeadlineExceeded
+		}
+	}
 	state.cancel() // Signal only: the operation is still counted until return.
 	return ErrManagedJellyfinDenied
 }
