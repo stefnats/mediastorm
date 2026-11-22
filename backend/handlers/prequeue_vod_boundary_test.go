@@ -309,8 +309,8 @@ func TestVODPrequeueSuccessorCannotBeOverwrittenByLateSameIDWorker(t *testing.T)
 
 	bStarted = true
 	go func() { defer close(bDone); run() }()
-	vodWaitReady(t, h, entry.ID)
 	wait(bDone)
+	vodWaitReady(t, h, entry.ID)
 	before, _, _ := h.store.SnapshotForAuthorization(entry.ID)
 	if resolves.Load() != 2 || before.StreamPath != "/synthetic/new.mkv" || before.MediaEvidence == nil {
 		t.Fatal("successor source not independently ready")
