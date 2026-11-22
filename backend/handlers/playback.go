@@ -115,31 +115,35 @@ func (h *PlaybackHandler) withTrackSelection(r *http.Request, resolution *models
 	}
 	// Keep an actual probe on this request's copy, never on a cached service result.
 	withTracks := *resolution
-	selection := h.selectTracks(r.Context(), &withTracks, profileID, clientID, strings.TrimSpace(titleID))
+	selection, probe := h.selectTracks(r.Context(), &withTracks, profileID, clientID, strings.TrimSpace(titleID))
 	if selection != nil {
 		withTracks.TrackSelection = selection
+	}
+	if probe != nil {
+		withTracks.FrameRate = probe.AvgFrameRate
 	}
 	return &withTracks
 }
 
 // selectTracks probes the resolved source (reusing any probe the resolver
 // already ran) and applies the shared track selection. It returns nil when the
-// source cannot be probed; track selection never fails a resolve.
-func (h *PlaybackHandler) selectTracks(ctx context.Context, resolution *models.PlaybackResolution, profileID, clientID, titleID string) *models.TrackSelection {
+// source cannot be probed; track selection never fails a resolve. The probe it
+// used is returned too (nil when none ran) for its other details (frame rate).
+func (h *PlaybackHandler) selectTracks(ctx context.Context, resolution *models.PlaybackResolution, profileID, clientID, titleID string) (*models.TrackSelection, *models.VideoFullResult) {
 	if resolution == nil || strings.TrimSpace(resolution.WebDAVPath) == "" {
-		return nil
+		return nil, nil
 	}
 	probe := resolution.Probe
 	if probe == nil {
 		if h.VideoProber == nil {
-			return nil
+			return nil, nil
 		}
 		probeCtx, cancel := context.WithTimeout(ctx, trackSelectionProbeTimeout)
 		defer cancel()
 		result, err := h.VideoProber.ProbeVideoFull(probeCtx, resolution.WebDAVPath)
 		if err != nil {
 			log.Printf("[playback-handler] track selection probe failed (non-fatal): %v", err)
-			return nil
+			return nil, nil
 		}
 		probe = result
 	}
@@ -147,13 +151,13 @@ func (h *PlaybackHandler) selectTracks(ctx context.Context, resolution *models.P
 	// no selectable tracks: its observed video dimensions still describe the file.
 	resolution.Probe = probe
 	if probe == nil || (len(probe.AudioStreams) == 0 && len(probe.SubtitleStreams) == 0) {
-		return nil
+		return nil, probe
 	}
 	prefs := h.TrackPreferences.Resolve(profileID, clientID, titleID)
 	selection := trackselect.Select(probe.AudioStreams, probe.SubtitleStreams, prefs)
 	log.Printf("[playback-handler] track selection: audio=%d subtitle=%d (audioLang=%q subLang=%q subMode=%s)",
 		selection.AudioStreamIndex(), selection.SubtitleStreamIndex(), prefs.AudioLanguage, prefs.SubtitleLanguage, prefs.SubtitleMode)
-	return selection
+	return selection, probe
 }
 
 func (h *PlaybackHandler) prewarmThumbnails(resolution *models.PlaybackResolution) {

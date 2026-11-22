@@ -295,6 +295,7 @@ func (s *Server) userPolicy(profile models.User) *dto.UserPolicy {
 		BlockUnratedItems:                []string{},
 		EnableRemoteAccess:               true,
 		EnableLiveTvAccess:               !profile.IsKidsProfile,
+		EnableCollectionManagement:       s.listsEditable(), // collections are the profile's custom lists
 		EnableMediaPlayback:              true,
 		EnableAudioPlaybackTranscoding:   true,
 		EnableVideoPlaybackTranscoding:   true,
@@ -312,7 +313,7 @@ func (s *Server) userPolicy(profile models.User) *dto.UserPolicy {
 		BlockedChannels:                  []string{},
 		AuthenticationProviderID:         "Jellyfin.Server.Implementations.Users.DefaultAuthenticationProvider",
 		PasswordResetProviderID:          "Jellyfin.Server.Implementations.Users.DefaultPasswordResetProvider",
-		SyncPlayAccess:                   "None",
+		SyncPlayAccess:                   s.syncPlayAccess(profile),
 	}
 }
 

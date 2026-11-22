@@ -379,6 +379,11 @@ var SettingsSchema = map[string]interface{}{
 				"step":        1,
 				"description": "Maximum additional title names to search per item (1-3; values above 3, or 0, are capped at 3). Each title is searched on every indexer. English and the profile's metadata-language title are always included when available, even if that requires extra slots. Other aliases use the remaining slots.",
 			},
+			"nzbDownloadBudget": map[string]interface{}{
+				"type":        "boolean",
+				"label":       "NZB Download Budget",
+				"description": "Limit NZB downloads (playback, health checks, track probes) per movie or episode across all indexers and profiles: one grab per release and three in total every 10 minutes, at least 30 seconds apart. Protects indexer grab quotas; fast fallback across many releases is slower. Indexer rate-limit pauses are also saved across restarts while this is on.",
+			},
 			"maxDailyUsenetQueries": map[string]interface{}{
 				"type":        "number",
 				"label":       "Max Daily-show Usenet Queries",
@@ -741,7 +746,7 @@ var SettingsSchema = map[string]interface{}{
 			"probeSizeMb":                 map[string]interface{}{"type": "number", "label": "Probe Size (MB)", "description": "FFmpeg probesize for stream analysis (0 = default ~5MB). Higher values improve stability but increase initial buffering.", "order": 8},
 			"analyzeDurationSec":          map[string]interface{}{"type": "number", "label": "Analyze Duration (sec)", "description": "FFmpeg analyzeduration in seconds (0 = default ~5s). Higher values help with problematic streams.", "order": 9},
 			"lowLatency":                  map[string]interface{}{"type": "boolean", "label": "Low Latency Mode", "description": "Reduce buffering for lower latency (may cause instability with poor connections)", "order": 10},
-			"timeshiftMinutes":            map[string]interface{}{"type": "number", "label": "Android TV Timeshift Window (minutes)", "description": "Native Android TV app only (not the older Expo-based Android TV app): how far back a live channel can be paused or rewound. The server keeps the window as HLS segments on its disk while the channel plays, and channels tune through HLS instead of direct. 0 (the default) turns it off; at most 240. Every other app ignores it: the native Apple TV app keeps its own window on the device, and the Expo apps stay live-only.", "placeholder": "0", "min": 0, "max": 240, "step": 1, "order": 10.5},
+			"timeshiftMinutes":            map[string]interface{}{"type": "number", "label": "Timeshift Window (minutes)", "description": "How far back a live channel can be paused or rewound in the native Android TV app (not the older Expo-based one) and in Jellyfin apps through the Jellyfin bridge (except with both video and audio transcoding disabled there). The server keeps the window as HLS segments on its disk while the channel plays, and channels tune through HLS instead of direct. 0 (the default) turns it off; at most 240. Other apps ignore it: the native Apple TV app keeps its own window on the device, and the Expo apps stay live-only.", "placeholder": "0", "min": 0, "max": 240, "step": 1, "order": 10.5},
 			"filtering.enabledCategories": map[string]interface{}{"type": "multiselect", "label": "Enabled Categories", "description": "Only show channels in these categories (empty = show all)", "optionsEndpoint": "/live/categories", "order": 11},
 			"filtering.maxChannels":       map[string]interface{}{"type": "number", "label": "Max Total Channels", "description": "Overall channel limit (0 = no limit)", "order": 12},
 			// EPG (Electronic Program Guide) settings

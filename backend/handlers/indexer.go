@@ -158,6 +158,9 @@ func (h *IndexerHandler) Search(w http.ResponseWriter, r *http.Request) {
 			// the incoming query may itself be an alternate title. Outbound alias
 			// queries are capped separately from the complete filter-title set.
 			alternateTitles = hydratedMovieSearchTitles(movieTitle)
+			if titleID == "" {
+				titleID = movieTitle.ID
+			}
 			if isAnimeTitle(movieTitle) {
 				isAnime = true
 				log.Printf("[indexer] Movie %q is anime (genres=%v originalName=%q language=%q) - applying anime language preferences",
@@ -487,6 +490,9 @@ func (h *IndexerHandler) SearchTest(w http.ResponseWriter, r *http.Request) {
 			countryCode = strings.TrimSpace(movieTitle.CountryCode)
 			originalLanguage = strings.TrimSpace(movieTitle.Language)
 			alternateTitles = hydratedMovieSearchTitles(movieTitle)
+			if titleID == "" {
+				titleID = movieTitle.ID
+			}
 			if isAnimeTitle(movieTitle) {
 				isAnime = true
 				log.Printf("[indexer] Movie %q is anime (genres=%v originalName=%q language=%q) - applying anime language preferences",

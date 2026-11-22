@@ -38,6 +38,10 @@ var (
 
 const pollInterval = 15 * time.Second
 
+// pausedRuleError marks airings parked by a paused rule (the datastore sets
+// it and revives such rows when the rule resumes).
+const pausedRuleError = "recording rule paused"
+
 var (
 	recordingRetryDelay = 2 * time.Second
 	// recordingReadTimeout fails a stalled source read so the retry loop can
@@ -333,6 +337,10 @@ func (s *Service) Cancel(id string) error {
 	if err != nil {
 		return err
 	}
+	return s.cancelLocked(recording)
+}
+
+func (s *Service) cancelLocked(recording *models.Recording) error {
 	now := time.Now().UTC()
 	switch recording.Status {
 	case models.RecordingStatusCompleted, models.RecordingStatusFailed, models.RecordingStatusCancelled:
@@ -381,16 +389,16 @@ func (s *Service) Delete(id string) error {
 	if joinErr != nil {
 		return joinErr
 	}
-	if recording.Status == models.RecordingStatusPending && strings.TrimSpace(recording.RuleID) != "" {
-		// Keep the schedule key as a tombstone so the rule expander does not
-		// recreate a single occurrence the user removed from the queue.
-		return s.Cancel(recording.ID)
-	}
 	s.statusMu.Lock()
 	defer s.statusMu.Unlock()
 	recording, err = s.Get(id)
 	if err != nil {
 		return err
+	}
+	if recording.Status == models.RecordingStatusPending && strings.TrimSpace(recording.RuleID) != "" {
+		// Keep the schedule key as a tombstone so the rule expander does not
+		// recreate a single occurrence the user removed from the queue.
+		return s.cancelLocked(recording)
 	}
 	s.mu.Lock()
 	active := s.active[id] != nil || s.starting[id]
@@ -411,12 +419,23 @@ func (s *Service) Delete(id string) error {
 				_ = os.Remove(dir)
 			}
 		}
-		return s.repo.Delete(context.Background(), recording.ID)
 	}
-	if strings.TrimSpace(recording.OutputPath) != "" {
+	if recording.Capture == nil && strings.TrimSpace(recording.OutputPath) != "" {
 		if err := os.Remove(recording.OutputPath); err != nil && !errors.Is(err, os.ErrNotExist) {
 			return fmt.Errorf("delete recording file: %w", err)
 		}
+	}
+	if strings.TrimSpace(recording.RuleID) != "" && recording.EndAt.After(time.Now()) {
+		// Preserve the airing key after removing its media so the rule cannot
+		// recreate an occurrence deleted while its scheduled window is open.
+		recording.Status = models.RecordingStatusCancelled
+		recording.OutputPath = ""
+		recording.OutputSizeBytes = 0
+		if recording.Error == pausedRuleError {
+			recording.Error = ""
+		}
+		recording.UpdatedAt = time.Now().UTC()
+		return s.repo.Update(context.Background(), recording)
 	}
 	return s.repo.Delete(context.Background(), recording.ID)
 }

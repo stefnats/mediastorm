@@ -14,7 +14,7 @@ Features include multi-profile watch history and recommendations, kids profiles,
 
 - `backend/`: Go server and supporting production services.
 - `backend/iroh-host/`: Rust host for encrypted Iroh remote access.
-- Native clients live in separate repositories: [mediastorm-tvos](https://github.com/godver3/mediastorm-tvos) (SwiftUI, iOS and tvOS) and [mediastorm-androidtv](https://github.com/godver3/mediastorm-androidtv) (Compose, Android and Android TV).
+- Native clients live in separate repositories: [mediastorm-native-apple](https://github.com/godver3/mediastorm-native-apple) (SwiftUI, iOS and tvOS) and [mediastorm-native-android](https://github.com/godver3/mediastorm-native-android) (Compose, Android and Android TV).
 - `archive/iroh-ios-bridge/`: historical iOS linking scaffold, retained for reference.
 
 ## Features
@@ -179,12 +179,14 @@ mediastorm can also act as a Jellyfin server, so stock Jellyfin clients (jellyfi
   - *Auto* plays mediastorm's own pick. With **Auto: Avoid Video Transcoding** (on by default), when that pick's video would be transcoded for the app (a codec, HDR or Dolby Vision format it does not declare), Auto plays the best-ranked release the app takes as it is instead; up to 3 more releases are tried, then it falls back to the first pick. Apps that have not played anything yet declare their capabilities on the first playback, so the first Auto pick on a new device uses that playback's device profile.
   - Progress, watched state and favorites (the watchlist) sync back to mediastorm, and from there to Trakt and the other scrobblers.
   - The player's playback info shows whether a stream is played directly, remuxed, direct-streamed or transcoded, and why.
-- **Extras:** skip prompts for intros, recaps and credits (from IntroDB, SkipDB and chapter names), *More like this* on detail pages, upcoming episodes of your shows from the release calendar, genre pages, and filmographies on person pages.
+- **Extras:** skip prompts for intros, recaps and credits (from IntroDB, SkipDB and chapter names), trailers on detail pages (from TMDB/TVDB), *More like this* on detail pages, upcoming episodes of your shows from the release calendar, genre pages, and filmographies on person pages.
+  - **Lists:** the profile's custom lists are collections and, in the apps' *Add to playlist* dialogs, playlists. Apps can create lists, add and remove titles and delete lists; adding an episode or season adds its series.
+  - **SyncPlay:** Jellyfin's *watch together* uses mediastorm's watch rooms, so Jellyfin apps and the mediastorm apps share one room. The group list shows the rooms the profile created or was invited to; a group started in a Jellyfin app becomes a room open to the creator's household (invite others from the mediastorm app). Pause, resume and seeking from either side reach everyone. A room plays one title: queue editing, next/previous, shuffle and repeat are ignored. Only the room's host starts a room from its lobby; members who join late catch up instead of pausing the others, and the host leaving the group ends the room.
   - Scrubbing previews (trickplay) appear when **Playback → Thumbnails** is enabled; they are built from mediastorm's seek thumbnails, so they are coarser than Jellyfin's (one frame per 30–60 s).
   - Watched state, favorites and resume positions changed on one device refresh on the profile's other devices.
   - Chapters of the file (seek bar markers, next/previous chapter) appear once the stream is resolved: the detail page resolves it in the background, and a movie's page waits up to 3 seconds for it on first open. Chapter images are not provided.
 - **Over the internet:** put an HTTPS reverse proxy in front of the bridge port (plain HTTP sends passwords and tokens in cleartext), set **Trusted Proxies** to the proxy and leave **Show Profile List** off. Keep the admin pages on port 7777 off the internet, or use a VPN instead.
-- **Not supported:** admin dashboard, SyncPlay, remote control, recordings and DVR, studios, music, Android TV's external-player mode.
+- **Not supported:** admin dashboard, remote control, recordings and DVR, studios, music, Android TV's external-player mode.
 
 Bridge tokens only work on the bridge port; the main API, admin and account pages reject them.
 
@@ -281,6 +283,13 @@ Pull the model on the Ollama server before using **Test Connection**. That test 
 
 See [Ollama setup](https://docs.ollama.com/faq) and [API compatibility](https://docs.ollama.com/api/openai-compatibility).
 
+### NZB Download Budget
+
+An optional NZB download budget can be enabled in **Settings → Streaming → NZB Download Budget** (advanced; off by default).
+It limits acquisitions per catalog movie or episode across profiles and keeps
+budgets and indexer cooldowns in PostgreSQL. See the [NZB acquisition guide](backend/internal/nzbfetch/README.md)
+for limits, required catalog context, and restart behavior.
+
 ## Troubleshooting
 
 - **Backend does not become healthy:** Run `docker compose ps`, then inspect `docker compose logs mediastorm` and `docker compose logs postgres`.
@@ -334,8 +343,8 @@ The main backend layout is:
 
 Native clients:
 
-- [mediastorm-tvos](https://github.com/godver3/mediastorm-tvos) — iOS and tvOS (SwiftUI). Requires Xcode and [XcodeGen](https://github.com/yonaskolb/XcodeGen): `xcodegen generate`, then open `StrmrTV.xcodeproj`.
-- [mediastorm-androidtv](https://github.com/godver3/mediastorm-androidtv) — Android and Android TV (Jetpack Compose). Requires JDK 17 and the Android SDK: `./gradlew :mobile:assembleDebug` (phone and tablet) or `./gradlew :app:assembleDebug` (Android TV).
+- [mediastorm-native-apple](https://github.com/godver3/mediastorm-native-apple) — iOS and tvOS (SwiftUI). Requires Xcode and [XcodeGen](https://github.com/yonaskolb/XcodeGen): `xcodegen generate`, then open `StrmrTV.xcodeproj`.
+- [mediastorm-native-android](https://github.com/godver3/mediastorm-native-android) — Android and Android TV (Jetpack Compose). Requires JDK 17 and the Android SDK: `./gradlew :mobile:assembleDebug` (phone and tablet) or `./gradlew :app:assembleDebug` (Android TV).
 
 ## Acknowledgments
 

@@ -4124,6 +4124,7 @@ type ffprobeStream struct {
 	Profile        string            `json:"profile"`
 	Level          int               `json:"level"`
 	AvgFrameRate   string            `json:"avg_frame_rate"`
+	ExtradataSize  *int              `json:"extradata_size"`
 	ColorSpace     string            `json:"color_space"`
 	ColorTransfer  string            `json:"color_transfer"`
 	ColorPrimaries string            `json:"color_primaries"`
@@ -6865,6 +6866,7 @@ func (h *VideoHandler) ProbeVideoFull(ctx context.Context, path string) (*VideoF
 		result.VideoHeight = stream.Height
 		result.VideoLevel = stream.Level
 		result.AvgFrameRate = strings.TrimSpace(stream.AvgFrameRate)
+		result.VideoParamSetsMissing = hevcParamSetsMissing(result.VideoCodec, stream.ExtradataSize)
 
 		// Detect Dolby Vision
 		hasDV, dvProfile, _ := detectDolbyVision(stream)
@@ -6972,6 +6974,7 @@ func (h *VideoHandler) unifiedProbeToVideoFull(cached *UnifiedProbeResult) *Vide
 		VideoHeight:              cached.VideoHeight,
 		VideoLevel:               cached.VideoLevel,
 		AvgFrameRate:             cached.AvgFrameRate,
+		VideoParamSetsMissing:    cached.VideoParamSetsMissing,
 		HasDolbyVision:           cached.HasDolbyVision,
 		HasHDR10:                 cached.HasHDR10,
 		DolbyVisionProfile:       cached.DolbyVisionProfile,
@@ -7019,6 +7022,7 @@ func (h *VideoHandler) videoFullToUnifiedProbe(result *VideoFullResult) *Unified
 		VideoHeight:              result.VideoHeight,
 		VideoLevel:               result.VideoLevel,
 		AvgFrameRate:             result.AvgFrameRate,
+		VideoParamSetsMissing:    result.VideoParamSetsMissing,
 		HasDolbyVision:           result.HasDolbyVision,
 		HasHDR10:                 result.HasHDR10,
 		DolbyVisionProfile:       result.DolbyVisionProfile,

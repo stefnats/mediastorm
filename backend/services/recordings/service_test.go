@@ -2,6 +2,7 @@ package recordings
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -468,4 +469,167 @@ func writeFakeFFmpeg(t *testing.T, script string) string {
 		t.Fatalf("WriteFile() error = %v", err)
 	}
 	return path
+}
+
+// Deleting a rule's airing that is still on keeps the row as a tombstone
+// (without its file), so the rule does not schedule the airing again; a
+// past airing is deleted outright.
+func TestDeleteOngoingRuleAiringKeepsTombstone(t *testing.T) {
+	dir := t.TempDir()
+	file := filepath.Join(dir, "airing.ts")
+	if err := os.WriteFile(file, []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC()
+	ongoing := models.Recording{ID: "ongoing", UserID: "u", RuleID: "rule", Status: models.RecordingStatusCancelled,
+		StartAt: now.Add(-10 * time.Minute), EndAt: now.Add(20 * time.Minute), OutputPath: file, OutputSizeBytes: 1}
+	past := models.Recording{ID: "past", UserID: "u", RuleID: "rule", Status: models.RecordingStatusCompleted,
+		StartAt: now.Add(-2 * time.Hour), EndAt: now.Add(-time.Hour)}
+	repo := newFakeRecordingRepo(ongoing, past)
+	svc := newTestService(repo, "", dir)
+	if err := svc.Delete("ongoing"); err != nil {
+		t.Fatal(err)
+	}
+	got, err := svc.Get("ongoing")
+	if err != nil || got == nil || got.Status != models.RecordingStatusCancelled || got.OutputPath != "" || got.OutputSizeBytes != 0 {
+		t.Fatalf("ongoing airing after delete = %+v, %v", got, err)
+	}
+	if _, err := os.Stat(file); !os.IsNotExist(err) {
+		t.Fatalf("file kept: %v", err)
+	}
+	if err := svc.Delete("past"); err != nil {
+		t.Fatal(err)
+	}
+	if got, _ := svc.Get("past"); got != nil {
+		t.Fatalf("past airing kept: %+v", got)
+	}
+}
+
+// An actual multipart flush keeps the capture active until physically joined.
+// A subsequent delete preserves the rule's tombstone without reviving media.
+func TestDeleteWhileFinalisingLeavesTombstone(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("fake binary shell script is POSIX-only")
+	}
+	script := writeFakeFFmpeg(t, "#!/bin/sh\nprintf 'recorded-media-data'\nexec sleep 10\n")
+	recording := newTestRecording(time.Now().UTC().Add(time.Minute))
+	recording.RuleID = "rule"
+	repo := newFakeRecordingRepo(recording)
+	svc := newTestService(repo, script, t.TempDir())
+	flushing, release, done := make(chan struct{}), make(chan struct{}), make(chan struct{})
+	var releaseOnce sync.Once
+	allowFlush := func() { releaseOnce.Do(func() { close(release) }) }
+	svc.syncCaptureFile = func(file *os.File) error {
+		close(flushing)
+		<-release
+		return file.Sync()
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	svc.ctx = ctx
+	defer func() { cancel(); allowFlush(); <-done }()
+	go func() { defer close(done); svc.startRecording(recording) }()
+	deadline := time.Now().Add(2 * time.Second)
+	var path string
+	for path == "" {
+		if current, err := svc.Get(recording.ID); err == nil && current.Capture != nil && len(current.Capture.Parts) == 1 {
+			if owned, pathErr := svc.partPath(*current, 1); pathErr == nil {
+				if info, statErr := os.Stat(owned); statErr == nil && info.Size() > 0 {
+					path = owned
+				}
+			}
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("recording did not write media")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if err := svc.Cancel(recording.ID); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-flushing:
+	case <-time.After(2 * time.Second):
+		t.Fatal("cancelled recording did not reach physical flush")
+	}
+	if err := svc.Delete(recording.ID); !errors.Is(err, ErrCannotDeleteActive) {
+		t.Fatalf("delete during actual finalization = %v", err)
+	}
+	if _, err := os.Stat(path); err != nil {
+		t.Fatalf("active output was removed: %v", err)
+	}
+	allowFlush()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("capture did not finish after physical flush")
+	}
+	if err := svc.Delete(recording.ID); err != nil {
+		t.Fatal(err)
+	}
+	got, err := svc.Get(recording.ID)
+	if err != nil || got.Status != models.RecordingStatusCancelled || got.OutputPath != "" || got.OutputSizeBytes != 0 {
+		t.Fatalf("after delete = %+v, %v", got, err)
+	}
+	if _, err := os.Stat(path); !os.IsNotExist(err) {
+		t.Fatalf("file restored: %v", err)
+	}
+}
+
+// A recording cancelled after it was listed as due is not started.
+func TestCancelledDueRecordingIsNotStarted(t *testing.T) {
+	recording := newTestRecording(time.Now().UTC().Add(time.Minute))
+	repo := newFakeRecordingRepo(recording)
+	svc := newTestService(repo, "/nonexistent/ffmpeg", t.TempDir())
+	svc.ctx = context.Background()
+	if err := svc.Cancel(recording.ID); err != nil {
+		t.Fatal(err)
+	}
+	svc.startRecording(recording) // the stale copy from the due list
+	got, err := svc.Get(recording.ID)
+	if err != nil || got.Status != models.RecordingStatusCancelled || got.ActualStartAt != nil {
+		t.Fatalf("after start = %+v, %v", got, err)
+	}
+}
+
+// Deleting an airing parked by a paused rule keeps it skipped once the rule
+// resumes (the datastore revives rows still marked as paused).
+func TestDeletePausedRuleAiringStaysSkipped(t *testing.T) {
+	now := time.Now().UTC()
+	paused := models.Recording{ID: "paused", UserID: "u", RuleID: "rule", Status: models.RecordingStatusCancelled,
+		Error: pausedRuleError, StartAt: now.Add(time.Hour), EndAt: now.Add(2 * time.Hour)}
+	svc := newTestService(newFakeRecordingRepo(paused), "", t.TempDir())
+	if err := svc.Delete("paused"); err != nil {
+		t.Fatal(err)
+	}
+	got, err := svc.Get("paused")
+	if err != nil || got.Status != models.RecordingStatusCancelled || got.Error != "" {
+		t.Fatalf("after delete = %+v, %v", got, err)
+	}
+}
+
+// Imported capture metadata never makes an arbitrary original path owned by
+// the recorder, including when deletion preserves a future rule tombstone.
+func TestDeleteRestoredRuleCapturePreservesUnownedPath(t *testing.T) {
+	outside := filepath.Join(t.TempDir(), "external.ts")
+	if err := os.WriteFile(outside, []byte("unowned-original"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	recording := newTestRecording(time.Now().UTC().Add(time.Minute))
+	recording.RuleID = "rule"
+	recording.Status = models.RecordingStatusCancelled
+	recording.OutputPath = outside
+	recording.OutputSizeBytes = 16
+	recording.Capture = &models.RecordingCapture{Version: 1, Restored: true}
+	svc := newTestService(newFakeRecordingRepo(recording), "", t.TempDir())
+	if err := svc.Delete(recording.ID); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(outside)
+	if err != nil || string(data) != "unowned-original" {
+		t.Fatalf("restored capture deleted external media: %q %v", data, err)
+	}
+	current, err := svc.Get(recording.ID)
+	if err != nil || current == nil || current.Status != models.RecordingStatusCancelled || current.OutputPath != "" || current.OutputSizeBytes != 0 {
+		t.Fatalf("missing cleared tombstone: %+v %v", current, err)
+	}
 }

@@ -1303,6 +1303,7 @@ type SearchOptions struct {
 	SkipFilter               bool                              // When true, skip filtering entirely (used by SearchTest)
 	UseDownloadRanking       bool                              // When true, apply download-only preferred terms as a final ranking boost
 	SeasonPacksOnly          bool                              // When true, keep only releases that cover the whole target season ("Download Season")
+	acquisitionIdentity      models.NZBIdentity
 
 	// Internal Newznab request controls used by the daily-show tiered search.
 	usenetSearchType      string
@@ -1595,6 +1596,7 @@ func (s *Service) demoScored(opts SearchOptions) []models.ScoredNZBResult {
 func (s *Service) Search(ctx context.Context, opts SearchOptions) ([]models.NZBResult, error) {
 	finishPriority := s.beginForegroundSearch(opts)
 	defer finishPriority()
+	opts = withNZBIdentity(opts)
 	if s.demo != nil {
 		return s.demo.Results(opts.IMDBID, opts.Query, opts.MediaType), nil
 	}
@@ -1891,6 +1893,7 @@ func (s *Service) SearchWithScoring(ctx context.Context, opts SearchOptions) ([]
 	}
 	finishPriority := s.beginForegroundSearch(opts)
 	defer finishPriority()
+	opts = withNZBIdentity(opts)
 	if s.demo != nil {
 		return s.demoScored(opts), nil
 	}
@@ -2144,6 +2147,7 @@ type searchSplitOutcome struct {
 // per-source scoring/ranking, and a single aggregate "raw" cache write once
 // both sources settle (only when neither failed and no source was incomplete).
 func (s *Service) searchWithScoringSplit(ctx context.Context, opts SearchOptions) (usenetCh, debridCh <-chan ScoredSplitSearchResult) {
+	opts = withNZBIdentity(opts)
 	callNum := s.searchSplitCount.Add(1)
 	searchStart := time.Now()
 	log.Printf("[search-stats] SearchSplit #%d started (query=%q, mediaType=%q, user=%q, client=%q)",
@@ -2636,6 +2640,7 @@ func bypassScoredResults(raw []models.NZBResult, newestFirst, includeScoreBreakd
 
 // SearchTest runs search with full scoring breakdown and filter details for the admin search tester.
 func (s *Service) SearchTest(ctx context.Context, opts SearchOptions) ([]models.ScoredNZBResult, error) {
+	opts = withNZBIdentity(opts)
 	if s.demo != nil {
 		return s.demoScored(opts), nil
 	}
@@ -3012,6 +3017,7 @@ type SplitSearchResult struct {
 // This allows the caller to process debrid results immediately while usenet search continues.
 // The caller is responsible for draining both channels to avoid goroutine leaks.
 func (s *Service) SearchSplit(ctx context.Context, opts SearchOptions) (debridChan <-chan SplitSearchResult, usenetChan <-chan SplitSearchResult) {
+	opts = withNZBIdentity(opts)
 	callNum := s.searchSplitCount.Add(1)
 	log.Printf("[search-stats] SearchSplit #%d started (query=%q, mediaType=%q, user=%q, client=%q)",
 		callNum, opts.Query, opts.MediaType, opts.UserID, opts.ClientID)

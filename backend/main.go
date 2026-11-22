@@ -36,8 +36,10 @@ import (
 	"novastream/internal/jellyfinbridge"
 	"novastream/internal/livecapacity"
 	"novastream/internal/mediaidentity"
+	"novastream/internal/nzbfetch"
 	"novastream/internal/nzbfilesystem"
 	"novastream/internal/pool"
+	"novastream/internal/providerbreaker"
 	"novastream/internal/requestsecurity"
 	"novastream/internal/settingsbootstrap"
 	"novastream/internal/slogutil"
@@ -270,6 +272,26 @@ func main() {
 		fmt.Println("╚══════════════════════════════════════════════════════════════════════╝")
 		fmt.Println("")
 		log.Fatal("DATABASE_URL is required. Set it as an environment variable or in settings.json under database.url")
+	}
+	// NZB download budget: Settings > Streaming > NZB Download Budget, read on
+	// every download so it switches without a restart.
+	{
+		nzbBudgetEnabled := func() bool {
+			s, err := cfgManager.Load()
+			return err == nil && s.Streaming.NZBDownloadBudget
+		}
+		repo := store.NZBAcquisition()
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		err := providerbreaker.Shared().Restore(ctx, repo)
+		cancel()
+		if err != nil {
+			if settings.Streaming.NZBDownloadBudget {
+				log.Fatalf("initialize NZB download budget: %v", err)
+			}
+			log.Printf("[nzb-budget] saved indexer pauses not restored: %v", err)
+		}
+		providerbreaker.Shared().SetPersist(nzbBudgetEnabled)
+		nzbfetch.Shared = nzbfetch.NewToggled(repo, nzbBudgetEnabled)
 	}
 	// Construct router
 	var r *mux.Router = utils.NewRouter()
@@ -1204,8 +1226,9 @@ func main() {
 	shareHandler.SetLibraryAccessService(libraryAccessService)
 	var watchRoomsHandler *handlers.WatchRoomsHandler
 	var watchPartyHandler *handlers.WatchPartyHandler
+	var watchRoomsService *watchrooms.Service
 	if store != nil {
-		watchRoomsService := watchrooms.New(store.WatchRooms(), userService, accountsService)
+		watchRoomsService = watchrooms.New(store.WatchRooms(), userService, accountsService)
 		sessionsService.SetWatchPartyPlaybackValidator(func(ctx context.Context, roomID, guestID, resource string) error {
 			err := watchRoomsService.ValidateExternalPlayback(ctx, roomID, guestID, resource)
 			if err == nil || watchrooms.IsExternalPlaybackDenied(err) {
@@ -2203,6 +2226,7 @@ func main() {
 			EPG:             epgService,
 			Calendar:        calendarService,
 			SubtitleDone:    videoHandler.SubtitleExtractionDone,
+			WatchRooms:      bridgeWatchRooms(watchRoomsService),
 			Settings: func() (config.JellyfinBridgeSettings, error) {
 				current, err := cfgManager.Load()
 				return current.JellyfinBridge, err
@@ -3329,4 +3353,13 @@ func managedWebDAVOptions(prefix string, managed *webdav.ManagedHandler, router 
 			http.Error(w, "Method Not Allowed", http.StatusMethodNotAllowed)
 		}
 	})
+}
+
+// bridgeWatchRooms hands the watch rooms to the Jellyfin bridge (SyncPlay)
+// only when they exist: a nil *Service in the interface would look set.
+func bridgeWatchRooms(service *watchrooms.Service) jellyfinbridge.WatchRoomService {
+	if service == nil {
+		return nil
+	}
+	return service
 }

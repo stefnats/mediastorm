@@ -91,7 +91,12 @@ func sharedCallContext(ctx context.Context) (context.Context, context.CancelFunc
 
 // searchTorznab searches one Newznab/Torznab indexer, sharing identical calls
 // (see indexerCallDedup).
-func (s *Service) searchTorznab(ctx context.Context, idx config.IndexerConfig, opts SearchOptions) ([]models.NZBResult, error) {
+func (s *Service) searchTorznab(ctx context.Context, idx config.IndexerConfig, opts SearchOptions) (results []models.NZBResult, err error) {
+	defer func() {
+		for i := range results {
+			results[i] = results[i].WithNZBIdentity(opts.acquisitionIdentity)
+		}
+	}()
 	// Background work must stop its actual HTTP request when interactive work
 	// arrives. The ordinary shared call deliberately detaches cancellation.
 	if opts.AvailabilityCheck {
@@ -108,7 +113,9 @@ func (s *Service) searchTorznab(ctx context.Context, idx config.IndexerConfig, o
 		if err == nil && ctx.Err() == nil {
 			s.indexerCalls.remember(key, results, time.Now())
 		}
-		return results, err
+		// The identity annotation below belongs to this caller; the cache keeps
+		// the unannotated provider response for other selected catalog items.
+		return cloneNZBResults(results), err
 	}
 	ch := s.indexerCalls.group.DoChan(key, func() (any, error) {
 		callCtx, cancel := sharedCallContext(ctx)
