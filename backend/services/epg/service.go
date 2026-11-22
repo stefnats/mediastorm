@@ -716,7 +716,7 @@ func (s *Service) fetchXMLTVWithProxyAndUserAgents(ctx context.Context, xmltvURL
 	// Limit reader size
 	limited := io.LimitReader(reader, maxEPGFileSize+1)
 
-	if err := s.parseXMLTV(limited, schedule); err != nil {
+	if err := s.parseXMLTVFromSource(limited, schedule, programmeSource("xmltv", xmltvURL, time.Now().UTC())); err != nil {
 		log.Printf("[epg] XMLTV parse failed host=%q elapsed=%s error=%v", hostLabel, time.Since(started).Round(time.Millisecond), err)
 		return err
 	}
@@ -795,6 +795,10 @@ type xmltvRating struct {
 
 // parseXMLTV parses XMLTV data using streaming XML parser.
 func (s *Service) parseXMLTV(reader io.Reader, schedule *models.EPGSchedule) error {
+	return s.parseXMLTVFromSource(reader, schedule, nil)
+}
+
+func (s *Service) parseXMLTVFromSource(reader io.Reader, schedule *models.EPGSchedule, source *models.EPGProgramSource) error {
 	decoder := xml.NewDecoder(reader)
 	started := time.Now()
 	channelCount := 0
@@ -867,6 +871,7 @@ func (s *Service) parseXMLTV(reader io.Reader, schedule *models.EPGSchedule) err
 					Description: getFirstLangValue(prog.Desc),
 					Start:       start,
 					Stop:        stop,
+					Source:      copyProgrammeSource(source),
 				}
 
 				// Parse categories
@@ -892,7 +897,11 @@ func (s *Service) parseXMLTV(reader io.Reader, schedule *models.EPGSchedule) err
 					epgProgram.Icon = prog.Icon[0].Src
 				}
 
-				// Parse rating
+				// Keep the legacy first-text display while preserving every system
+				// and value for the separate regional programme-age evaluation.
+				for _, rating := range prog.Rating {
+					epgProgram.Ratings = append(epgProgram.Ratings, models.EPGContentRating{System: rating.System, Value: rating.Value.Value})
+				}
 				if len(prog.Rating) > 0 {
 					epgProgram.Rating = prog.Rating[0].Value.Value
 				}

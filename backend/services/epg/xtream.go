@@ -238,6 +238,7 @@ func (s *Service) fetchChannelEPG(ctx context.Context, settings *config.Settings
 		return nil, fmt.Errorf("decode EPG response: %w", err)
 	}
 
+	source := programmeSource("xtream", apiURL, time.Now().UTC())
 	// Convert listings to EPGProgram, deduplicating as we go
 	seen := make(map[string]bool)
 	var programs []models.EPGProgram
@@ -269,6 +270,7 @@ func (s *Service) fetchChannelEPG(ctx context.Context, settings *config.Settings
 		seen[key] = true
 
 		programs = append(programs, models.EPGProgram{
+			Source:      copyProgrammeSource(source),
 			Title:       title,
 			Description: description,
 			Start:       start,

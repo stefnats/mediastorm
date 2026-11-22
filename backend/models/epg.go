@@ -4,17 +4,46 @@ import (
 	"time"
 )
 
+// EPGContentRating preserves the guide's claimed rating system and raw value.
+// It is EPG metadata, not an independently verified content classification.
+type EPGContentRating struct {
+	System string `json:"system"`
+	Value  string `json:"value"`
+}
+
+type EPGProgramSource struct {
+	Type       string    `json:"type"`
+	ID         string    `json:"id"`
+	Name       string    `json:"name,omitempty"`
+	ObservedAt time.Time `json:"observedAt"`
+}
+
+// EPGAgeDecision describes only the current cached guide entry. It does not
+// enable playback. States are within_limit, too_old, and unknown.
+type EPGAgeDecision struct {
+	State      string      `json:"state"`
+	Reason     string      `json:"reason"`
+	Country    string      `json:"country"`
+	MaximumAge int         `json:"maximumAge"`
+	Age        *int        `json:"age,omitempty"`
+	ChannelID  string      `json:"channelId"`
+	At         time.Time   `json:"at"`
+	Program    *EPGProgram `json:"program,omitempty"`
+}
+
 // EPGProgram represents a single program in the EPG schedule.
 type EPGProgram struct {
-	ChannelID   string    `json:"channelId"` // Links to LiveChannel.TvgID
-	Title       string    `json:"title"`
-	Description string    `json:"description,omitempty"`
-	Start       time.Time `json:"start"`
-	Stop        time.Time `json:"stop"`
-	Icon        string    `json:"icon,omitempty"`
-	Categories  []string  `json:"categories,omitempty"`
-	Episode     string    `json:"episode,omitempty"` // Episode number in standard format (e.g., "S01E05")
-	Rating      string    `json:"rating,omitempty"`
+	ChannelID   string             `json:"channelId"` // Links to LiveChannel.TvgID
+	Title       string             `json:"title"`
+	Description string             `json:"description,omitempty"`
+	Start       time.Time          `json:"start"`
+	Stop        time.Time          `json:"stop"`
+	Icon        string             `json:"icon,omitempty"`
+	Categories  []string           `json:"categories,omitempty"`
+	Episode     string             `json:"episode,omitempty"` // Episode number in standard format (e.g., "S01E05")
+	Rating      string             `json:"rating,omitempty"`
+	Ratings     []EPGContentRating `json:"ratings,omitempty"`
+	Source      *EPGProgramSource  `json:"source,omitempty"`
 	// Airing flags from XMLTV. New covers <new/>, <premiere> and <live/>;
 	// PreviouslyShown is <previously-shown>. Most guides set neither.
 	New             bool `json:"new,omitempty"`
