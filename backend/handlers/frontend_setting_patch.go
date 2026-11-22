@@ -55,6 +55,9 @@ func decodeFrontendSettingPatchWithDeviceExperiments(
 	if patch.Path == "" {
 		return patch, errors.New("setting path is required")
 	}
+	if allowDeviceExperiments && patch.Path == "playback.autoCheckAudioLanguage" {
+		return patch, errors.New("automatic audio language checking is a profile setting")
+	}
 	paths, err := frontendEditablePaths(manager)
 	if err != nil {
 		return patch, err
