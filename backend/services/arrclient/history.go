@@ -7,21 +7,25 @@ import (
 	"net/url"
 	"path"
 	"strings"
+
+	"novastream/models"
 )
 
 // ImportedFile describes a file actually recorded as imported for this download.
 // The local library still checks and indexes that file before offering a version.
 type ImportedFile struct {
-	Path              string `json:"-"`
-	Title             string `json:"title"`
-	Year              int    `json:"year"`
-	MediaType         string `json:"mediaType"`
-	TMDBID            int64  `json:"tmdbId,omitempty"`
-	TVDBID            int64  `json:"tvdbId,omitempty"`
-	IMDBID            string `json:"imdbId,omitempty"`
-	SeasonNumber      int    `json:"seasonNumber,omitempty"`
-	EpisodeNumber     int    `json:"episodeNumber,omitempty"`
-	AmbiguousEpisodes bool   `json:"ambiguousEpisodes,omitempty"`
+	Episodes                 []models.LocalMediaEpisode `json:"episodes,omitempty"`
+	EpisodeMappingIncomplete bool                       `json:"episodeMappingIncomplete,omitempty"`
+	Path                     string                     `json:"-"`
+	Title                    string                     `json:"title"`
+	Year                     int                        `json:"year"`
+	MediaType                string                     `json:"mediaType"`
+	TMDBID                   int64                      `json:"tmdbId,omitempty"`
+	TVDBID                   int64                      `json:"tvdbId,omitempty"`
+	IMDBID                   string                     `json:"imdbId,omitempty"`
+	SeasonNumber             int                        `json:"seasonNumber,omitempty"`
+	EpisodeNumber            int                        `json:"episodeNumber,omitempty"`
+	AmbiguousEpisodes        bool                       `json:"ambiguousEpisodes,omitempty"`
 }
 
 // ImportedFiles uses the v3 downloadId history filter supported by both apps.
@@ -61,8 +65,8 @@ func (c *Client) ImportedFiles(ctx context.Context, downloadID string) ([]Import
 			Movie      title             `json:"movie"`
 			Series     title             `json:"series"`
 			Episode    struct {
-				SeasonNumber  int `json:"seasonNumber"`
-				EpisodeNumber int `json:"episodeNumber"`
+				SeasonNumber  *int `json:"seasonNumber"`
+				EpisodeNumber *int `json:"episodeNumber"`
 			} `json:"episode"`
 		} `json:"records"`
 	}
@@ -71,7 +75,7 @@ func (c *Client) ImportedFiles(ctx context.Context, downloadID string) ([]Import
 	}
 	files := []ImportedFile{}
 	seen := map[string]int{}
-	episodeIDs := map[string]int64{}
+	episodeIDs := map[string]map[int64]models.LocalMediaEpisode{}
 	for _, r := range page.Records {
 		if r.DownloadID != downloadID || r.EventType != "downloadFolderImported" {
 			continue
@@ -89,20 +93,66 @@ func (c *Client) ImportedFiles(ctx context.Context, downloadID string) ([]Import
 		if c.kind == "sonarr" {
 			t = r.Series
 			item.MediaType = "series"
-			item.SeasonNumber = r.Episode.SeasonNumber
-			item.EpisodeNumber = r.Episode.EpisodeNumber
+			if r.Episode.SeasonNumber != nil {
+				item.SeasonNumber = *r.Episode.SeasonNumber
+			}
+			if r.Episode.EpisodeNumber != nil {
+				item.EpisodeNumber = *r.Episode.EpisodeNumber
+			}
+			if r.Episode.SeasonNumber != nil && r.Episode.EpisodeNumber != nil && item.SeasonNumber >= 0 && item.EpisodeNumber > 0 {
+				item.Episodes = []models.LocalMediaEpisode{{SeasonNumber: item.SeasonNumber, EpisodeNumber: item.EpisodeNumber}}
+			} else {
+				item.EpisodeMappingIncomplete = true
+			}
 		}
 		item.Title, item.Year, item.TMDBID, item.TVDBID, item.IMDBID = t.Title, t.Year, t.TMDBID, t.TVDBID, t.IMDBID
 		if index, exists := seen[imported]; exists {
 			previous := &files[index]
-			if c.kind == "sonarr" && (previous.SeasonNumber != item.SeasonNumber || previous.EpisodeNumber != item.EpisodeNumber || episodeIDs[imported] > 0 && r.EpisodeID > 0 && episodeIDs[imported] != r.EpisodeID) {
-				previous.AmbiguousEpisodes = true
+			if c.kind == "sonarr" {
+				coordinate := models.LocalMediaEpisode{SeasonNumber: item.SeasonNumber, EpisodeNumber: item.EpisodeNumber}
+				old, knownID := episodeIDs[imported][r.EpisodeID]
+				if previous.TMDBID != item.TMDBID || previous.TVDBID != item.TVDBID || previous.IMDBID != item.IMDBID || item.EpisodeMappingIncomplete || knownID && r.EpisodeID > 0 && old != coordinate {
+					previous.EpisodeMappingIncomplete = true
+				}
+				for id, member := range episodeIDs[imported] {
+					if id > 0 && r.EpisodeID > 0 && id != r.EpisodeID && member == coordinate {
+						previous.EpisodeMappingIncomplete = true
+					}
+				}
+				if r.EpisodeID > 0 {
+					episodeIDs[imported][r.EpisodeID] = coordinate
+				}
+				found := false
+				for _, episode := range previous.Episodes {
+					if episode == coordinate {
+						found = true
+					}
+				}
+				if !found {
+					previous.Episodes = append(previous.Episodes, coordinate)
+				}
+				previous.AmbiguousEpisodes = len(previous.Episodes) > 1 || previous.EpisodeMappingIncomplete
 			}
 			continue
 		}
 		seen[imported] = len(files)
-		episodeIDs[imported] = r.EpisodeID
+		episodeIDs[imported] = map[int64]models.LocalMediaEpisode{r.EpisodeID: {SeasonNumber: item.SeasonNumber, EpisodeNumber: item.EpisodeNumber}}
 		files = append(files, item)
+	}
+	for i := range files {
+		if files[i].MediaType != "series" {
+			continue
+		}
+		members, valid := models.NormalizeLocalMediaEpisodes(files[i].Episodes)
+		if !valid {
+			files[i].EpisodeMappingIncomplete = true
+		} else {
+			files[i].Episodes = members
+		}
+		if len(members) > 1 || files[i].EpisodeMappingIncomplete {
+			files[i].AmbiguousEpisodes = true
+			files[i].SeasonNumber, files[i].EpisodeNumber = 0, 0
+		}
 	}
 	return files, nil
 }

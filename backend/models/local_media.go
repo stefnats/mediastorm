@@ -1,6 +1,9 @@
 package models
 
-import "time"
+import (
+	"sort"
+	"time"
+)
 
 const (
 	LibraryAccessModeAll        = "all"
@@ -106,7 +109,15 @@ type LocalMediaExternalIDs struct {
 	TVDB string `json:"tvdb,omitempty"`
 }
 
+// LocalMediaEpisode describes membership, not a timestamp or playback offset.
+// Multiple members share one physical file and one file-level progress identity.
+type LocalMediaEpisode struct {
+	SeasonNumber  int `json:"seasonNumber"`
+	EpisodeNumber int `json:"episodeNumber"`
+}
+
 type LocalMediaItem struct {
+	Episodes         []LocalMediaEpisode    `json:"episodes,omitempty"`
 	ID               string                 `json:"id"`
 	LibraryID        string                 `json:"libraryId"`
 	RelativePath     string                 `json:"relativePath"`
@@ -299,26 +310,29 @@ type LocalMediaDirectoryListing struct {
 }
 
 type LocalMediaPlaybackResponse struct {
-	ItemID          string            `json:"itemId"`
-	FileName        string            `json:"fileName"`
-	DisplayName     string            `json:"displayName"`
-	TitleID         string            `json:"titleId,omitempty"`
-	Title           string            `json:"title,omitempty"`
-	SeriesTitle     string            `json:"seriesTitle,omitempty"`
-	EpisodeTitle    string            `json:"episodeTitle,omitempty"`
-	Year            int               `json:"year,omitempty"`
-	DurationSeconds float64           `json:"durationSeconds,omitempty"`
-	PosterURL       string            `json:"posterUrl,omitempty"`
-	BackdropURL     string            `json:"backdropUrl,omitempty"`
-	EpisodeImage    string            `json:"episodeImageUrl,omitempty"`
-	ExternalIDs     map[string]string `json:"externalIds,omitempty"`
-	StreamPath      string            `json:"streamPath"`
-	StreamURL       string            `json:"streamUrl"`
-	HLSStartURL     string            `json:"hlsStartUrl,omitempty"`
-	DirectStream    bool              `json:"directStream"`
-	HLSAvailable    bool              `json:"hlsAvailable"`
-	SourceType      string            `json:"sourceType"`
-	SourceName      string            `json:"sourceName"`
+	CombinedEpisodes []LocalMediaEpisode `json:"combinedEpisodes,omitempty"`
+	ProgressScope    string              `json:"progressScope,omitempty"`
+	PlaybackNotice   string              `json:"playbackNotice,omitempty"`
+	ItemID           string              `json:"itemId"`
+	FileName         string              `json:"fileName"`
+	DisplayName      string              `json:"displayName"`
+	TitleID          string              `json:"titleId,omitempty"`
+	Title            string              `json:"title,omitempty"`
+	SeriesTitle      string              `json:"seriesTitle,omitempty"`
+	EpisodeTitle     string              `json:"episodeTitle,omitempty"`
+	Year             int                 `json:"year,omitempty"`
+	DurationSeconds  float64             `json:"durationSeconds,omitempty"`
+	PosterURL        string              `json:"posterUrl,omitempty"`
+	BackdropURL      string              `json:"backdropUrl,omitempty"`
+	EpisodeImage     string              `json:"episodeImageUrl,omitempty"`
+	ExternalIDs      map[string]string   `json:"externalIds,omitempty"`
+	StreamPath       string              `json:"streamPath"`
+	StreamURL        string              `json:"streamUrl"`
+	HLSStartURL      string              `json:"hlsStartUrl,omitempty"`
+	DirectStream     bool                `json:"directStream"`
+	HLSAvailable     bool                `json:"hlsAvailable"`
+	SourceType       string              `json:"sourceType"`
+	SourceName       string              `json:"sourceName"`
 }
 
 const (
@@ -405,4 +419,30 @@ type RemoteMediaItem struct {
 	IsMissing      bool              `json:"isMissing,omitempty"`
 	CreatedAt      time.Time         `json:"createdAt"`
 	UpdatedAt      time.Time         `json:"updatedAt"`
+}
+
+// NormalizeLocalMediaEpisodes canonicalizes explicit membership. It never infers
+// missing episodes or their order in the file from a filename or a range.
+func NormalizeLocalMediaEpisodes(episodes []LocalMediaEpisode) ([]LocalMediaEpisode, bool) {
+	if len(episodes) == 0 || len(episodes) > 1000 {
+		return nil, false
+	}
+	seen := make(map[LocalMediaEpisode]bool, len(episodes))
+	out := make([]LocalMediaEpisode, 0, len(episodes))
+	for _, episode := range episodes {
+		if episode.SeasonNumber < 0 || episode.EpisodeNumber <= 0 {
+			return nil, false
+		}
+		if !seen[episode] {
+			seen[episode] = true
+			out = append(out, episode)
+		}
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].SeasonNumber != out[j].SeasonNumber {
+			return out[i].SeasonNumber < out[j].SeasonNumber
+		}
+		return out[i].EpisodeNumber < out[j].EpisodeNumber
+	})
+	return out, true
 }

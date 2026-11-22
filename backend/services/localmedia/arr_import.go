@@ -66,8 +66,12 @@ func (s *Service) ImportARRFiles(ctx context.Context, libraryID, remoteRoot stri
 			result.Missing = true
 			continue
 		}
-		if previous, exists := wanted[name]; exists && file.MediaType == "series" && (previous.SeasonNumber != file.SeasonNumber || previous.EpisodeNumber != file.EpisodeNumber) {
-			file.AmbiguousEpisodes = true
+		if previous, exists := wanted[name]; exists && file.MediaType == "series" {
+			left, leftOK := arrImportedEpisodes(previous)
+			right, rightOK := arrImportedEpisodes(file)
+			file.Episodes = append(left, right...)
+			file.EpisodeMappingIncomplete = !leftOK || !rightOK || previous.TMDBID != file.TMDBID || previous.TVDBID != file.TVDBID || previous.IMDBID != file.IMDBID
+			file.AmbiguousEpisodes = previous.AmbiguousEpisodes || file.AmbiguousEpisodes || len(file.Episodes) > 1
 		}
 		wanted[name] = file
 	}
@@ -89,13 +93,16 @@ func (s *Service) ImportARRFiles(ctx context.Context, libraryID, remoteRoot stri
 			continue
 		}
 		found++
+		episodes, mapped := arrImportedEpisodes(file)
+		combined := mapped && len(episodes) > 1
+		unresolved := file.MediaType == "series" && (!mapped || file.AmbiguousEpisodes && !combined)
 		manual := item.MatchStatus == models.LocalMediaMatchStatusManual
-		if file.AmbiguousEpisodes {
+		if unresolved {
 			result.NeedsMatch = true
 			result.Reason = "multiple_episodes"
 		}
 		if manual {
-			if arrItemIdentityConflict(item, file) || file.MediaType == "series" && file.EpisodeNumber > 0 && (item.SeasonNumber != file.SeasonNumber || item.EpisodeNumber != file.EpisodeNumber) {
+			if arrItemIdentityConflict(item, file) || file.MediaType == "series" && !arrEpisodeMembershipMatches(item, episodes, mapped) {
 				result.NeedsMatch = true
 				if result.Reason == "" {
 					result.Reason = "manual_match_conflict"
@@ -131,14 +138,18 @@ func (s *Service) ImportARRFiles(ctx context.Context, libraryID, remoteRoot stri
 				item.MatchStatus = models.LocalMediaMatchStatusMatched
 				item.Confidence = 1
 			}
-			if file.AmbiguousEpisodes {
-				// One local item cannot express two different episodes. Do not turn
-				// the first history row into an automatic single-episode selection.
+			item.Episodes = nil
+			if unresolved {
 				item.SeasonNumber, item.EpisodeNumber = 0, 0
 				item.MatchStatus = models.LocalMediaMatchStatusUnmatched
 				item.Confidence = 0
-			} else if file.MediaType == "series" && file.EpisodeNumber > 0 {
-				item.SeasonNumber, item.EpisodeNumber = file.SeasonNumber, file.EpisodeNumber
+			} else if combined {
+				// Membership is complete; timing is not. Keep one physical item
+				// without inventing a primary episode or intra-file seek offset.
+				item.Episodes = episodes
+				item.SeasonNumber, item.EpisodeNumber = 0, 0
+			} else if file.MediaType == "series" && len(episodes) == 1 {
+				item.SeasonNumber, item.EpisodeNumber = episodes[0].SeasonNumber, episodes[0].EpisodeNumber
 			}
 		}
 		probe, probeErr := s.ProbeItemForPlayback(ctx, &item)
@@ -222,4 +233,37 @@ func arrItemIdentityConflict(item models.LocalMediaItem, file arrclient.Imported
 		return false
 	}
 	return item.MatchedTitleID != "" && item.MatchedTitleID != expected.ID
+}
+
+func arrImportedEpisodes(file arrclient.ImportedFile) ([]models.LocalMediaEpisode, bool) {
+	if file.MediaType != "series" || file.EpisodeMappingIncomplete {
+		return nil, false
+	}
+	if len(file.Episodes) > 0 {
+		return models.NormalizeLocalMediaEpisodes(file.Episodes)
+	}
+	if file.AmbiguousEpisodes {
+		return nil, false
+	}
+	return models.NormalizeLocalMediaEpisodes([]models.LocalMediaEpisode{{SeasonNumber: file.SeasonNumber, EpisodeNumber: file.EpisodeNumber}})
+}
+
+func arrEpisodeMembershipMatches(item models.LocalMediaItem, episodes []models.LocalMediaEpisode, mapped bool) bool {
+	if !mapped {
+		return false
+	}
+	existing := item.Episodes
+	if len(existing) == 0 {
+		existing = []models.LocalMediaEpisode{{SeasonNumber: item.SeasonNumber, EpisodeNumber: item.EpisodeNumber}}
+	}
+	normalized, ok := models.NormalizeLocalMediaEpisodes(existing)
+	if !ok || len(normalized) != len(episodes) {
+		return false
+	}
+	for i := range episodes {
+		if normalized[i] != episodes[i] {
+			return false
+		}
+	}
+	return true
 }

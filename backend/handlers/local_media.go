@@ -505,6 +505,22 @@ func (h *LocalMediaHandler) GetPlayback(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
+	// An explicit combined file has no verified episode offsets. Manual playback
+	// uses the physical file's identity, never an arbitrary member's progress ID.
+	combined := len(item.Episodes) > 0
+	if combined {
+		members, valid := models.NormalizeLocalMediaEpisodes(item.Episodes)
+		if !valid || len(members) < 2 {
+			http.Error(w, "invalid combined episode membership", http.StatusUnprocessableEntity)
+			return
+		}
+		copy := *item
+		copy.Episodes = members
+		copy.SeasonNumber, copy.EpisodeNumber = 0, 0
+		copy.EpisodeTitle, copy.EpisodeOverview, copy.EpisodeImage = "", "", nil
+		item = &copy
+	}
+
 	probe, err := h.service.ProbeItemForPlayback(r.Context(), item)
 	if err != nil {
 		log.Printf("[localmedia] playback probe failed item=%s file=%q err=%v", item.ID, item.FilePath, err)
@@ -664,6 +680,21 @@ func (h *LocalMediaHandler) GetPlayback(w http.ResponseWriter, r *http.Request) 
 		query.Set("durationHint", strconv.FormatFloat(probe.DurationSeconds, 'f', -1, 64))
 	}
 
+	if combined {
+		codes := make([]string, 0, len(item.Episodes))
+		for _, member := range item.Episodes {
+			codes = append(codes, formatSeasonEpisode(member.SeasonNumber, member.EpisodeNumber))
+		}
+		displayName += " · " + strings.Join(codes, " + ") + " (combined file, starts from beginning)"
+		title, titleID, seriesTitle = displayName, item.ID, ""
+		query.Set("itemId", item.ID)
+		query.Set("displayName", displayName)
+		query.Set("title", displayName)
+		for _, key := range []string{"seasonNumber", "episodeNumber", "seriesId", "seriesName", "episodeName", "imdb", "tmdb", "tvdb"} {
+			query.Del(key)
+		}
+	}
+
 	resp := models.LocalMediaPlaybackResponse{
 		ItemID:          item.ID,
 		FileName:        item.FileName,
@@ -683,6 +714,11 @@ func (h *LocalMediaHandler) GetPlayback(w http.ResponseWriter, r *http.Request) 
 		DirectStream:    true,
 		SourceType:      models.MediaSourceLocal,
 		SourceName:      "Local",
+	}
+	if combined {
+		resp.CombinedEpisodes = item.Episodes
+		resp.ProgressScope = "file"
+		resp.PlaybackNotice = "Combined episode file; playback starts from the beginning. Progress applies to this file, not to individual episodes."
 	}
 	if h.transmuxEnabled {
 		resp.HLSAvailable = true
