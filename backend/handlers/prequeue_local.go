@@ -67,6 +67,11 @@ func (h *PrequeueHandler) localPlaybackPreferredFor(userID, titleID string, epis
 }
 
 func (h *PrequeueHandler) localItemAllowed(item models.LocalMediaItem, userID string) bool {
+	// Recheck current membership even for an already-prepared single episode.
+	// A combined file has no verified episode start offsets.
+	if len(item.Episodes) > 0 {
+		return false
+	}
 	profiles, ok := h.users.(interface {
 		Get(string) (models.User, bool)
 	})

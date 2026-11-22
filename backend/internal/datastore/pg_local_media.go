@@ -290,9 +290,12 @@ func (r *pgLocalMediaRepo) GetItem(ctx context.Context, id string) (*models.Loca
 }
 
 func (r *pgLocalMediaRepo) UpsertItem(ctx context.Context, item *models.LocalMediaItem) error {
-	metadataJSON, _ := json.Marshal(item.Metadata)
+	metadataJSON, err := marshalLocalMediaItemMetadata(item)
+	if err != nil {
+		return fmt.Errorf("encode local media metadata: %w", err)
+	}
 	probeJSON, _ := json.Marshal(item.Probe)
-	_, err := r.pool.Exec(ctx, `
+	_, err = r.pool.Exec(ctx, `
 		INSERT INTO local_media_items (
 			id, library_id, relative_path, file_path, file_name, library_type, detected_title,
 			detected_year, season_number, episode_number, confidence, match_status,
@@ -372,10 +375,7 @@ func scanLocalMediaItem(row pgx.Row) (*models.LocalMediaItem, error) {
 		return nil, err
 	}
 	if len(metadataJSON) > 0 && string(metadataJSON) != "null" {
-		var metadata models.Title
-		if err := json.Unmarshal(metadataJSON, &metadata); err == nil {
-			item.Metadata = &metadata
-		}
+		unmarshalLocalMediaItemMetadata(metadataJSON, &item)
 	}
 	if len(probeJSON) > 0 && string(probeJSON) != "null" {
 		var probe models.LocalMediaProbe
@@ -384,4 +384,50 @@ func scanLocalMediaItem(row pgx.Row) (*models.LocalMediaItem, error) {
 		}
 	}
 	return &item, nil
+}
+
+// The file-specific key stays beside Title's existing fields so catalogue ID
+// indexes and historical metadata remain compatible. It is never added to Title.
+func unmarshalLocalMediaItemMetadata(raw []byte, item *models.LocalMediaItem) {
+	var metadata models.Title
+	if json.Unmarshal(raw, &metadata) == nil {
+		item.Metadata = &metadata
+	}
+	var fields struct {
+		Members json.RawMessage `json:"localFileEpisodes"`
+	}
+	if json.Unmarshal(raw, &fields) != nil || len(fields.Members) == 0 {
+		return
+	}
+	var members []models.LocalMediaEpisode
+	if json.Unmarshal(fields.Members, &members) == nil {
+		if normalized, valid := models.NormalizeLocalMediaEpisodes(members); valid && len(normalized) > 1 {
+			item.Episodes = normalized
+			return
+		}
+	}
+	// A corrupt explicit mapping must not fall back to an old scalar episode.
+	// Both automatic selection and manual playback reject this invalid marker.
+	item.Episodes = []models.LocalMediaEpisode{{SeasonNumber: -1}}
+}
+
+func marshalLocalMediaItemMetadata(item *models.LocalMediaItem) ([]byte, error) {
+	// Title has its own MarshalJSON. Encode it first instead of embedding its
+	// marshaler, which would hide the file-specific sibling field entirely.
+	raw, err := json.Marshal(item.Metadata)
+	if err != nil || len(item.Episodes) == 0 {
+		return raw, err
+	}
+	fields := map[string]json.RawMessage{}
+	if item.Metadata != nil {
+		if err = json.Unmarshal(raw, &fields); err != nil {
+			return nil, err
+		}
+	}
+	members, err := json.Marshal(item.Episodes)
+	if err != nil {
+		return nil, err
+	}
+	fields["localFileEpisodes"] = members
+	return json.Marshal(fields)
 }

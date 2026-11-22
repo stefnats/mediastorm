@@ -933,35 +933,47 @@ func buildLocalMediaGroups(items []models.LocalMediaItem) []models.LocalMediaIte
 		}
 		updateLocalMediaGroupSummary(&entry.group, item)
 		if item.LibraryType == models.LocalMediaLibraryTypeShow {
-			seasonNumber := item.SeasonNumber
-			seasonEntry, ok := entry.seasons[seasonNumber]
-			if !ok {
-				seasonEntry = &localMediaSeasonAccumulator{
-					season: models.LocalMediaSeasonGroup{
-						ID:           fmt.Sprintf("%s:season:%d", key, seasonNumber),
-						SeasonNumber: seasonNumber,
-					},
-					episodes: make(map[string]*localMediaEpisodeAccumulator),
-				}
-				entry.seasons[seasonNumber] = seasonEntry
+			episodes := []models.LocalMediaEpisode{{SeasonNumber: item.SeasonNumber, EpisodeNumber: item.EpisodeNumber}}
+			if members, ok := models.NormalizeLocalMediaEpisodes(item.Episodes); ok {
+				episodes = members
 			}
-			updateLocalMediaSeasonSummary(&seasonEntry.season, item)
-			episodeKey := localMediaEpisodeGroupKey(item)
-			episodeEntry, ok := seasonEntry.episodes[episodeKey]
-			if !ok {
-				episodeEntry = &localMediaEpisodeAccumulator{
-					episode: models.LocalMediaEpisodeGroup{
-						ID:              fmt.Sprintf("%s:episode:%s", seasonEntry.season.ID, episodeKey),
-						EpisodeNumber:   item.EpisodeNumber,
-						EpisodeTitle:    strings.TrimSpace(item.EpisodeTitle),
-						EpisodeOverview: strings.TrimSpace(item.EpisodeOverview),
-						EpisodeImage:    item.EpisodeImage,
-					},
+			seenSeasons := map[int]bool{}
+			for _, member := range episodes {
+				seasonNumber := member.SeasonNumber
+				seasonEntry, ok := entry.seasons[seasonNumber]
+				if !ok {
+					seasonEntry = &localMediaSeasonAccumulator{
+						season: models.LocalMediaSeasonGroup{
+							ID:           fmt.Sprintf("%s:season:%d", key, seasonNumber),
+							SeasonNumber: seasonNumber,
+						},
+						episodes: make(map[string]*localMediaEpisodeAccumulator),
+					}
+					entry.seasons[seasonNumber] = seasonEntry
 				}
-				seasonEntry.episodes[episodeKey] = episodeEntry
+				if !seenSeasons[seasonNumber] {
+					updateLocalMediaSeasonSummary(&seasonEntry.season, item)
+					seenSeasons[seasonNumber] = true
+				}
+				projected := item
+				projected.SeasonNumber, projected.EpisodeNumber = member.SeasonNumber, member.EpisodeNumber
+				episodeKey := localMediaEpisodeGroupKey(projected)
+				episodeEntry, ok := seasonEntry.episodes[episodeKey]
+				if !ok {
+					episodeEntry = &localMediaEpisodeAccumulator{
+						episode: models.LocalMediaEpisodeGroup{
+							ID:              fmt.Sprintf("%s:episode:%s", seasonEntry.season.ID, episodeKey),
+							EpisodeNumber:   member.EpisodeNumber,
+							EpisodeTitle:    strings.TrimSpace(item.EpisodeTitle),
+							EpisodeOverview: strings.TrimSpace(item.EpisodeOverview),
+							EpisodeImage:    item.EpisodeImage,
+						},
+					}
+					seasonEntry.episodes[episodeKey] = episodeEntry
+				}
+				updateLocalMediaEpisodeSummary(&episodeEntry.episode, item)
+				episodeEntry.episode.Items = append(episodeEntry.episode.Items, item)
 			}
-			updateLocalMediaEpisodeSummary(&episodeEntry.episode, item)
-			episodeEntry.episode.Items = append(episodeEntry.episode.Items, item)
 			continue
 		}
 		entry.group.Items = append(entry.group.Items, item)
@@ -987,11 +999,15 @@ func buildLocalMediaGroups(items []models.LocalMediaItem) []models.LocalMediaIte
 				sort.Strings(episodeKeys)
 				episodes := make([]models.LocalMediaEpisodeGroup, 0, len(episodeKeys))
 				season.ItemCount = 0
+				physicalItems := map[string]bool{}
 				for _, episodeKey := range episodeKeys {
 					episode := entry.seasons[seasonNumber].episodes[episodeKey].episode
 					sortLocalMediaItems(episode.Items, "quality", "desc")
 					episode.ItemCount = len(episode.Items)
-					season.ItemCount += episode.ItemCount
+					for _, item := range episode.Items {
+						physicalItems[item.ID] = true
+					}
+					season.ItemCount = len(physicalItems)
 					episodes = append(episodes, episode)
 				}
 				sortLocalMediaEpisodeGroups(episodes)
@@ -999,10 +1015,15 @@ func buildLocalMediaGroups(items []models.LocalMediaItem) []models.LocalMediaIte
 				seasons = append(seasons, season)
 			}
 			group.Seasons = seasons
-			group.ItemCount = 0
+			physicalItems := map[string]bool{}
 			for _, season := range seasons {
-				group.ItemCount += season.ItemCount
+				for _, episode := range season.Episodes {
+					for _, item := range episode.Items {
+						physicalItems[item.ID] = true
+					}
+				}
 			}
+			group.ItemCount = len(physicalItems)
 		} else {
 			sortLocalMediaItems(group.Items, "quality", "desc")
 			group.ItemCount = len(group.Items)
@@ -1015,11 +1036,17 @@ func buildLocalMediaGroups(items []models.LocalMediaItem) []models.LocalMediaIte
 // collectItemsFromGroups flattens all items out of a slice of built groups.
 func collectItemsFromGroups(groups []models.LocalMediaItemGroup) []models.LocalMediaItem {
 	var items []models.LocalMediaItem
+	seen := map[string]bool{}
 	for _, group := range groups {
 		if group.LibraryType == models.LocalMediaLibraryTypeShow {
 			for _, season := range group.Seasons {
 				for _, episode := range season.Episodes {
-					items = append(items, episode.Items...)
+					for _, item := range episode.Items {
+						if !seen[item.ID] {
+							seen[item.ID] = true
+							items = append(items, item)
+						}
+					}
 				}
 			}
 		} else {
@@ -1578,6 +1605,10 @@ func (s *Service) UpdateItemMatch(ctx context.Context, itemID string, input mode
 		return nil, ErrItemNotFound
 	}
 
+	if item.MatchedTitleID != strings.TrimSpace(input.MatchedTitleID) {
+		// Membership belongs to the imported series, not to a later title rematch.
+		item.Episodes = nil
+	}
 	item.MatchedTitleID = strings.TrimSpace(input.MatchedTitleID)
 	item.MatchedMediaType = strings.TrimSpace(input.MatchedMediaType)
 	item.MatchedName = strings.TrimSpace(input.MatchedName)
@@ -2071,7 +2102,11 @@ func (s *Service) buildItem(ctx context.Context, library models.LocalMediaLibrar
 			// replace stale file facts with the existing explicit unknown shape.
 			existing.Probe = s.probeLocalFile(ctx, filePath, info.Size())
 		} else {
+			previousTitle := existing.MatchedTitleID
 			s.rematchReusedItemByExternalIDs(ctx, library, detected, metadataCache, &existing)
+			if existing.MatchedTitleID != previousTitle {
+				existing.Episodes = nil
+			}
 		}
 		existing.FilePath = filePath
 		existing.FileName = filepath.Base(filePath)
@@ -2136,6 +2171,15 @@ func (s *Service) buildItem(ctx context.Context, library models.LocalMediaLibrar
 			item.MatchedYear = existing.MatchedYear
 			item.Metadata = existing.Metadata
 		}
+	}
+	if hasExisting && len(existing.Episodes) > 0 {
+		// A replacement at the same path is not proof of the imported episode
+		// membership. Require a fresh ARR import instead of trusting S01E01
+		// parsed from the old combined filename.
+		item.Episodes = nil
+		item.SeasonNumber, item.EpisodeNumber = 0, 0
+		item.MatchStatus = models.LocalMediaMatchStatusUnmatched
+		item.Confidence = 0
 	}
 	item.ModifiedAt = &modifiedAt
 	s.matchDateEpisode(ctx, &item)
@@ -2575,6 +2619,7 @@ func detectHDRFormat(colorTransfer, colorPrimaries string, sideData []map[string
 }
 
 var (
+	multiEpisodePattern  = regexp.MustCompile(`(?i)(?:s\d{1,2}e\d{1,3}(?:e\d{1,3}|-e?\d{1,3})|\d{1,2}x\d{1,3}(?:x\d{1,3}|-\d{1,3}))`)
 	seasonEpisodePattern = regexp.MustCompile(`(?i)[ ._-]s(\d{1,2})e(\d{1,3})(?:\D|$)`)
 	xPattern             = regexp.MustCompile(`(?i)[ ._-](\d{1,2})x(\d{1,3})(?:\D|$)`)
 	yearPattern          = regexp.MustCompile(`(?:19|20)\d{2}`)
@@ -2619,7 +2664,7 @@ func detectTitle(libraryType models.LocalMediaLibraryType, fileName string, pars
 		if len(parsed.Seasons) > 0 {
 			result.season = normalizeDetectedSeason(parsed.Seasons[0])
 		}
-		if len(parsed.Episodes) > 0 {
+		if len(parsed.Episodes) == 1 && !multiEpisodePattern.MatchString(fileName) {
 			result.episode = normalizeDetectedEpisode(parsed.Episodes[0])
 		}
 		if result.title != "" {
@@ -2649,6 +2694,9 @@ func detectTitle(libraryType models.LocalMediaLibraryType, fileName string, pars
 		name = name[:loc[0]]
 	}
 
+	if libraryType == models.LocalMediaLibraryTypeShow && multiEpisodePattern.MatchString(fileName) {
+		result.episode = 0
+	}
 	if libraryType != models.LocalMediaLibraryTypeOther {
 		years := yearPattern.FindAllString(name, -1)
 		if len(years) > 0 {

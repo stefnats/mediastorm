@@ -43,6 +43,12 @@ func (s *Service) FindPlaybackCandidates(ctx context.Context, query models.Local
 			if item.IsMissing || item.LibraryID != library.ID || item.LibraryType != libraryType || (item.MatchStatus != models.LocalMediaMatchStatusMatched && item.MatchStatus != models.LocalMediaMatchStatusManual) {
 				continue
 			}
+			// Membership alone supplies no verified start offsets. A combined
+			// file must be chosen manually with file-level progress; starting an
+			// episode request at byte zero would mislabel playback and history.
+			if len(item.Episodes) > 0 {
+				continue
+			}
 			hydrateLocalMediaItemExternalIDs(&item)
 			if !fallbackIdentityMatches(item, query) {
 				continue

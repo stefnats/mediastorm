@@ -95,7 +95,7 @@ func localEpisodeDateSeries(item models.LocalMediaItem) (models.EpisodeNumbering
 // playback can also resolve a previously scanned date-only row without IO or a
 // new provider search. Manual and ordinary numbered matches remain unchanged.
 func (s *Service) matchDateEpisode(ctx context.Context, item *models.LocalMediaItem) {
-	if item == nil || item.LibraryType != models.LocalMediaLibraryTypeShow || item.MatchStatus != models.LocalMediaMatchStatusMatched || item.SeasonNumber != 0 || item.EpisodeNumber != 0 {
+	if item == nil || len(item.Episodes) > 0 || item.LibraryType != models.LocalMediaLibraryTypeShow || item.MatchStatus != models.LocalMediaMatchStatusMatched || item.SeasonNumber != 0 || item.EpisodeNumber != 0 {
 		return
 	}
 	date, _, ok := localEpisodeAirDate(item.FileName)
