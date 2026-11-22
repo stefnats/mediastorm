@@ -117,7 +117,7 @@
                     <strong style="color: var(--text-primary);">Selected separate values:</strong>
                     Movies: <span id="preview-movie" style="color: var(--accent);"></span>,
                     TV: <span id="preview-tv" style="color: var(--accent);"></span>.
-                    Saving changes these two values together. When both are empty, the saved combined limit is kept.
+                    Saving changes these two values together. <span id="rating-fallback-note">When both are empty, the saved combined limit is kept.</span>
                 </p>
             </div>
 
@@ -347,6 +347,7 @@ function configureRatingChoices(german) {
         setRatingSelection(select, value);
     });
     document.getElementById('german-rating-note').style.display = german ? 'block' : 'none';
+    document.getElementById('rating-fallback-note').textContent = german ? 'Each type needs its own valid age limit. Missing limits remain unavailable; the saved combined limit is not used.' : 'When both are empty, the saved combined limit is kept.';
 }
 
 let modeAction = null;

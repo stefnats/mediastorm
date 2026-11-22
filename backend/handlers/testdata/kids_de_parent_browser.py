@@ -54,12 +54,18 @@ with sync_playwright() as pw:
     def settled():
         page.wait_for_function('!document.querySelector("#save-mode").disabled && !document.querySelector("#save-rating-pair").disabled')
 
+    def assert_rating_help(german):
+        expected = ('Each type needs its own valid age limit. Missing limits remain unavailable; '
+                    'the saved combined limit is not used.') if german else 'When both are empty, the saved combined limit is kept.'
+        assert page.locator('#rating-fallback-note').inner_text() == expected
+
     def load(prefix):
         page.goto(args.base_url + prefix + '/kids-settings?profileId=' + args.profile)
         settled()
         page.get_by_text('Live TV is off for this profile.', exact=True).wait_for()
         assert page.evaluate('typeof window.parentModeFetch') == 'function'
         assert page.evaluate('typeof window.parentRatingFetch') == 'function'
+        assert_rating_help(page.locator('input[name="kidsMode"]:checked').input_value() == 'rating_de')
 
     def select_mode(value):
         page.locator('input[name="kidsMode"][value="' + value + '"]').check()
@@ -110,6 +116,7 @@ with sync_playwright() as pw:
             assert initial['series'] == 'TV-Y' and initial['generic'] == 'PG'
             select_mode('rating_de')
             assert page.locator('#german-rating-note').is_visible()
+            assert_rating_help(True)
             assert movie().input_value() == 'G' and series().input_value() == 'TV-Y'
             assert movie().locator('option:checked').text_content() == 'Saved value: G'
             assert series().locator('option:checked').text_content() == 'Saved value: TV-Y'
@@ -141,6 +148,7 @@ with sync_playwright() as pw:
             dialog().screenshot(path=str(out / (prefix[1:] + '-confirm-' + str(width) + '.png')))
             after = confirm(before, 'mode', count)
             assert after['mode'] == 'rating_de'
+            assert_rating_help(True)
             assert (after['movie'], after['series'], after['generic']) == ('G', 'TV-Y', 'PG')
             assert not after['knownMovie6Allowed'] and not after['knownSeries12Allowed']
             assert after['pairAttempts'] == pair_attempts
@@ -192,6 +200,7 @@ with sync_playwright() as pw:
             assert json.loads(requests[-1]['body']) == {'movieRating': '6', 'tvRating': '12'}
             assert (after['mode'], after['movie'], after['series'], after['generic']) == ('rating_de', '6', '12', 'PG')
             assert after['knownMovie6Allowed'] and after['knownSeries12Allowed']
+            assert_rating_help(True)
             load(prefix)
             unchanged(after)
             assert movie().input_value() == '6' and series().input_value() == '12'
@@ -211,6 +220,7 @@ with sync_playwright() as pw:
             load(prefix)
             unchanged(after)
             assert not page.locator('#german-rating-note').is_visible()
+            assert_rating_help(False)
             assert movie().locator('option:checked').text_content() == 'Saved value: 6'
             assert series().locator('option:checked').text_content() == 'Saved value: 12'
 
