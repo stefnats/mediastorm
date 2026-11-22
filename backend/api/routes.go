@@ -6,6 +6,7 @@ import (
 	"net/http/pprof"
 	"runtime"
 	"strconv"
+	"strings"
 	"time"
 
 	"novastream/config"
@@ -78,6 +79,19 @@ func corsMiddleware(next http.Handler) http.Handler {
 			w.Header().Set("Vary", "Origin")
 			w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, PATCH, OPTIONS")
 			w.Header().Set("Access-Control-Allow-Headers", "Authorization, Content-Type, Accept, X-PIN, X-Client-ID, X-Profile-Unlock, X-Account-Password, X-Parent-Intent, X-Remote-Access-Credential, X-Adaptive-Throughput-Mbps, X-Adaptive-Throughput-Measured-At, Cache-Control, Pragma")
+			if recordingObservationResponse(r) {
+				// Browser DVR observations use the actual server Date and response
+				// receipt time, just like native clients. Do not invent a clock.
+				found := false
+				for _, value := range w.Header().Values("Access-Control-Expose-Headers") {
+					for _, name := range strings.Split(value, ",") {
+						found = found || strings.EqualFold(strings.TrimSpace(name), "Date")
+					}
+				}
+				if !found {
+					w.Header().Add("Access-Control-Expose-Headers", "Date")
+				}
+			}
 		}
 
 		// Handle preflight requests
@@ -88,6 +102,27 @@ func corsMiddleware(next http.Handler) http.Handler {
 
 		next.ServeHTTP(w, r)
 	})
+}
+
+func recordingObservationResponse(r *http.Request) bool {
+	const prefix = "/api/live/recordings/"
+	if r.URL == nil || !strings.HasPrefix(r.URL.Path, prefix) {
+		return false
+	}
+	id, operation, ok := strings.Cut(strings.TrimPrefix(r.URL.Path, prefix), "/")
+	if !ok || id == "" {
+		return false
+	}
+	switch operation {
+	case "derived":
+		return r.Method == http.MethodGet
+	case "derived/join":
+		return r.Method == http.MethodPost
+	case "progress":
+		return r.Method == http.MethodGet || r.Method == http.MethodPost
+	default:
+		return false
+	}
 }
 
 // handleOptions handles OPTIONS requests for CORS preflight
