@@ -21,6 +21,8 @@ type Repository interface {
 type projectionKey struct{ profile, client, kind, id string }
 type projection struct {
 	title           models.Title
+	artwork         models.Title
+	artworkExpires  time.Time
 	expires         time.Time
 	postPlayExpires time.Time
 	sequence        uint64
@@ -97,8 +99,15 @@ func (s *Service) Observe(profile, client string, titles []models.Title) {
 			}
 			delete(s.delivered, oldest)
 		}
+		artwork, artworkExpires := copyArtwork(title), now.Add(30*time.Minute)
+		// Sparse cards must not remove variants offered by a still-open detail
+		// page. Their refresh also must not extend that older gallery's lifetime.
+		fullGallery := len(title.Posters) > 0 || len(title.Backdrops) > 0 || title.TextPoster != nil || title.TextBackdrop != nil
+		if previous, exists := s.delivered[key]; exists && now.Before(previous.artworkExpires) && !fullGallery {
+			artwork, artworkExpires = previous.artwork, previous.artworkExpires
+		}
 		s.sequence++
-		s.delivered[key] = projection{title: BareTitle(title), expires: now.Add(30 * time.Minute), postPlayExpires: now.Add(24 * time.Hour), sequence: s.sequence}
+		s.delivered[key] = projection{title: BareTitle(title), artwork: artwork, artworkExpires: artworkExpires, expires: now.Add(30 * time.Minute), postPlayExpires: now.Add(24 * time.Hour), sequence: s.sequence}
 	}
 }
 

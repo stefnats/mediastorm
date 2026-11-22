@@ -27,6 +27,9 @@ type contentPreferencesService interface {
 var _ contentPreferencesService = (*content_preferences.Service)(nil)
 
 type ContentPreferencesHandler struct {
+	ArtworkTitles interface {
+		ResolveArtwork(string, string, string, string) (models.Title, bool)
+	}
 	Service       contentPreferencesService
 	Users         userService
 	PrequeueStore interface{ InvalidateSourceSelectionByUser(string) }
@@ -47,6 +50,7 @@ func NewContentPreferencesHandler(service contentPreferencesService, users userS
 type contentPreferenceResponse struct {
 	*models.ContentPreference
 	LocalSourcePreferenceSupported bool `json:"localSourcePreferenceSupported"`
+	ArtworkPreferenceSupported     bool `json:"artworkPreferenceSupported,omitempty"`
 }
 
 // GetPreference returns the content preference for a specific content item.
@@ -70,7 +74,7 @@ func (h *ContentPreferencesHandler) GetPreference(w http.ResponseWriter, r *http
 	}
 
 	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(contentPreferenceResponse{ContentPreference: pref, LocalSourcePreferenceSupported: true})
+	_ = json.NewEncoder(w).Encode(contentPreferenceResponse{ContentPreference: pref, LocalSourcePreferenceSupported: true, ArtworkPreferenceSupported: h.ArtworkTitles != nil})
 }
 
 // SetPreference creates or updates a content preference.
@@ -177,7 +181,7 @@ func (h *ContentPreferencesHandler) setPreference(w http.ResponseWriter, r *http
 
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
-	_ = json.NewEncoder(w).Encode(contentPreferenceResponse{ContentPreference: &pref, LocalSourcePreferenceSupported: true})
+	_ = json.NewEncoder(w).Encode(contentPreferenceResponse{ContentPreference: &pref, LocalSourcePreferenceSupported: true, ArtworkPreferenceSupported: h.ArtworkTitles != nil})
 }
 
 // DeletePreference removes a content preference.

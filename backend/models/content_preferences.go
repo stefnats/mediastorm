@@ -11,6 +11,8 @@ import (
 // Track preferences retain their series/movie scope. Local source ordering may
 // additionally override a particular season or episode using a scoped ID.
 type ContentPreference struct {
+	PosterURL        string    `json:"posterUrl,omitempty"`
+	BackdropURL      string    `json:"backdropUrl,omitempty"`
 	ContentID        string    `json:"contentId"`                  // e.g., "tmdb:tv:12345" for series, "tmdb:movie:67890" for movies
 	ContentType      string    `json:"contentType"`                // "series" or "movie"
 	AudioLanguage    string    `json:"audioLanguage,omitempty"`    // ISO 639-2 code (eng, jpn, spa, etc.)

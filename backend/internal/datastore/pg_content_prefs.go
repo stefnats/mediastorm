@@ -17,9 +17,9 @@ type pgContentPrefsRepo struct {
 func (r *pgContentPrefsRepo) Get(ctx context.Context, userID, contentID string) (*models.ContentPreference, error) {
 	var p models.ContentPreference
 	err := r.pool.QueryRow(ctx, `
-		SELECT content_id, content_type, audio_language, subtitle_language, subtitle_mode, prefer_local_files, updated_at
+		SELECT content_id, content_type, audio_language, subtitle_language, subtitle_mode, prefer_local_files, poster_url, backdrop_url, updated_at
 		FROM content_preferences WHERE user_id = $1 AND content_id = $2`, userID, contentID).
-		Scan(&p.ContentID, &p.ContentType, &p.AudioLanguage, &p.SubtitleLanguage, &p.SubtitleMode, &p.PreferLocalFiles, &p.UpdatedAt)
+		Scan(&p.ContentID, &p.ContentType, &p.AudioLanguage, &p.SubtitleLanguage, &p.SubtitleMode, &p.PreferLocalFiles, &p.PosterURL, &p.BackdropURL, &p.UpdatedAt)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, nil
 	}
@@ -31,7 +31,7 @@ func (r *pgContentPrefsRepo) Get(ctx context.Context, userID, contentID string) 
 
 func (r *pgContentPrefsRepo) ListByUser(ctx context.Context, userID string) ([]models.ContentPreference, error) {
 	rows, err := r.pool.Query(ctx, `
-		SELECT content_id, content_type, audio_language, subtitle_language, subtitle_mode, prefer_local_files, updated_at
+		SELECT content_id, content_type, audio_language, subtitle_language, subtitle_mode, prefer_local_files, poster_url, backdrop_url, updated_at
 		FROM content_preferences WHERE user_id = $1`, userID)
 	if err != nil {
 		return nil, fmt.Errorf("list content preferences: %w", err)
@@ -42,7 +42,7 @@ func (r *pgContentPrefsRepo) ListByUser(ctx context.Context, userID string) ([]m
 	for rows.Next() {
 		var p models.ContentPreference
 		if err := rows.Scan(&p.ContentID, &p.ContentType, &p.AudioLanguage, &p.SubtitleLanguage,
-			&p.SubtitleMode, &p.PreferLocalFiles, &p.UpdatedAt); err != nil {
+			&p.SubtitleMode, &p.PreferLocalFiles, &p.PosterURL, &p.BackdropURL, &p.UpdatedAt); err != nil {
 			return nil, fmt.Errorf("scan content preference: %w", err)
 		}
 		result = append(result, p)
@@ -53,12 +53,12 @@ func (r *pgContentPrefsRepo) ListByUser(ctx context.Context, userID string) ([]m
 func (r *pgContentPrefsRepo) Upsert(ctx context.Context, userID string, pref *models.ContentPreference) error {
 	_, err := r.pool.Exec(ctx, `
 		INSERT INTO content_preferences (user_id, content_id, content_type, audio_language,
-		subtitle_language, subtitle_mode, prefer_local_files, updated_at)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+		subtitle_language, subtitle_mode, prefer_local_files, poster_url, backdrop_url, updated_at)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
 		ON CONFLICT (user_id, content_id) DO UPDATE SET
-		content_type=$3, audio_language=$4, subtitle_language=$5, subtitle_mode=$6, prefer_local_files=$7, updated_at=$8`,
+		content_type=$3, audio_language=$4, subtitle_language=$5, subtitle_mode=$6, prefer_local_files=$7, poster_url=$8, backdrop_url=$9, updated_at=$10`,
 		userID, pref.ContentID, pref.ContentType, pref.AudioLanguage,
-		pref.SubtitleLanguage, pref.SubtitleMode, pref.PreferLocalFiles, pref.UpdatedAt)
+		pref.SubtitleLanguage, pref.SubtitleMode, pref.PreferLocalFiles, pref.PosterURL, pref.BackdropURL, pref.UpdatedAt)
 	if err != nil {
 		return fmt.Errorf("upsert content preference: %w", err)
 	}

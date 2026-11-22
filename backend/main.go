@@ -746,6 +746,7 @@ func main() {
 	metadataHandler.Interests = interestService
 	titleRatingsService := titleratings.New(store.TitleRatings())
 	metadataHandler.TitleRatings = titleRatingsService
+	contentPreferencesHandler.ArtworkTitles = titleRatingsService
 	var reminderRepo reminders.Repository
 	if store != nil {
 		reminderRepo = store.Reminders()
