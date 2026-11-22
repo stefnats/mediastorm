@@ -30,6 +30,9 @@ import (
 )
 
 type DisplayListHandler struct {
+	storedMediaLocal   storedListLocalMedia
+	storedMediaRemote  storedListRemoteMedia
+	storedMediaAccess  storedListLibraryAccess
 	WatchlistService   watchlistService
 	CustomListsService customListsService
 	Users              userService
@@ -46,6 +49,8 @@ type persistentPrequeueStore interface {
 }
 
 type DisplayListResponse struct {
+	StoredMediaFilterSupported      bool        `json:"storedMediaFilterSupported,omitempty"`
+	StoredMediaFilterBasis          string      `json:"storedMediaFilterBasis,omitempty"`
 	Source                          string      `json:"source"`
 	ListID                          string      `json:"listId,omitempty"`
 	Items                           interface{} `json:"items"`
@@ -95,6 +100,15 @@ func (h *DisplayListHandler) SetPrequeueStore(store persistentPrequeueStore) {
 }
 
 func (h *DisplayListHandler) Get(w http.ResponseWriter, r *http.Request) {
+	mediaFilter, mediaErr := parseLocalMediaFilters(r)
+	if mediaErr != nil {
+		http.Error(w, mediaErr.Error(), http.StatusBadRequest)
+		return
+	}
+	if mediaFilter.Active() && !savedListMediaSupported(r) {
+		http.Error(w, "stored media filters are supported for My List and saved personal lists only", http.StatusBadRequest)
+		return
+	}
 	if hasCachedTMDBPersonCreditsSource(r) {
 		h.getCachedTMDBPersonCredits(w, r)
 		return
@@ -177,6 +191,7 @@ func (h *DisplayListHandler) get(w http.ResponseWriter, r *http.Request) {
 			customListShelf = true
 		}
 	}
+	mediaFilter, _ := parseLocalMediaFilters(r)
 	languageQuery, queryErr := parseDisplayListOriginalLanguageQuery(r)
 	if queryErr != nil {
 		http.Error(w, queryErr.Error(), http.StatusBadRequest)
@@ -351,11 +366,21 @@ func (h *DisplayListHandler) get(w http.ResponseWriter, r *http.Request) {
 	if h.HiddenItemsService != nil {
 		items = h.HiddenItemsService.FilterHiddenWatchlistItems(userID, items)
 	}
-	h.enrich(userID, items, r)
 	unfilteredTotal := 0
 	if customListShelf {
 		unfilteredTotal = len(items)
 	}
+	if mediaFilter.Active() {
+		h.enrichStoredMediaWatchState(userID, items)
+		items, err = h.filterSavedListMedia(r, userID, items, mediaFilter)
+		if err != nil {
+			http.Error(w, "stored library media information unavailable", http.StatusServiceUnavailable)
+			return
+		}
+	} else {
+		h.enrich(userID, items, r)
+	}
+
 	// Personal watchlists retain explicitly saved titles regardless of release
 	// status. Discovery and other lists still follow release visibility settings.
 	if source != "watchlist" && h.MetadataHandler != nil {
@@ -402,7 +427,7 @@ func (h *DisplayListHandler) get(w http.ResponseWriter, r *http.Request) {
 		items = []models.WatchlistItem{}
 	}
 	logDisplayListWatchlistArtworkTrace(userID, source, items)
-	if h.MetadataHandler != nil {
+	if h.MetadataHandler != nil && !mediaFilter.Active() {
 		items = availabilityWatchlist(h.MetadataHandler.SourceAvailability, userID, requestClientID(r), items)
 		if h.MetadataHandler.TitleRatings != nil {
 			titles := make([]models.Title, len(items))
@@ -416,7 +441,7 @@ func (h *DisplayListHandler) get(w http.ResponseWriter, r *http.Request) {
 	metadataPending := false
 	if source == "permanent-prequeue" || customListShelf {
 		trendingItems := watchlistItemsToTrending(items)
-		if customListShelf {
+		if customListShelf && !mediaFilter.Active() {
 			deferArtwork := strings.EqualFold(r.URL.Query().Get("shelfPhase"), "cards") ||
 				strings.EqualFold(r.URL.Query().Get("deferArtwork"), "true")
 			metadataSvc := h.metadataForUser(userID)
@@ -437,6 +462,8 @@ func (h *DisplayListHandler) get(w http.ResponseWriter, r *http.Request) {
 		AlphabetBuckets:                 alphabet,
 		MetadataPending:                 metadataPending,
 		OriginalLanguageFilterSupported: languageSupported,
+		StoredMediaFilterSupported:      h.storedMediaReady() && savedListMediaSupported(r),
+		StoredMediaFilterBasis:          storedListMediaBasis(mediaFilter.Active()),
 	})
 }
 

@@ -4415,6 +4415,32 @@ paths:
         the delegated metadata payload (usually `TrendingItem[]`) for
         discovery sources.
       parameters:
+        - name: audioLanguage
+          in: query
+          description: Stored audio-track language on an accessible library version. Supported for watchlist and saved personal lists only; no browse-time probes or provider lookups. All media features must occur on the same file, with audio language and codec on the same track. A series match means at least one stored episode/version, not all episodes.
+          schema: {type: string}
+        - name: subtitleLanguage
+          in: query
+          schema: {type: string}
+        - name: audioCodec
+          in: query
+          schema: {type: string}
+        - name: videoCodec
+          in: query
+          schema: {type: string}
+        - name: hdr
+          in: query
+          schema: {type: string, enum: [hdr10, dolby_vision, hlg, sdr]}
+        - name: minHeight
+          in: query
+          schema: {type: integer, minimum: 144, maximum: 8640}
+        - name: subtitles
+          in: query
+          schema: {type: string, enum: [present, absent]}
+        - name: mediaUnknown
+          in: query
+          description: Missing stored version facts remain unknown; known contradictions remain excluded. Uses the same rules as library media filters. These catalogue facts are not a new playback permission or a live file probe.
+          schema: {type: string, enum: [include, exclude, only], default: include}
         - name: originalLanguages
           in: query
           description: |

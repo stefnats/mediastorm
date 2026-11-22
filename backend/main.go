@@ -804,6 +804,7 @@ func main() {
 		log.Fatalf("failed to initialise remote media service: %v", err)
 	}
 	libraryAccessService := libraryaccess.New(store.LibraryAccess(), store.LocalMedia(), store.RemoteMedia())
+	displayListHandler.SetStoredMediaLibraries(store.LocalMedia(), remoteMediaService, libraryAccessService)
 	remotePlaybackReporter := remotemedia.NewPlaybackReporter(remoteMediaService)
 	remotePlaybackReporter.SetUserService(userService)
 	log.Printf("[startup] phase=media-and-scrobble-services duration=%s", time.Since(startupPhaseStarted))
