@@ -124,6 +124,32 @@ func TestLocalLibraryLanguagePostgresActualFullIndexAndRemoteRejection(t *testin
 			t.Fatalf("remote legacy %d %s", w.Code, w.Body.String())
 		}
 	})
+	t.Run("stored media capability local and remote actual readers", func(t *testing.T) {
+		local := localLibraryLanguageDecode(t, localLibraryLanguageRequest(h, "audioLanguage=fr&mediaUnknown=only&limit=1&offset=650"))
+		if !local.StoredMediaFilterSupported || local.StoredMediaFilterBasis != "stored_library_versions" || local.Total != 652 || len(local.Groups) != 1 || local.Offset != 650 {
+			t.Fatalf("actual local stored unknown facts/page contract: %+v", local)
+		}
+		for _, provider := range []string{models.MediaSourcePlex, models.MediaSourceJellyfin} {
+			libraryID := "marker-" + provider
+			if err := store.RemoteMedia().CreateLibrary(ctx, &models.RemoteMediaLibrary{ID: libraryID, Name: "Synthetic marker", Type: models.LocalMediaLibraryTypeMovie, Provider: provider, AccountID: "synthetic", ExternalLibraryID: libraryID, CreatedAt: now, UpdatedAt: now}); err != nil {
+				t.Fatal(err)
+			}
+			for n := 0; n < 2; n++ {
+				id := fmt.Sprintf("%s-%d", libraryID, n)
+				if err := store.RemoteMedia().UpsertItem(ctx, &models.RemoteMediaItem{ID: id, LibraryID: libraryID, ExternalItemID: id, ExternalMediaID: id, GroupKey: id, LibraryType: models.LocalMediaLibraryTypeMovie, Title: id, FileName: id + ".mkv", StreamPath: provider + "media:" + id, CreatedAt: now, UpdatedAt: now}); err != nil {
+					t.Fatal(err)
+				}
+			}
+			r := httptest.NewRequest("GET", "/api/library/libraries/"+libraryID+"/groups?include=cards&audioLanguage=fr&mediaUnknown=only&limit=1&offset=1", nil)
+			r = mux.SetURLVars(r, map[string]string{"libraryID": libraryID})
+			w := httptest.NewRecorder()
+			h.ListGroups(w, r)
+			remote := localLibraryLanguageDecode(t, w)
+			if !remote.StoredMediaFilterSupported || remote.StoredMediaFilterBasis != "stored_library_versions" || remote.OriginalLanguageFilterSupported || remote.Total != 2 || len(remote.Groups) != 1 || remote.Offset != 1 {
+				t.Fatalf("actual %s stored unknown facts/page contract: %+v", provider, remote)
+			}
+		}
+	})
 	// Poison the REAL remote item query while retaining the actual library row.
 	// A filtered remote request must reject before touching this missing table.
 	if _, err := store.Pool().Exec(ctx, "ALTER TABLE remote_media_items RENAME TO own_poison_remote_items"); err != nil {

@@ -268,6 +268,14 @@ func (h *LocalMediaHandler) ListGroups(w http.ResponseWriter, r *http.Request) {
 		groups = &models.LocalMediaGroupListResult{Groups: []models.LocalMediaItemGroup{}}
 	}
 
+	// This response advertises the actual stored-file filtering contract only
+	// after a successful local or remote group read. Copy response metadata so
+	// repositories retaining a result cannot inherit another request's basis.
+	response := *groups
+	response.StoredMediaFilterSupported = true
+	response.StoredMediaFilterBasis = storedListMediaBasis(mediaFilters.Active())
+	groups = &response
+
 	// Stored local-media metadata (including poster artwork) is resolved once at
 	// scan time in the global metadata language. Re-localize artwork for profiles
 	// whose effective language differs so shelves match the profile's setting.
