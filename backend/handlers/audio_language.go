@@ -11,6 +11,7 @@ import (
 	"sync"
 	"time"
 
+	"novastream/models"
 	"novastream/services/audiolanguage"
 	"novastream/services/playback"
 	"novastream/utils/language"
@@ -61,6 +62,22 @@ func (h *PrequeueHandler) audioLanguageCheckAvailable() bool {
 	_, supported := h.fullProber.(preparedAudioSampler)
 	checker, err := h.audioLanguageChecker()
 	return supported && err == nil && checker != nil
+}
+
+func (h *PrequeueHandler) autoCheckAudioLanguageFor(profile string) bool {
+	defaults := models.DefaultUserSettings()
+	if h.configManager != nil {
+		global, err := h.configManager.Load()
+		if err != nil {
+			return false
+		}
+		defaults.Playback.AutoCheckAudioLanguage = models.BoolPtr(global.Playback.AutoCheckAudioLanguage)
+	}
+	if h.userSettingsSvc == nil {
+		return models.BoolVal(defaults.Playback.AutoCheckAudioLanguage, false)
+	}
+	settings, err := h.userSettingsSvc.GetWithDefaults(profile, defaults)
+	return err == nil && models.BoolVal(settings.Playback.AutoCheckAudioLanguage, false)
 }
 
 type audioLanguageRequest struct {

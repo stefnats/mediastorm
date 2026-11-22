@@ -886,6 +886,7 @@ var SettingsSchema = map[string]interface{}{
 		"fields": map[string]interface{}{
 			"preferredPlayer":               map[string]interface{}{"type": "select", "label": "Preferred Player", "options": []string{"native", "infuse", "outplayer", "vlc", "mxplayer", "kodi"}, "description": "Default video player", "order": 1},
 			"audioLanguageCheckUrl":         map[string]interface{}{"type": "text", "label": "Local Speech Analysis Endpoint", "description": "Optional whisper.cpp /inference URL for checking sampled speech from the release controls. Leave empty to disable. No model is downloaded and no report or source change is automatic.", "order": 1.5},
+			"autoCheckAudioLanguage":        map[string]interface{}{"type": "boolean", "label": "Automatic Spoken-Language Check", "description": "Opt in to one sampled speech check during eligible Android/TV playback. Requires the configured local speech service. A likely mismatch can suggest an alternative; it never saves a report or switches playback automatically.", "order": 1.6},
 			"preferredAudioLanguage":        map[string]interface{}{"type": "text", "label": "Audio Language", "description": "Three-letter ISO 639-2 code (e.g., eng, spa, fra, deu, jpn). Add a region to prefer a regional dub: fr-CA (VFQ), fr-FR (VFF), es-419 (Latino), es-ES, pt-BR, pt-PT", "order": 2},
 			"preferredSubtitleLanguage":     map[string]interface{}{"type": "text", "label": "Subtitle Language", "description": "Three-letter ISO 639-2 code (e.g., eng, spa, fra, deu, jpn)", "order": 3, "group": "subtitleAppearance", "groupLabel": "Subtitle Appearance", "groupDescription": "Language, mode, typography, outline, and background for text subtitles."},
 			"allowedTrackLanguages":         map[string]interface{}{"type": "checkboxes", "label": "Languages Shown in Player", "description": "Only show embedded audio/subtitle tracks and online search/translation targets in these languages. Leave empty to show all languages.", "order": 3, "options": []map[string]string{{"value": "eng", "label": "English"}, {"value": "fra", "label": "French"}, {"value": "spa", "label": "Spanish"}, {"value": "deu", "label": "German"}, {"value": "ita", "label": "Italian"}, {"value": "por", "label": "Portuguese"}, {"value": "nld", "label": "Dutch"}, {"value": "pol", "label": "Polish"}, {"value": "rus", "label": "Russian"}, {"value": "jpn", "label": "Japanese"}, {"value": "kor", "label": "Korean"}, {"value": "zho", "label": "Chinese"}, {"value": "ara", "label": "Arabic"}, {"value": "heb", "label": "Hebrew"}, {"value": "swe", "label": "Swedish"}, {"value": "nor", "label": "Norwegian"}, {"value": "dan", "label": "Danish"}, {"value": "fin", "label": "Finnish"}, {"value": "hrv", "label": "Croatian"}, {"value": "srp", "label": "Serbian"}, {"value": "bos", "label": "Bosnian"}}},
@@ -4171,6 +4172,7 @@ func (h *AdminUIHandler) GetUserSettings(w http.ResponseWriter, r *http.Request)
 	defaults := models.UserSettings{
 		Recommendations: &globalSettings.Recommendations,
 		Playback: models.PlaybackSettings{
+			AutoCheckAudioLanguage:      models.BoolPtr(globalSettings.Playback.AutoCheckAudioLanguage),
 			PreferLocalFiles:            models.BoolPtr(globalSettings.Playback.PreferLocalFiles),
 			PreferredPlayer:             globalSettings.Playback.PreferredPlayer,
 			PreferredAudioLanguage:      globalSettings.Playback.PreferredAudioLanguage,
@@ -4420,6 +4422,7 @@ func (h *AdminUIHandler) PropagateSettings(w http.ResponseWriter, r *http.Reques
 				propagateShelves := convertShelves(globalSettings.HomeShelves.Shelves)
 				newSettings = models.UserSettings{
 					Playback: models.PlaybackSettings{
+						AutoCheckAudioLanguage:      models.BoolPtr(globalSettings.Playback.AutoCheckAudioLanguage),
 						PreferLocalFiles:            models.BoolPtr(globalSettings.Playback.PreferLocalFiles),
 						PreferredPlayer:             globalSettings.Playback.PreferredPlayer,
 						PreferredAudioLanguage:      globalSettings.Playback.PreferredAudioLanguage,

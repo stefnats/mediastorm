@@ -485,6 +485,7 @@ func ResolveLiveSource(profile *LiveTVSettings, global *ResolvedLiveSource) Reso
 
 // PlaybackSettings controls how the client should launch resolved streams.
 type PlaybackSettings struct {
+	AutoCheckAudioLanguage        *bool     `json:"autoCheckAudioLanguage,omitempty"`
 	PreferLocalFiles              *bool     `json:"preferLocalFiles,omitempty"` // Use a playable matching local file before searching configured sources.
 	PreferredPlayer               string    `json:"preferredPlayer"`
 	PreferredAudioLanguage        string    `json:"preferredAudioLanguage,omitempty"`
@@ -1147,6 +1148,7 @@ type AnimeFilteringSettings struct {
 func DefaultUserSettings() UserSettings {
 	return UserSettings{
 		Playback: PlaybackSettings{
+			AutoCheckAudioLanguage:        BoolPtr(false),
 			PreferLocalFiles:              BoolPtr(false),
 			PreferredPlayer:               "native",
 			PreferredAudioLanguage:        "eng",

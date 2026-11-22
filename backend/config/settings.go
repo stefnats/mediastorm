@@ -622,6 +622,7 @@ type AltMountSettings struct {
 
 // PlaybackSettings controls how the client should launch resolved streams.
 type PlaybackSettings struct {
+	AutoCheckAudioLanguage        bool                      `json:"autoCheckAudioLanguage"`          // Explicit opt-in to a once-per-playback sampled speech check.
 	AudioLanguageCheckURL         string                    `json:"audioLanguageCheckUrl,omitempty"` // Optional local whisper.cpp /inference endpoint; empty disables speech checks.
 	PreferLocalFiles              bool                      `json:"preferLocalFiles"`                // Profiles can override the automatic source preference.
 	PreferredPlayer               string                    `json:"preferredPlayer"`

@@ -12,7 +12,14 @@ See the [upstream server implementation](https://github.com/ggml-org/whisper.cpp
 Only the selected audio samples are sent, under a generic filename. Source URLs,
 release names, profile identifiers and transcripts are not retained in the result.
 
-The viewer explicitly starts a check. Playback continues. Two non-overlapping
+The viewer can explicitly start a check. Eligible Android/TV players can also
+perform one check after sustained playback when the profile explicitly enables
+`playback.autoCheckAudioLanguage` (default false; an unset profile inherits the
+server default). A profile's explicit false remains an opt-out. Automatic checks
+never run in a standby player or while browsing, and uncertain results are silent.
+A likely mismatch may offer a prepared alternative, with adoption still explicit.
+
+Playback continues. Two non-overlapping
 20-second, mono 16-kHz PCM windows must agree with sufficient speech evidence and
 language probability. Silent, incomplete, mixed-language and uncertain samples,
 older incompatible endpoints and unsupported non-seekable sources remain unknown.

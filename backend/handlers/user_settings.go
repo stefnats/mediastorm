@@ -290,6 +290,7 @@ func (h *UserSettingsHandler) getDefaultsFromGlobal() models.UserSettings {
 			PrimaryLanguage: globalSettings.Metadata.EffectivePrimaryLanguage(),
 		},
 		Playback: models.PlaybackSettings{
+			AutoCheckAudioLanguage:     models.BoolPtr(globalSettings.Playback.AutoCheckAudioLanguage),
 			PreferLocalFiles:           models.BoolPtr(globalSettings.Playback.PreferLocalFiles),
 			PreferredPlayer:            globalSettings.Playback.PreferredPlayer,
 			PreferredAudioLanguage:     globalSettings.Playback.PreferredAudioLanguage,

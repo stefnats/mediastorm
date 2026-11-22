@@ -129,6 +129,7 @@ func globalToUserSettings(g config.Settings) models.UserSettings {
 			PrimaryLanguage: g.Metadata.EffectivePrimaryLanguage(),
 		},
 		Playback: models.PlaybackSettings{
+			AutoCheckAudioLanguage:        models.BoolPtr(g.Playback.AutoCheckAudioLanguage),
 			PreferredPlayer:               g.Playback.PreferredPlayer,
 			PreferredAudioLanguage:        g.Playback.PreferredAudioLanguage,
 			PreferredSubtitleLanguage:     g.Playback.PreferredSubtitleLanguage,
@@ -419,6 +420,9 @@ func mergeWithGlobal(us models.UserSettings, g config.Settings) models.UserSetti
 	}
 	if eff.Playback.SeekBackwardSeconds == 0 {
 		eff.Playback.SeekBackwardSeconds = g.Playback.SeekBackwardSeconds
+	}
+	if eff.Playback.AutoCheckAudioLanguage == nil {
+		eff.Playback.AutoCheckAudioLanguage = models.BoolPtr(g.Playback.AutoCheckAudioLanguage)
 	}
 	if eff.Playback.ForceAACTranscoding == nil {
 		eff.Playback.ForceAACTranscoding = models.BoolPtr(g.Playback.ForceAACTranscoding)
@@ -807,6 +811,9 @@ func stripPlayback(p *models.PlaybackSettings, g config.PlaybackSettings) bool {
 	if p.SeekBackwardSeconds != 0 && p.SeekBackwardSeconds == g.SeekBackwardSeconds {
 		p.SeekBackwardSeconds = 0
 		changed = true
+	}
+	if p.AutoCheckAudioLanguage != nil && *p.AutoCheckAudioLanguage == g.AutoCheckAudioLanguage {
+		p.AutoCheckAudioLanguage = nil
 	}
 	if p.ForceAACTranscoding != nil && *p.ForceAACTranscoding == g.ForceAACTranscoding {
 		p.ForceAACTranscoding = nil

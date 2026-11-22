@@ -125,7 +125,7 @@ func (h *PrequeueHandler) ReleaseReportOptions(w http.ResponseWriter, r *http.Re
 		return
 	}
 	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(map[string]any{"sourceVersion": sourceReportVersion(entry), "releaseName": entry.SelectedResult.Title, "audioLanguage": ctx.AudioLanguage, "audioTracks": entry.AudioTracks, "selectedAudioTrack": entry.SelectedAudioTrack, "canShare": h.canShareReleaseReport(r, entry.UserID), "hasEpisode": entry.TargetEpisode != nil, "canResetHistory": h.historySvc != nil, "audioLanguageCheckAvailable": h.audioLanguageCheckAvailable()})
+	_ = json.NewEncoder(w).Encode(map[string]any{"sourceVersion": sourceReportVersion(entry), "releaseName": entry.SelectedResult.Title, "audioLanguage": ctx.AudioLanguage, "audioTracks": entry.AudioTracks, "selectedAudioTrack": entry.SelectedAudioTrack, "canShare": h.canShareReleaseReport(r, entry.UserID), "hasEpisode": entry.TargetEpisode != nil, "canResetHistory": h.historySvc != nil, "audioLanguageCheckAvailable": h.audioLanguageCheckAvailable(), "autoCheckAudioLanguage": h.autoCheckAudioLanguageFor(entry.UserID)})
 }
 
 func (h *PrequeueHandler) ReportRelease(w http.ResponseWriter, r *http.Request) {

@@ -13,6 +13,7 @@ import (
 	"testing"
 
 	"novastream/config"
+	"novastream/models"
 	"novastream/services/audiolanguage"
 	"novastream/services/playback"
 )
@@ -153,6 +154,34 @@ func TestAudioLanguageEndpointRemainsServerConfiguration(t *testing.T) {
 	persisted, err := cfg.Load()
 	if err != nil || persisted.Playback.AudioLanguageCheckURL != settings.Playback.AudioLanguageCheckURL {
 		t.Fatal("client settings read changed server configuration")
+	}
+}
+
+func TestAudioLanguageAutomaticOptInUsesSelectedProfile(t *testing.T) {
+	h, entry, _ := releaseReportFixture(t)
+	if h.autoCheckAudioLanguageFor(entry.UserID) {
+		t.Fatal("automatic check enabled by default")
+	}
+	cfg := config.NewManager(filepath.Join(t.TempDir(), "settings.json"))
+	settings := config.DefaultSettings()
+	settings.Playback.AutoCheckAudioLanguage = true
+	if err := cfg.Save(settings); err != nil {
+		t.Fatal(err)
+	}
+	h.SetConfigManager(cfg)
+	if !h.autoCheckAudioLanguageFor(entry.UserID) {
+		t.Fatal("profile did not inherit global opt-in")
+	}
+	profile, err := h.userSettingsSvc.Get(entry.UserID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	profile.Playback.AutoCheckAudioLanguage = models.BoolPtr(false)
+	if err := h.userSettingsSvc.Update(entry.UserID, *profile); err != nil {
+		t.Fatal(err)
+	}
+	if h.autoCheckAudioLanguageFor(entry.UserID) || !h.autoCheckAudioLanguageFor("other-profile") {
+		t.Fatal("explicit profile opt-out leaked or was ignored")
 	}
 }
 
