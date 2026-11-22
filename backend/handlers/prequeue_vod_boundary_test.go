@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"path/filepath"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -219,10 +220,13 @@ func TestVODPrequeueSuccessorCannotBeOverwrittenByLateSameIDWorker(t *testing.T)
 	h, _, _ := vodPrequeueFixture(t, vodExplicitInactive, false)
 	entry, _ := h.store.CreateScoped("tmdb:movie:123", "Synthetic Movie", "profile", "movie", 2024, nil, "details", h.prequeueSettingsScopeKey("profile", "device", "tmdb:movie:123"))
 	entered, release, lateReturned := make(chan struct{}), make(chan struct{}), make(chan struct{})
+	originalContext := make(chan context.Context, 1)
 	var resolves atomic.Int32
-	h.playbackSvc = &stubPlaybackService{resolve: func(context.Context, models.NZBResult) (*models.PlaybackResolution, error) {
+	h.playbackSvc = &stubPlaybackService{resolve: func(ctx context.Context, _ models.NZBResult) (*models.PlaybackResolution, error) {
 		if resolves.Add(1) == 1 {
+			originalContext <- ctx
 			close(entered)
+			// Deliberately retain the old resolver after real cancellation.
 			<-release
 			defer close(lateReturned)
 			return &models.PlaybackResolution{WebDAVPath: "/synthetic/old.mkv"}, nil
@@ -235,34 +239,99 @@ func TestVODPrequeueSuccessorCannotBeOverwrittenByLateSameIDWorker(t *testing.T)
 	run := func() {
 		h.runPrequeueWorker(entry.ID, entry.TitleID, entry.TitleName, "", "movie", 2024, "profile", "device", nil, nil, 0, true, prequeueWorkerScheduledPrewarm)
 	}
-	aDone, bDone := make(chan struct{}), make(chan struct{})
+	wait := func(done <-chan struct{}) {
+		t.Helper()
+		select {
+		case <-done:
+		case <-time.After(4 * time.Second):
+			t.Fatal("actual preparation operation did not finish")
+		}
+	}
+	aDone, duplicateDone, bDone, cancelledAndJoined := make(chan struct{}), make(chan struct{}), make(chan struct{}), make(chan struct{})
+	var unblock sync.Once
+	aStarted, duplicateStarted, bStarted, cancelStarted := false, false, false, false
+	// Failure cleanup is installed before every launch or witness wait.
+	t.Cleanup(func() {
+		h.store.CancelWork(entry.ID)
+		unblock.Do(func() { close(release) })
+		if aStarted {
+			<-aDone
+		}
+		if duplicateStarted {
+			<-duplicateDone
+		}
+		if cancelStarted {
+			<-cancelledAndJoined
+		}
+		if bStarted {
+			<-bDone
+		}
+		h.Shutdown()
+	})
+	aStarted = true
 	go func() { defer close(aDone); run() }()
-	<-entered
+	wait(entered)
+	ctx := <-originalContext
+	h.vodBoundary.mu.Lock()
+	oldOwner := h.vodBoundary.active[entry.ID]
+	h.vodBoundary.mu.Unlock()
+	if oldOwner == nil {
+		t.Fatal("actual original worker owner missing")
+	}
+	stale := *h
+	stale.vodCurrentWorker = oldOwner
+
+	// A same-ID worker is refused while the original real work is retained.
+	duplicateStarted = true
+	go func() { defer close(duplicateDone); run() }()
+	wait(duplicateDone)
+	current, _, _ := h.store.SnapshotForAuthorization(entry.ID)
+	if resolves.Load() != 1 || current.Status == playback.PrequeueStatusReady || current.StreamPath != "" {
+		t.Fatal("same-ID worker bypassed the held original")
+	}
+	cancelStarted = true
+	go func() { defer close(cancelledAndJoined); h.cancelAndWaitPrequeueWork(entry.ID, nil) }()
+	wait(ctx.Done())
+	select {
+	case <-aDone:
+		t.Fatal("cancelled resolver was not joined")
+	default:
+	}
+	select {
+	case <-cancelledAndJoined:
+		t.Fatal("cancellation returned before actual old work ended")
+	default:
+	}
+	unblock.Do(func() { close(release) })
+	wait(lateReturned)
+	wait(aDone)
+	wait(cancelledAndJoined)
+
+	bStarted = true
 	go func() { defer close(bDone); run() }()
-	before := vodWaitReady(t, h, entry.ID)
-	if before.StreamPath != "/synthetic/new.mkv" || before.MediaEvidence == nil {
+	vodWaitReady(t, h, entry.ID)
+	wait(bDone)
+	before, _, _ := h.store.SnapshotForAuthorization(entry.ID)
+	if resolves.Load() != 2 || before.StreamPath != "/synthetic/new.mkv" || before.MediaEvidence == nil {
 		t.Fatal("successor source not independently ready")
 	}
 	beforeJSON, _ := json.Marshal(before)
-	close(release)
-	<-lateReturned
-	select {
-	case <-aDone:
-	case <-time.After(time.Second):
-		t.Fatal("old worker did not finish")
+	var staleWrites atomic.Int32
+	if stale.updateVODWorker(entry.ID, func(e *playback.PrequeueEntry) {
+		staleWrites.Add(1)
+		e.StreamPath = "/synthetic/old.mkv"
+		e.AudioTracks = nil
+		e.MediaEvidence = nil
+	}) || staleWrites.Load() != 0 {
+		t.Fatal("late original callback overwrote successor")
 	}
-	<-bDone
-	// Candidate goroutines can finish just after their cancelled coordinator.
-	until := time.Now().Add(100 * time.Millisecond)
-	for time.Now().Before(until) {
-		current, _, _ := h.store.SnapshotForAuthorization(entry.ID)
-		after, _ := json.Marshal(current)
-		if string(after) != string(beforeJSON) {
-			t.Fatal("late worker corrupted successor status/path/tracks/evidence")
-		}
-		time.Sleep(time.Millisecond)
+	current, _, _ = h.store.SnapshotForAuthorization(entry.ID)
+	after, _ := json.Marshal(current)
+	if string(after) != string(beforeJSON) {
+		t.Fatal("late worker corrupted successor status/path/tracks/evidence")
 	}
 }
+
 func TestVODWorkerPrivateSetupAndWritesStayWithOriginalOwner(t *testing.T) {
 	h, f, _ := vodPrequeueFixture(t, vodExplicitInactive, false)
 	entry, _ := h.store.Create("tmdb:movie:123", "Synthetic Movie", "profile", "movie", 2024, nil, "details")
