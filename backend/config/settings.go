@@ -1518,6 +1518,7 @@ func isValidUnknownTrackPolicy(policy UnknownTrackPolicy) bool {
 type FilterSettings struct {
 	MaxSizeMovieGB         float64                  `json:"maxSizeMovieGb"`
 	MaxSizeEpisodeGB       float64                  `json:"maxSizeEpisodeGb"`
+	MinResolution          string                   `json:"minResolution,omitempty"`          // Minimum observed resolution for playback (empty = no minimum).
 	MaxResolution          string                   `json:"maxResolution"`                    // Maximum resolution (e.g., "720p", "1080p", "2160p", empty = no limit)
 	HDRDVPolicy            HDRDVPolicy              `json:"hdrDvPolicy"`                      // HDR/DV inclusion policy: "none" (no exclusion), "hdr" (include HDR + DV 7/8), "hdr_dv" (include all HDR/DV)
 	RequiredTerms          []string                 `json:"requiredTerms,omitempty"`          // Terms where at least one must match for a result to be kept

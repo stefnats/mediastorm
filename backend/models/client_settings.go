@@ -10,6 +10,7 @@ type ClientFilterSettings struct {
 	// Filtering overrides
 	MaxSizeMovieGB                         *float64              `json:"maxSizeMovieGb,omitempty"`
 	MaxSizeEpisodeGB                       *float64              `json:"maxSizeEpisodeGb,omitempty"`
+	MinResolution                          *string               `json:"minResolution,omitempty"`
 	MaxResolution                          *string               `json:"maxResolution,omitempty"`
 	HDRDVPolicy                            *HDRDVPolicy          `json:"hdrDvPolicy,omitempty"`
 	RequiredTerms                          *[]string             `json:"requiredTerms,omitempty"`
@@ -120,6 +121,7 @@ func (c *ClientFilterSettings) IsEmpty() bool {
 	return c.HomeShelfFocusModel == nil &&
 		c.MaxSizeMovieGB == nil &&
 		c.MaxSizeEpisodeGB == nil &&
+		c.MinResolution == nil &&
 		c.MaxResolution == nil &&
 		c.HDRDVPolicy == nil &&
 		c.RequiredTerms == nil &&

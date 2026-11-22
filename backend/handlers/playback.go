@@ -112,12 +112,12 @@ func (h *PlaybackHandler) withTrackSelection(r *http.Request, resolution *models
 	if clientID == "" {
 		clientID = normalizeClientID(r.Header.Get("X-Client-ID"))
 	}
-	selection := h.selectTracks(r.Context(), resolution, profileID, clientID, strings.TrimSpace(titleID))
-	if selection == nil {
-		return resolution
-	}
+	// Keep an actual probe on this request's copy, never on a cached service result.
 	withTracks := *resolution
-	withTracks.TrackSelection = selection
+	selection := h.selectTracks(r.Context(), &withTracks, profileID, clientID, strings.TrimSpace(titleID))
+	if selection != nil {
+		withTracks.TrackSelection = selection
+	}
 	return &withTracks
 }
 
@@ -142,6 +142,9 @@ func (h *PlaybackHandler) selectTracks(ctx context.Context, resolution *models.P
 		}
 		probe = result
 	}
+	// The sole caller passes an owned resolution copy. Retain even a probe with
+	// no selectable tracks: its observed video dimensions still describe the file.
+	resolution.Probe = probe
 	if probe == nil || (len(probe.AudioStreams) == 0 && len(probe.SubtitleStreams) == 0) {
 		return nil
 	}
@@ -242,6 +245,11 @@ func (h *PlaybackHandler) Resolve(w http.ResponseWriter, r *http.Request) {
 	if rejectM2TSPlaybackResolution(w, resolution) {
 		return
 	}
+	resolution, err = h.withPlaybackQuality(r.Context(), resolution, request.ProfileID, firstNonEmpty(request.ClientID, normalizeClientID(r.Header.Get("X-Client-ID"))), request.Result.Attributes)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusUnprocessableEntity)
+		return
+	}
 	rememberStreamRelease(resolution.WebDAVPath, request.Result)
 	h.prewarmThumbnails(resolution)
 	log.Printf("[playback-handler] TIMING: resolve complete (took: %v)", time.Since(handlerStart))
@@ -251,6 +259,9 @@ func (h *PlaybackHandler) Resolve(w http.ResponseWriter, r *http.Request) {
 	}
 	if request.IncludeTrackSelection {
 		resolution = h.withTrackSelection(r, resolution, request.ProfileID, request.ClientID, firstNonEmpty(request.TitleID, request.Result.Attributes["titleId"]))
+	}
+	if observedResolution(resolution.Probe) > 0 {
+		resolution.QualityAttributes = observedQualityAttributes(request.Result.Attributes, resolution.Probe)
 	}
 
 	if !h.vodBoundary.recheckHTTP(w, r, owner, vodDemand) {
@@ -333,6 +344,21 @@ func (h *PlaybackHandler) ResolveBatch(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if resp != nil {
+		profileID, clientID := request.Result.Attributes["profileId"], firstNonEmpty(request.Result.Attributes["clientId"], normalizeClientID(r.Header.Get("X-Client-ID")))
+		for i := range resp.Results {
+			if resp.Results[i].Resolution == nil || resp.Results[i].Error != "" {
+				continue
+			}
+			resolution, qualityErr := h.withPlaybackQuality(r.Context(), resp.Results[i].Resolution, profileID, clientID, request.Result.Attributes)
+			if qualityErr != nil {
+				resp.Results[i].Resolution = nil
+				resp.Results[i].Error = qualityErr.Error()
+			} else {
+				resp.Results[i].Resolution = resolution
+			}
+		}
+	}
 	log.Printf("[playback-handler] batch resolve complete (took: %v)", time.Since(handlerStart))
 	w.Header().Set("Content-Type", "application/json")
 	if !h.vodBoundary.recheckHTTP(w, r, owner, vodDemand) {
@@ -377,6 +403,15 @@ func (h *PlaybackHandler) QueueStatus(w http.ResponseWriter, r *http.Request) {
 	if !h.vodBoundary.recheckHTTP(w, r, owner, vodQueue) {
 		return
 	}
+	profileID, clientID := r.URL.Query().Get("profileId"), firstNonEmpty(r.URL.Query().Get("clientId"), normalizeClientID(r.Header.Get("X-Client-ID")))
+	if owner.activeAccount() {
+		profileID, clientID = owner.profile.ID, owner.client
+	}
+	status, err = h.withPlaybackQuality(r.Context(), status, profileID, clientID, nil)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusUnprocessableEntity)
+		return
+	}
 	h.prewarmThumbnails(status)
 
 	if !h.vodBoundary.recheckHTTP(w, r, owner, vodQueue) {
@@ -386,6 +421,9 @@ func (h *PlaybackHandler) QueueStatus(w http.ResponseWriter, r *http.Request) {
 	query := r.URL.Query()
 	if include, _ := strconv.ParseBool(query.Get("includeTrackSelection")); include {
 		status = h.withTrackSelection(r, status, query.Get("profileId"), query.Get("clientId"), query.Get("titleId"))
+	}
+	if observedResolution(status.Probe) > 0 {
+		status.QualityAttributes = observedQualityAttributes(status.QualityAttributes, status.Probe)
 	}
 
 	w.Header().Set("Content-Type", "application/json")

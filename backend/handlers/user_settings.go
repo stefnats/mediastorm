@@ -339,6 +339,7 @@ func (h *UserSettingsHandler) getDefaultsFromGlobal() models.UserSettings {
 		Filtering: models.FilterSettings{
 			MaxSizeMovieGB:                         models.FloatPtr(globalSettings.Filtering.MaxSizeMovieGB),
 			MaxSizeEpisodeGB:                       models.FloatPtr(globalSettings.Filtering.MaxSizeEpisodeGB),
+			MinResolution:                          models.StringPtr(globalSettings.Filtering.MinResolution),
 			MaxResolution:                          models.StringPtr(globalSettings.Filtering.MaxResolution),
 			HDRDVPolicy:                            models.HDRDVPolicy(globalSettings.Filtering.HDRDVPolicy),
 			RequiredTerms:                          globalSettings.Filtering.RequiredTerms,

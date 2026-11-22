@@ -30,7 +30,7 @@ type UserEditableSettingSchema struct {
 var userEditableFields = map[string]map[string]struct{}{
 	"metadata": fieldSet("primaryLanguage"),
 	"filtering": fieldSet(
-		"maxSizeMovieGb", "maxSizeEpisodeGb", "maxResolution", "hdrDvPolicy", "requiredTerms",
+		"maxSizeMovieGb", "maxSizeEpisodeGb", "minResolution", "maxResolution", "hdrDvPolicy", "requiredTerms",
 		"filterOutTerms", "preferredTerms", "nonPreferredTerms", "downloadPreferredTerms",
 		"unknownTrackPolicy", "preferredScraper", "servicePriority", "adaptivePlaybackEnabled",
 		"adaptiveTargetBufferFactor", "realDebridRestrictedTermsFilterEnabled", "splitByService",
@@ -68,7 +68,7 @@ var userEditableFields = map[string]map[string]struct{}{
 var deviceEditableFields = map[string]map[string]struct{}{
 	"homeShelves": fieldSet("homeShelfFocusModel"),
 	"filtering": fieldSet(
-		"maxSizeMovieGb", "maxSizeEpisodeGb", "maxResolution", "hdrDvPolicy", "requiredTerms",
+		"maxSizeMovieGb", "maxSizeEpisodeGb", "minResolution", "maxResolution", "hdrDvPolicy", "requiredTerms",
 		"filterOutTerms", "preferredTerms", "nonPreferredTerms", "downloadPreferredTerms",
 		"unknownTrackPolicy", "realDebridRestrictedTermsFilterEnabled", "splitByService",
 	),

@@ -171,6 +171,7 @@ func globalToUserSettings(g config.Settings) models.UserSettings {
 		Filtering: models.FilterSettings{
 			MaxSizeMovieGB:                         models.FloatPtr(g.Filtering.MaxSizeMovieGB),
 			MaxSizeEpisodeGB:                       models.FloatPtr(g.Filtering.MaxSizeEpisodeGB),
+			MinResolution:                          models.StringPtr(g.Filtering.MinResolution),
 			MaxResolution:                          models.StringPtr(g.Filtering.MaxResolution),
 			HDRDVPolicy:                            models.HDRDVPolicy(g.Filtering.HDRDVPolicy),
 			RequiredTerms:                          g.Filtering.RequiredTerms,
@@ -478,6 +479,9 @@ func mergeWithGlobal(us models.UserSettings, g config.Settings) models.UserSetti
 	}
 	if eff.Filtering.MaxSizeEpisodeGB == nil {
 		eff.Filtering.MaxSizeEpisodeGB = models.FloatPtr(g.Filtering.MaxSizeEpisodeGB)
+	}
+	if eff.Filtering.MinResolution == nil {
+		eff.Filtering.MinResolution = models.StringPtr(g.Filtering.MinResolution)
 	}
 	if eff.Filtering.MaxResolution == nil {
 		eff.Filtering.MaxResolution = models.StringPtr(g.Filtering.MaxResolution)
@@ -885,6 +889,10 @@ func stripFiltering(f *models.FilterSettings, g config.FilterSettings) bool {
 	}
 	if f.MaxSizeEpisodeGB != nil && *f.MaxSizeEpisodeGB == g.MaxSizeEpisodeGB {
 		f.MaxSizeEpisodeGB = nil
+		changed = true
+	}
+	if f.MinResolution != nil && *f.MinResolution != "" && *f.MinResolution == g.MinResolution {
+		f.MinResolution = nil
 		changed = true
 	}
 	if f.MaxResolution != nil && *f.MaxResolution == g.MaxResolution {
@@ -1399,6 +1407,10 @@ func stripClientSettings(cs *models.ClientFilterSettings, eff models.UserSetting
 	}
 	if cs.MaxSizeEpisodeGB != nil && eff.Filtering.MaxSizeEpisodeGB != nil && *cs.MaxSizeEpisodeGB == *eff.Filtering.MaxSizeEpisodeGB {
 		cs.MaxSizeEpisodeGB = nil
+		changed = true
+	}
+	if cs.MinResolution != nil && *cs.MinResolution != "" && eff.Filtering.MinResolution != nil && *cs.MinResolution == *eff.Filtering.MinResolution {
+		cs.MinResolution = nil
 		changed = true
 	}
 	if cs.MaxResolution != nil && eff.Filtering.MaxResolution != nil && *cs.MaxResolution == *eff.Filtering.MaxResolution {

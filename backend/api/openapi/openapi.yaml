@@ -9608,6 +9608,11 @@ components:
       type: object
       required: [queueId, webdavPath, healthStatus]
       properties:
+        qualityAttributes:
+          type: object
+          description: Observed selected-file resolution and dimensions. advertisedResolution retains the original claim when supplied; release names remain unchanged.
+          additionalProperties:
+            type: string
         queueId:
           type: integer
           format: int64

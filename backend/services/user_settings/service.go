@@ -405,6 +405,9 @@ func (s *Service) GetWithDefaults(userID string, defaults models.UserSettings) (
 		if settings.Metadata.PrimaryLanguage == "" {
 			settings.Metadata.PrimaryLanguage = defaults.Metadata.PrimaryLanguage
 		}
+		if settings.Filtering.MinResolution == nil {
+			settings.Filtering.MinResolution = defaults.Filtering.MinResolution
+		}
 		if settings.Filtering.PreferredScraper == nil {
 			settings.Filtering.PreferredScraper = defaults.Filtering.PreferredScraper
 		}
@@ -900,6 +903,7 @@ func isSettingsEmpty(s models.UserSettings) bool {
 	// Check Filtering - pointer fields
 	if s.Filtering.MaxSizeMovieGB != nil ||
 		s.Filtering.MaxSizeEpisodeGB != nil ||
+		s.Filtering.MinResolution != nil ||
 		s.Filtering.MaxResolution != nil ||
 		s.Filtering.HDRDVPolicy != "" ||
 		s.Filtering.RequiredTerms != nil ||

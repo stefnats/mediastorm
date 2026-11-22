@@ -568,6 +568,7 @@ func configFilterToUserFilter(f config.FilterSettings) models.FilterSettings {
 	return models.FilterSettings{
 		MaxSizeMovieGB:                         models.FloatPtr(f.MaxSizeMovieGB),
 		MaxSizeEpisodeGB:                       models.FloatPtr(f.MaxSizeEpisodeGB),
+		MinResolution:                          models.StringPtr(f.MinResolution),
 		MaxResolution:                          models.StringPtr(f.MaxResolution),
 		HDRDVPolicy:                            models.HDRDVPolicy(f.HDRDVPolicy),
 		RequiredTerms:                          append([]string(nil), f.RequiredTerms...),
@@ -614,6 +615,9 @@ func applyClientScopeOverrides(sig *prequeueScopeSignature, clientSettings *mode
 	}
 	if clientSettings.MaxSizeEpisodeGB != nil {
 		sig.Filtering.MaxSizeEpisodeGB = clientSettings.MaxSizeEpisodeGB
+	}
+	if clientSettings.MinResolution != nil {
+		sig.Filtering.MinResolution = models.StringPtr(*clientSettings.MinResolution)
 	}
 	if clientSettings.MaxResolution != nil {
 		sig.Filtering.MaxResolution = models.StringPtr(*clientSettings.MaxResolution)
@@ -757,6 +761,9 @@ func (h *PrequeueHandler) prequeueSettingsScopeDetails(userID, clientID, titleID
 			}
 			if effective.Filtering.MaxSizeEpisodeGB == nil {
 				effective.Filtering.MaxSizeEpisodeGB = defaults.Filtering.MaxSizeEpisodeGB
+			}
+			if effective.Filtering.MinResolution == nil {
+				effective.Filtering.MinResolution = defaults.Filtering.MinResolution
 			}
 			if effective.Filtering.MaxResolution == nil {
 				effective.Filtering.MaxResolution = defaults.Filtering.MaxResolution
@@ -1760,6 +1767,27 @@ func (h *PrequeueHandler) AdoptMigration(w http.ResponseWriter, r *http.Request)
 	if !h.vodBoundary.recheckHTTP(w, r, owner, vodAdopt) {
 		return
 	}
+	_, _, qualitySettings := h.prequeueSettingsScopeDetails(current.UserID, normalizeClientID(r.Header.Get("X-Client-ID")), current.TitleID, nil)
+	var migrationQualityProbe *VideoFullResult
+	if models.StringVal(qualitySettings.MinResolution, "") != "" {
+		if h.fullProber != nil {
+			probeCtx, cancel := context.WithTimeout(r.Context(), trackSelectionProbeTimeout)
+			var probeErr error
+			migrationQualityProbe, probeErr = h.fullProber.ProbeVideoFull(probeCtx, req.StreamPath)
+			cancel()
+			if probeErr != nil {
+				http.Error(w, "minimum playback resolution could not be verified", http.StatusUnprocessableEntity)
+				return
+			}
+		}
+		if err := validateMinimumVideoResolution(migrationQualityProbe, models.StringVal(qualitySettings.MinResolution, "")); err != nil {
+			http.Error(w, err.Error(), http.StatusUnprocessableEntity)
+			return
+		}
+	}
+	if !h.vodBoundary.recheckHTTP(w, r, owner, vodAdopt) {
+		return
+	}
 	h.store.CancelWork(prequeueID)
 
 	updated := h.store.Update(prequeueID, func(e *playback.PrequeueEntry) {
@@ -1784,6 +1812,7 @@ func (h *PrequeueHandler) AdoptMigration(w http.ResponseWriter, r *http.Request)
 		e.MediaEvidenceReportRevision = ""
 		e.MediaEvidenceClientID = ""
 		e.MediaEvidenceConfigurationKey = ""
+		e.ResultAttributes = nil
 
 		if req.Result.Title != "" || req.Result.GUID != "" {
 			resultCopy := req.Result
@@ -1817,6 +1846,7 @@ func (h *PrequeueHandler) AdoptMigration(w http.ResponseWriter, r *http.Request)
 		if len(req.MigrationCandidates) > 0 {
 			e.MigrationCandidates = append([]models.NZBResult(nil), req.MigrationCandidates...)
 		}
+		e.ResultAttributes = observedQualityAttributes(e.ResultAttributes, migrationQualityProbe)
 		attrs := e.ResultAttributes
 		if attrs != nil && attrs["passthrough_format"] == "true" {
 			e.PassthroughName = attrs["raw_name"]
@@ -1830,7 +1860,7 @@ func (h *PrequeueHandler) AdoptMigration(w http.ResponseWriter, r *http.Request)
 		http.Error(w, "prequeue not found or expired", http.StatusNotFound)
 		return
 	}
-	h.refreshAdoptedMigrationMetadataContext(r.Context(), prequeueID, req.StreamPath, normalizeClientID(r.Header.Get("X-Client-ID")), owner)
+	h.refreshAdoptedMigrationMetadataWithProbeContext(r.Context(), prequeueID, req.StreamPath, normalizeClientID(r.Header.Get("X-Client-ID")), migrationQualityProbe, owner)
 	h.latencyTracker.NotePrequeueReady(prequeueID)
 	if h.prewarmSvc != nil {
 		h.prewarmSvc.UpdateFromPrequeue(prequeueID)
@@ -1852,6 +1882,7 @@ func (h *PrequeueHandler) AdoptMigration(w http.ResponseWriter, r *http.Request)
 }
 
 type adoptedMigrationMetadata struct {
+	probe                    *VideoFullResult
 	audioStreams             []AudioStreamInfo
 	subtitleStreams          []SubtitleStreamInfo
 	hasDolbyVision           bool
@@ -1872,6 +1903,10 @@ func (h *PrequeueHandler) refreshAdoptedMigrationMetadata(prequeueID, streamPath
 	h.refreshAdoptedMigrationMetadataContext(parent, prequeueID, streamPath, clientID, owners...)
 }
 func (h *PrequeueHandler) refreshAdoptedMigrationMetadataContext(parent context.Context, prequeueID, streamPath, clientID string, owners ...*vodOwnerContext) {
+	h.refreshAdoptedMigrationMetadataWithProbeContext(parent, prequeueID, streamPath, clientID, nil, owners...)
+}
+
+func (h *PrequeueHandler) refreshAdoptedMigrationMetadataWithProbeContext(parent context.Context, prequeueID, streamPath, clientID string, reusableProbe *VideoFullResult, owners ...*vodOwnerContext) {
 	var owner *vodOwnerContext
 	if len(owners) > 0 {
 		owner = owners[0]
@@ -1886,7 +1921,7 @@ func (h *PrequeueHandler) refreshAdoptedMigrationMetadataContext(parent context.
 	if streamPath == "" {
 		return
 	}
-	if h.fullProber == nil && h.metadataProber == nil && h.videoProber == nil {
+	if reusableProbe == nil && h.fullProber == nil && h.metadataProber == nil && h.videoProber == nil {
 		return
 	}
 
@@ -1910,7 +1945,7 @@ func (h *PrequeueHandler) refreshAdoptedMigrationMetadataContext(parent context.
 		ctx, stopVOD = vodWorkerContext(ctx, owner)
 		defer stopVOD()
 	}
-	metadata, err := h.probeAdoptedMigrationMetadata(ctx, streamPath)
+	metadata, err := h.probeAdoptedMigrationMetadata(ctx, streamPath, reusableProbe)
 	if err != nil {
 		log.Printf("[prequeue] adopted migration metadata probe failed for %s: %v", prequeueID, err)
 		return
@@ -1933,6 +1968,7 @@ func (h *PrequeueHandler) refreshAdoptedMigrationMetadataContext(parent context.
 		if metadata.duration > 0 {
 			e.Duration = metadata.duration
 		}
+		e.ResultAttributes = observedQualityAttributes(e.ResultAttributes, metadata.probe)
 		e.FrameRate = metadata.avgFrameRate
 		e.HasDolbyVision = metadata.hasDolbyVision
 		e.HasHDR10 = metadata.hasHDR10
@@ -1952,14 +1988,22 @@ func (h *PrequeueHandler) refreshAdoptedMigrationMetadataContext(parent context.
 		prequeueID, len(audioTracks), len(subtitleTracks), selectedAudioTrack, selectedSubtitleTrack, metadata.duration)
 }
 
-func (h *PrequeueHandler) probeAdoptedMigrationMetadata(ctx context.Context, streamPath string) (adoptedMigrationMetadata, error) {
+func (h *PrequeueHandler) probeAdoptedMigrationMetadata(ctx context.Context, streamPath string, reusable ...*VideoFullResult) (adoptedMigrationMetadata, error) {
 	var metadata adoptedMigrationMetadata
-	if h.fullProber != nil {
-		fullResult, err := h.fullProber.ProbeVideoFull(ctx, streamPath)
-		if err != nil {
-			return metadata, err
+	var fullResult *VideoFullResult
+	if len(reusable) == 1 {
+		fullResult = reusable[0]
+	}
+	if fullResult != nil || h.fullProber != nil {
+		if fullResult == nil {
+			var err error
+			fullResult, err = h.fullProber.ProbeVideoFull(ctx, streamPath)
+			if err != nil {
+				return metadata, err
+			}
 		}
 		if fullResult != nil {
+			metadata.probe = fullResult
 			metadata.audioStreams = fullResult.AudioStreams
 			metadata.subtitleStreams = fullResult.SubtitleStreams
 			metadata.hasDolbyVision = fullResult.HasDolbyVision
@@ -2487,15 +2531,15 @@ func (h *PrequeueHandler) runPrequeueWorkerJob(work *prequeueWorkerLifetime, pre
 	needsUnknownTrackCheck := unknownTrackPolicyNeedsProbe(unknownTrackPolicy)
 	log.Printf("[prequeue] HDR/DV policy: %s, needsDVCheck: %v, unknownTrackPolicy: %s, needsUnknownTrackCheck: %v, allowedTrackLanguages: %v", hdrDVPolicy, needsDVCheck, unknownTrackPolicy, needsUnknownTrackCheck, allowedTrackLanguages)
 
+	_, qualityAdaptiveCaps, qualityFilter := h.prequeueSettingsScopeDetails(userID, clientID, titleID, throughput)
 	resolveStart := time.Now()
 	tryLocal := func() (prequeueResolutionChoice, error) {
-		_, localAdaptiveCaps, localFilter := h.prequeueSettingsScopeDetails(userID, clientID, titleID, throughput)
 		h.updatePrequeueProgress(prequeueID, "local_fallback", "Checking existing library media", 0, len(localCandidates)+len(remoteCandidates))
 		return h.resolveLocalFallback(playbackCtx, prequeueID, localCandidates, prequeueResolutionOptions{
 			excludedResult: excludedResult, mediaType: mediaType, targetEpisode: targetEpisode, userID: userID, clientID: clientID, hdrDVPolicy: hdrDVPolicy,
 			kidsVODCatalogue: kidsCatalogue, kidsVODLibraryRoutes: h.kidsVODBindings.captureRoutes(playbackCtx, remoteCandidates),
 			unknownTrackPolicy: unknownTrackPolicy, needsDVCheck: needsDVCheck, needsUnknownTrackCheck: needsUnknownTrackCheck,
-			workerStart: workerStart, localScope: &localScopes[0], adaptiveCaps: localAdaptiveCaps, localFilter: localFilter,
+			workerStart: workerStart, localScope: &localScopes[0], adaptiveCaps: qualityAdaptiveCaps, localFilter: qualityFilter,
 		}, remoteCandidates)
 	}
 	var choice prequeueResolutionChoice
@@ -2603,6 +2647,7 @@ func (h *PrequeueHandler) runPrequeueWorkerJob(work *prequeueWorkerLifetime, pre
 				resolveFirstReadySource, candidates.Total(), prequeueResolutionWidth(resolveFirstReadySource), time.Since(workerStart))
 
 			choice, resolveErr := h.resolveCandidates(ctx, prequeueID, candidates, prequeueResolutionOptions{
+				localFilter:            qualityFilter,
 				mediaType:              mediaType,
 				excludedResult:         excludedResult,
 				targetEpisode:          targetEpisode,
@@ -2697,8 +2742,8 @@ func (h *PrequeueHandler) runPrequeueWorkerJob(work *prequeueWorkerLifetime, pre
 			e.PassthroughDescription = selectedResult.Attributes["raw_description"]
 		}
 		// Copy parsed metadata attributes for badge display
-		if selectedResult != nil && len(selectedResult.Attributes) > 0 {
-			e.ResultAttributes = selectedResult.Attributes
+		if selectedResult != nil {
+			e.ResultAttributes = observedQualityAttributes(selectedResult.Attributes, cachedProbeResult)
 		}
 		if selectedResult != nil {
 			resultCopy := *selectedResult
@@ -3869,6 +3914,10 @@ func (h *PrequeueHandler) resolveCandidates(ctx context.Context, prequeueID stri
 				}
 			}
 		}
+		if err := validateMinimumVideoResolution(probeResult, models.StringVal(opts.localFilter.MinResolution, "")); err != nil {
+			return nil, nil, err
+		}
+
 		if opts.needsUnknownTrackCheck && probeResult == nil && h.metadataProber != nil {
 			metadata, probeErr := h.metadataProber.ProbeVideoMetadata(raceCtx, resolution.WebDAVPath)
 			if err := raceCtx.Err(); err != nil {

@@ -250,6 +250,9 @@ func validateLocalFallbackQuality(probe *VideoFullResult, settings models.Filter
 	if err := validatePrequeueVideoProbe(probe); err != nil {
 		return err
 	}
+	if err := validateMinimumVideoResolution(probe, models.StringVal(settings.MinResolution, "")); err != nil {
+		return err
+	}
 	if settings.HDRDVPolicy == models.HDRDVPolicyNoExclusion && (probe.HasDolbyVision || probe.HasHDR10) {
 		return errors.New("local library file exceeds the current HDR policy")
 	}

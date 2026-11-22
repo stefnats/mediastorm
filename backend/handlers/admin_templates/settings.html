@@ -2720,6 +2720,7 @@
         ['streaming', 'healthCheckTimeoutSec', 'Connection Test Wait Time', 'How long a manual service test may run before it is stopped.'],
         ['filtering', 'maxSizeMovieGb', 'Largest Movie', 'Ignore movie files larger than this. Use 0 for no limit.'],
         ['filtering', 'maxSizeEpisodeGb', 'Largest Episode', 'Ignore episode files larger than this. Use 0 for no limit.'],
+        ['filtering', 'minResolution', 'Minimum Playback Quality', 'Require this quality in the actual file before playback. Empty allows lower-quality files. Release names alone do not satisfy this setting.'],
         ['filtering', 'maxResolution', 'Highest Video Quality', 'Do not show results above this video quality. Leave blank for no limit.'],
         ['filtering', 'hdrDvPolicy', 'HDR & Dolby Vision', 'Choose which HDR and Dolby Vision formats can be selected automatically.'],
         ['filtering', 'adaptivePlaybackEnabled', 'Adapt to Each Device', 'Use each device\'s measured connection and display support to avoid streams it may struggle to play.'],
@@ -2962,7 +2963,7 @@
     ]);
     const watchEssentialFieldPaths = new Set([
         'streaming.serviceMode',
-        'filtering.maxSizeMovieGb', 'filtering.maxSizeEpisodeGb', 'filtering.maxResolution', 'filtering.hdrDvPolicy',
+        'filtering.maxSizeMovieGb', 'filtering.maxSizeEpisodeGb', 'filtering.minResolution', 'filtering.maxResolution', 'filtering.hdrDvPolicy',
         'filtering.requiredTerms', 'filtering.filterOutTerms', 'filtering.preferredTerms', 'filtering.nonPreferredTerms',
         'playback.preferLocalFiles', 'playback.preferredPlayer', 'playback.preferredAudioLanguage', 'playback.preferredSubtitleLanguage',
         'playback.allowedTrackLanguages', 'playback.preferredSubtitleMode', 'playback.forceAacTranscoding',
@@ -4884,6 +4885,7 @@
             userPaths: [
                 'filtering.maxSizeMovieGb',
                 'filtering.maxSizeEpisodeGb',
+                'filtering.minResolution',
                 'filtering.maxResolution',
                 'filtering.hdrDvPolicy',
                 'filtering.unknownTrackPolicy',
@@ -4896,6 +4898,7 @@
             clientPaths: [
                 'maxSizeMovieGb',
                 'maxSizeEpisodeGb',
+                'minResolution',
                 'maxResolution',
                 'hdrDvPolicy',
                 'unknownTrackPolicy',
@@ -5295,6 +5298,7 @@
             filtering: settings?.filtering ? {
                 maxSizeMovieGb: settings.filtering.maxSizeMovieGb,
                 maxSizeEpisodeGb: settings.filtering.maxSizeEpisodeGb,
+                minResolution: settings.filtering.minResolution,
                 maxResolution: settings.filtering.maxResolution,
                 unknownTrackPolicy: settings.filtering.unknownTrackPolicy,
                 filterOutTerms: settings.filtering.filterOutTerms,
@@ -5849,7 +5853,7 @@
     }
 
     // Map filtering field paths to client settings keys
-    const clientFilterFields = ['maxSizeMovieGb', 'maxSizeEpisodeGb', 'maxResolution', 'hdrDvPolicy', 'requiredTerms', 'filterOutTerms', 'preferredTerms', 'nonPreferredTerms', 'downloadPreferredTerms', 'unknownTrackPolicy', 'splitByService'];
+    const clientFilterFields = ['maxSizeMovieGb', 'maxSizeEpisodeGb', 'minResolution', 'maxResolution', 'hdrDvPolicy', 'requiredTerms', 'filterOutTerms', 'preferredTerms', 'nonPreferredTerms', 'downloadPreferredTerms', 'unknownTrackPolicy', 'splitByService'];
     const clientDisplayFields = ['bypassFilteringForAioStreamsOnly', 'showStreamSourceInfo', 'navigationTabVisibility', 'includeUnreleasedMoviesInLists', 'includeUnreleasedShowsInLists', 'includeUnreleasedMoviesInSearch', 'includeUnreleasedShowsInSearch', 'enableAnimations', 'enableHeroArtPanning', 'enableHeroArtRotation', 'showSeriesBackdropForMissingEpisodeArt', 'hideContinueWatchingHeroMetadata', 'moveDetailsRatingsToMetadata', 'hideDetailsPoster', 'showDetailsPrequeueFilename', 'showDetailsSelectedTracks', 'hideTvDrawerRail', 'simpleMode', 'disableTvHomeCardDimming', 'blurUnwatchedEpisodeThumbnails', 'blurUnwatchedEpisodeThumbnailsIncludeCurrent', 'blurUnwatchedEpisodeOverviews', 'blurUnwatchedEpisodeOverviewsIncludeCurrent', 'appearance.fontScale', 'appearance.accentColor', 'appearance.textColor', 'appearance.secondaryTextColor', 'appearance.backgroundColor', 'appearance.modalBackgroundColor', 'appearance.buttonStyle', 'appearance.buttonRadius', 'appearance.highContrast', 'appearance.reduceOverlays'];
     const clientPlaybackFields = [
         'preferredPlayer',

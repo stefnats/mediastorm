@@ -516,6 +516,7 @@ var SettingsSchema = map[string]interface{}{
 		"fields": map[string]interface{}{
 			"maxSizeMovieGb":   map[string]interface{}{"type": "number", "label": "Max Movie Size (GB)", "description": "Maximum movie file size (0 = no limit)"},
 			"maxSizeEpisodeGb": map[string]interface{}{"type": "number", "label": "Max Episode Size (GB)", "description": "Maximum episode file size (0 = no limit)"},
+			"minResolution":    map[string]interface{}{"type": "select", "label": "Minimum Playback Resolution", "options": []string{"", "480p", "720p", "1080p", "2160p"}, "description": "Require this resolution in the actual selected file. Empty = no minimum. Mislabelled or unknown files are skipped during preparation."},
 			"maxResolution":    map[string]interface{}{"type": "select", "label": "Max Resolution", "options": []string{"", "480p", "720p", "1080p", "2160p"}, "description": "Maximum resolution (empty = no limit)"},
 			"splitByService":   map[string]interface{}{"type": "boolean", "label": "Split Debrid/Usenet Settings", "description": "Use separate ranking/filtering values for Debrid and Usenet results. When disabled, the shared settings above apply to all results.", "order": 99},
 			"hdrDvPolicy": map[string]interface{}{
@@ -4215,6 +4216,7 @@ func (h *AdminUIHandler) GetUserSettings(w http.ResponseWriter, r *http.Request)
 		Filtering: models.FilterSettings{
 			MaxSizeMovieGB:                         models.FloatPtr(globalSettings.Filtering.MaxSizeMovieGB),
 			MaxSizeEpisodeGB:                       models.FloatPtr(globalSettings.Filtering.MaxSizeEpisodeGB),
+			MinResolution:                          models.StringPtr(globalSettings.Filtering.MinResolution),
 			MaxResolution:                          models.StringPtr(globalSettings.Filtering.MaxResolution),
 			HDRDVPolicy:                            models.HDRDVPolicy(globalSettings.Filtering.HDRDVPolicy),
 			RequiredTerms:                          globalSettings.Filtering.RequiredTerms,
@@ -4381,6 +4383,7 @@ func (h *AdminUIHandler) PropagateSettings(w http.ResponseWriter, r *http.Reques
 	globalFilterSettings := models.FilterSettings{
 		MaxSizeMovieGB:                         models.FloatPtr(globalSettings.Filtering.MaxSizeMovieGB),
 		MaxSizeEpisodeGB:                       models.FloatPtr(globalSettings.Filtering.MaxSizeEpisodeGB),
+		MinResolution:                          models.StringPtr(globalSettings.Filtering.MinResolution),
 		MaxResolution:                          models.StringPtr(globalSettings.Filtering.MaxResolution),
 		HDRDVPolicy:                            models.HDRDVPolicy(globalSettings.Filtering.HDRDVPolicy),
 		RequiredTerms:                          globalSettings.Filtering.RequiredTerms,

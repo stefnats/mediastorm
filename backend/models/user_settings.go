@@ -1116,6 +1116,7 @@ const (
 type FilterSettings struct {
 	MaxSizeMovieGB                         *float64        `json:"maxSizeMovieGb,omitempty"`
 	MaxSizeEpisodeGB                       *float64        `json:"maxSizeEpisodeGb,omitempty"`
+	MinResolution                          *string         `json:"minResolution,omitempty"` // Minimum observed resolution; nil inherits and empty disables.
 	MaxResolution                          *string         `json:"maxResolution,omitempty"` // Maximum resolution (e.g., "720p", "1080p", "2160p", empty = no limit)
 	HDRDVPolicy                            HDRDVPolicy     `json:"hdrDvPolicy,omitempty"`   // HDR/DV inclusion policy: "none" (no exclusion), "hdr" (include HDR + DV 7/8), "hdr_dv" (include all HDR/DV)
 	RequiredTerms                          []string        `json:"requiredTerms"`           // Terms where at least one must match for a result to be kept. Non-nil empty slice explicitly clears the inherited value.
