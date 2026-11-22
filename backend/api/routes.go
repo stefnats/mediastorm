@@ -589,6 +589,8 @@ func Register(
 		protected.HandleFunc("/playback/prequeue/{prequeueID}/report", prequeueHandler.ReleaseReportOptions).Methods(http.MethodGet)
 		protected.HandleFunc("/playback/prequeue/{prequeueID}/report", prequeueHandler.ReportRelease).Methods(http.MethodPost)
 		protected.HandleFunc("/playback/prequeue/{prequeueID}/report", prequeueHandler.Options).Methods(http.MethodOptions)
+		protected.HandleFunc("/playback/prequeue/{prequeueID}/audio-language", prequeueHandler.CheckAudioLanguage).Methods(http.MethodPost)
+		protected.HandleFunc("/playback/prequeue/{prequeueID}/audio-language", prequeueHandler.Options).Methods(http.MethodOptions)
 		protected.HandleFunc("/playback/prequeue/{prequeueID}/adopt-migration", prequeueHandler.AdoptMigration).Methods(http.MethodPost)
 		protected.HandleFunc("/playback/prequeue/{prequeueID}/adopt-migration", prequeueHandler.Options).Methods(http.MethodOptions)
 		// Lazy subtitle extraction - called when user plays with known offset

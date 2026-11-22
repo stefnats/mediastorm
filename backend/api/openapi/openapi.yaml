@@ -5226,6 +5226,64 @@ paths:
         '404':
           $ref: '#/components/responses/Error'
 
+  /api/playback/prequeue/{prequeueId}/audio-language:
+    post:
+      tags: [playback]
+      operationId: checkPreparedAudioLanguage
+      summary: Compare sampled speech with the effective requested language
+      description: |
+        Optional explicit check against an owner-configured local whisper.cpp
+        service. Existing release-report options expose
+        `audioLanguageCheckAvailable` and the current `sourceVersion`.
+        Samples the selected container audio track in two non-overlapping
+        20-second windows. Results are hints, not full-soundtrack, regional-dub
+        or lip-sync verification. No report, exclusion, search or replacement
+        is created. Uncertain speech and unsupported sources remain unknown.
+        The check has a bounded runtime; cancel it when leaving the controls.
+        Discard a reply after source, profile, audio intent or track changes.
+      parameters:
+        - name: prequeueId
+          in: path
+          required: true
+          schema: {type: string}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [sourceVersion, audioTrackIndex]
+              properties:
+                sourceVersion: {type: string, minLength: 1}
+                audioTrackIndex: {type: integer, minimum: 0}
+                startOffset: {type: number, minimum: 0, default: 0}
+      responses:
+        '200':
+          description: Current selection-bound hint; no transcript is returned.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [status, requestedLanguage, samples, sourceVersion, audioTrackIndex]
+                properties:
+                  status: {type: string, enum: [unknown, likely_match, likely_mismatch]}
+                  reason: {type: string}
+                  requestedLanguage: {type: string}
+                  detectedLanguage: {type: string}
+                  confidence: {type: number, minimum: 0, maximum: 1}
+                  samples: {type: integer, minimum: 0, maximum: 2}
+                  sourceVersion: {type: string}
+                  audioTrackIndex: {type: integer, minimum: 0}
+        '400':
+          description: Invalid request or audio track.
+        '409':
+          description: Source or requested audio changed.
+        '429':
+          description: A check is already running; no second check was queued.
+        '503':
+          description: Analysis is disabled, unavailable or canceled.
+
   /api/playback/prequeue/{prequeueId}:
     get:
       tags: [playback]

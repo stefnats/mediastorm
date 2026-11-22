@@ -40,7 +40,8 @@ function fixture(t, options = {}) {
       return { deleted: true };
     }
     if (url.endsWith('/report')) return { sourceVersion: 'verified-fixture', releaseName: 'Synthetic.Movie.1080p', audioLanguage: options.audioLanguage || 'fra',
-      audioTracks: [{ index: 2, language: options.audioLanguage || 'fra', codec: 'aac' }], selectedAudioTrack: 2, hasEpisode: true, canShare: false };
+      audioTracks: [{ index: 2, language: options.audioLanguage || 'fra', codec: 'aac' }], selectedAudioTrack: 2, hasEpisode: true, canShare: false,
+      audioLanguageCheckAvailable: Boolean(options.languageCheck) };
     return JSON.parse(JSON.stringify(entries.get(url.split('/').at(-1)) || { status: 'expired' }));
   }
   const context = vm.createContext({
@@ -48,7 +49,8 @@ function fixture(t, options = {}) {
     window: { addEventListener() {} }, navigator: { language: 'en' }, Intl, Option: class { constructor(text, value) { this.text = text; this.value = value; } },
     setTimeout: (fn, delay) => setTimeout(fn, options.fastTimeout && delay >= 15000 ? 5 : delay), clearTimeout,
     setInterval: fn => { monitors.set(++monitorId, fn); return monitorId; }, clearInterval: id => monitors.delete(id),
-    Date, SHARE_MODE: false, WATCH_PARTY_MODE: false, CLIENT_ID: 'fixture-device', activeProfileId: 'fixture-profile',
+    Date, AbortController, SHARE_MODE: false, WATCH_PARTY_MODE: false, CLIENT_ID: 'fixture-device', activeProfileId: 'fixture-profile',
+    webPlayerSelectedAudioTrack: 2,
     playbackMeta: { isLive: false }, webPlayerActivePrequeueId: 'playing', sourcePath: '/fixture/playing.mkv',
     webPlayerAudioPreferenceGeneration: 0, webPlayerAudioPreferenceSaveFailed: false, webPlayerAudioPreferenceSave: Promise.resolve(),
     webPlayerMigrationInProgress: false, webPlayerMigrationProbation: null, apiCall: gateway,
@@ -63,6 +65,59 @@ function fixture(t, options = {}) {
     async prepare(report = false, reason = '') { await this.open(reason); await context.performReleaseAction(report, true); },
   };
 }
+
+test('spoken language checking uses the current track and saves no report or replacement', async t => {
+  const f = fixture(t, { languageCheck: true, intercept(url) {
+    if (url.endsWith('/audio-language')) return { status: 'likely_mismatch', requestedLanguage: 'fra', detectedLanguage: 'spa', sourceVersion: 'verified-fixture', audioTrackIndex: 2 };
+  } });
+  await f.open();
+  assert.equal(f.element('releaseAudioLanguageSection').hidden, false);
+  await f.context.checkReleaseAudioLanguage();
+  const call = f.calls.find(call => call.url.endsWith('/audio-language'));
+  assert.deepEqual(JSON.parse(call.body), { sourceVersion: 'verified-fixture', audioTrackIndex: 2, startOffset: 42 });
+  assert.match(f.element('releaseAudioLanguageResult').textContent, /Spanish.*French/);
+  assert.match(f.element('releaseAudioLanguageResult').textContent, /nothing has been reported or blocked/);
+  assert.equal(f.starts.length, 0); assert.equal(f.stops.length, 0); assert.equal(f.deleted.length, 0);
+  assert.equal(f.calls.filter(call => call.method === 'POST').length, 1);
+});
+
+test('a late speech result is canceled and cannot replace a new profile selection', async t => {
+  const response = deferred();
+  const f = fixture(t, { languageCheck: true, intercept(url) { if (url.endsWith('/audio-language')) return response.promise; } });
+  await f.open();
+  const pending = f.context.checkReleaseAudioLanguage();
+  await flush();
+  const call = f.calls.find(call => call.url.endsWith('/audio-language'));
+  f.context.activeProfileId = 'another-profile'; f.monitors();
+  assert.equal(call.signal.aborted, true);
+  response.resolve({ status: 'likely_mismatch', detectedLanguage: 'eng', requestedLanguage: 'fra', sourceVersion: 'verified-fixture', audioTrackIndex: 2 });
+  await pending;
+  assert.doesNotMatch(f.element('releaseAudioLanguageResult').textContent, /samples appear/);
+  assert.equal(f.starts.length, 0); assert.equal(f.stops.length, 0);
+});
+
+test('closing a speech check allows a fresh dialog without adopting the old reply', async t => {
+  const response = deferred();
+  const f = fixture(t, { languageCheck: true, intercept(url) { if (url.endsWith('/audio-language')) return response.promise; } });
+  await f.open();
+  const pending = f.context.checkReleaseAudioLanguage(); await flush();
+  const call = f.calls.find(call => call.url.endsWith('/audio-language'));
+  f.context.closeReleaseReport(); assert.equal(call.signal.aborted, true);
+  await f.open(); assert.equal(f.element('releaseAudioLanguageCheck').disabled, false);
+  response.resolve({ status: 'likely_mismatch', detectedLanguage: 'eng', requestedLanguage: 'fra', sourceVersion: 'verified-fixture', audioTrackIndex: 2 });
+  await pending;
+  assert.equal(f.element('releaseAudioLanguageResult').textContent, '');
+  assert.equal(f.element('releaseAudioLanguageCheck').disabled, false);
+});
+
+test('disabled analysis makes no request and unknown results remain neutral', async t => {
+  const f = fixture(t);
+  await f.open(); await f.context.checkReleaseAudioLanguage();
+  assert.equal(f.element('releaseAudioLanguageSection').hidden, true);
+  assert.equal(f.calls.some(call => call.url.endsWith('/audio-language')), false);
+  assert.match(f.context.releaseAudioLanguageMessage({ status: 'unknown' }), /did not provide a reliable language/);
+  assert.match(f.context.releaseAudioLanguageMessage({ status: 'likely_match', requestedLanguage: 'spa' }), /does not verify the complete soundtrack/);
+});
 
 test('preparation leaves the source open until explicit adoption and samples current position then', async t => {
   const f = fixture(t); await f.prepare();

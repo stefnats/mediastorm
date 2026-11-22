@@ -79,6 +79,7 @@ type prequeuePlaybackService interface {
 
 // PrequeueHandler handles prequeue requests for pre-loading playback streams
 type PrequeueHandler struct {
+	audioLanguageChecks   *audioLanguageChecks
 	germanMetadata        germanAgeMetadata
 	vodBoundary           *vodBoundary
 	vodCurrentWorker      *vodOwnerContext

@@ -1160,6 +1160,10 @@
       <select id="releaseReportTrack"></select>
     </div>
     <p id="releaseReportScope" role="status"></p>
+    <section id="releaseAudioLanguageSection" hidden aria-label="Spoken audio language">
+      <button class="btn" id="releaseAudioLanguageCheck" type="button" onclick="checkReleaseAudioLanguage()">Check spoken audio language</button>
+      <p id="releaseAudioLanguageResult" role="status"></p>
+    </section>
     <div id="releaseReportHistoryRow" hidden>
       <label><input id="releaseReportResetHistory" type="checkbox"> Reset progress and mark this movie or episode unwatched for this profile</label>
       <p>This clears its saved position and watched status, including any earlier valid position for this same item. Earlier positions cannot be restored. Other episodes and profiles are unchanged. The current source pauses and stops saving progress; a replacement starts fresh.</p>

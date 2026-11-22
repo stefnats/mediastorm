@@ -37,6 +37,13 @@ with sync_playwright() as p:
     page.locator("#releaseReportButton").click()
     page.locator("#releaseReportReason").wait_for(state="visible")
     page.wait_for_function("releaseReportState !== null")
+    page.locator("#releaseAudioLanguageCheck").click()
+    page.wait_for_function("document.getElementById('releaseAudioLanguageResult').textContent.includes('samples appear to contain')")
+    language_result = page.locator("#releaseAudioLanguageResult").inner_text()
+    assert "Spanish" in language_result and "German" in language_result, language_result
+    assert "nothing has been reported or blocked" in language_result, language_result
+    assert page.request.get(base + "/fixture/status").json()["reports"] == 0
+    assert page.evaluate("sourcePath") == "/webdav/bad.mp4"
     page.locator("#releaseReportReason").select_option("missing_language")
     assert "Other languages remain eligible" in page.locator("#releaseReportScope").inner_text()
     page.locator("#releaseReportOnly").click()

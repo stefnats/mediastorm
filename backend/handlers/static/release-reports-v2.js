@@ -4,6 +4,7 @@ let releaseReportState = null;
 let releaseReportAction = null;
 let releaseReportGeneration = 0;
 let releaseReportBusy = false;
+let releaseAudioLanguageController = null;
 let lastReleaseReportId = '';
 let lastReleaseReportProfile = '';
 let lastReleaseReportGeneration = 0;
@@ -94,6 +95,11 @@ async function openReleaseReport() {
   cancelReleaseAction();
   const generation = ++releaseReportGeneration;
   releaseReportState = null;
+  cancelReleaseAudioLanguageCheck();
+  const languageSection = document.getElementById('releaseAudioLanguageSection');
+  if (languageSection) languageSection.hidden = true;
+  const languageResult = document.getElementById('releaseAudioLanguageResult');
+  if (languageResult) languageResult.textContent = '';
   const dialog = document.getElementById('releaseReportDialog');
   document.getElementById('releaseReportError').textContent = '';
   document.getElementById('releaseReportReason').value = '';
@@ -114,6 +120,7 @@ async function openReleaseReport() {
     if (generation !== releaseReportGeneration || !dialog.open) return;
     if (!releaseReportContextMatches(binding)) throw new Error('Playback changed. Reopen the dialog.');
     releaseReportState = { ...options, ...binding };
+    if (languageSection) languageSection.hidden = !options.audioLanguageCheckAvailable;
     document.getElementById('releaseReportName').textContent = options.releaseName || 'Selected release';
     const tracks = document.getElementById('releaseReportTrack');
     tracks.replaceChildren();
@@ -165,7 +172,65 @@ function updateReleaseReportScope() {
   refreshReleaseUndo();
 }
 
-function setReleaseReportBusy(busy) { releaseReportBusy = busy; updateReleaseReportScope(); }
+function setReleaseReportBusy(busy) {
+  releaseReportBusy = busy;
+  updateReleaseReportScope();
+  const check = document.getElementById('releaseAudioLanguageCheck');
+  if (check) check.disabled = busy || Boolean(releaseAudioLanguageController);
+}
+
+function cancelReleaseAudioLanguageCheck() {
+  releaseAudioLanguageController?.abort();
+  releaseAudioLanguageController = null;
+  const check = document.getElementById('releaseAudioLanguageCheck');
+  if (check) check.disabled = releaseReportBusy;
+}
+
+async function checkReleaseAudioLanguage() {
+  const state = releaseReportState;
+  const button = document.getElementById('releaseAudioLanguageCheck');
+  const output = document.getElementById('releaseAudioLanguageResult');
+  if (!state?.audioLanguageCheckAvailable || releaseReportBusy || releaseReportAction || releaseAudioLanguageController || !releaseReportContextMatches(state)) return;
+  const track = Number(webPlayerSelectedAudioTrack ?? state.selectedAudioTrack);
+  if (!Number.isInteger(track) || !(state.audioTracks || []).some(item => item.index === track)) return;
+  const controller = new AbortController();
+  releaseAudioLanguageController = controller;
+  button.disabled = true;
+  output.textContent = 'Checking two short audio samples. Playback continues; no report or source change is saved.';
+  const timer = setTimeout(() => controller.abort(), 100000);
+  const monitor = setInterval(() => {
+    if (!releaseReportContextMatches(state) || Number(webPlayerSelectedAudioTrack ?? state.selectedAudioTrack) !== track) {
+      cancelReleaseAudioLanguageCheck();
+      output.textContent = 'The audio selection changed. Check the current selection again.';
+    }
+  }, 250);
+  try {
+    const response = await apiCall('/playback/prequeue/' + encodeURIComponent(state.prequeueId) + '/audio-language', {
+      method: 'POST', signal: controller.signal,
+      body: JSON.stringify({ sourceVersion: state.sourceVersion, audioTrackIndex: track, startOffset: Math.max(0, Number(currentAbsoluteTime()) || 0) }),
+    });
+    if (controller !== releaseAudioLanguageController || !releaseReportContextMatches(state) || !document.getElementById('releaseReportDialog').open || Number(webPlayerSelectedAudioTrack ?? state.selectedAudioTrack) !== track) return;
+    if (response.sourceVersion !== state.sourceVersion || response.audioTrackIndex !== track) {
+      output.textContent = 'The audio selection changed. Check the current selection again.';
+      return;
+    }
+    output.textContent = releaseAudioLanguageMessage(response);
+  } catch {
+    if (controller === releaseAudioLanguageController && releaseReportContextMatches(state)) output.textContent = 'The check could not finish. Audio controls and reporting remain available.';
+  } finally {
+    clearTimeout(timer);
+    clearInterval(monitor);
+    if (controller === releaseAudioLanguageController) { releaseAudioLanguageController = null; button.disabled = false; }
+  }
+}
+
+function releaseAudioLanguageMessage(result) {
+  const detected = releaseReportLanguageName(result.detectedLanguage);
+  const wanted = releaseReportLanguageName(result.requestedLanguage);
+  if (result.status === 'likely_mismatch') return `The samples appear to contain ${detected}; you requested ${wanted}. Review the audio track or prepare another release. This is a sample-based hint; nothing has been reported or blocked.`;
+  if (result.status === 'likely_match') return `The samples appear to contain ${wanted}. This does not verify the complete soundtrack, regional dub or synchronization.`;
+  return 'The samples did not provide a reliable language result. Silence, music and multilingual scenes can remain unknown. Nothing has been reported or blocked.';
+}
 async function submitReleaseReport(retry) { return performReleaseAction(true, retry); }
 async function retryReleaseWithoutReport() { return performReleaseAction(false, true); }
 
@@ -175,6 +240,7 @@ async function performReleaseAction(reporting, retry) {
   if (!releaseReportContextMatches(state)) { invalidateReleaseSelection(); return; }
   const reason = document.getElementById('releaseReportReason').value;
   if (reporting && !reason) return;
+  cancelReleaseAudioLanguageCheck();
   const resetHistory = reporting && ['wrong_title', 'wrong_episode'].includes(reason) && Boolean(state.canResetHistory) && document.getElementById('releaseReportResetHistory').checked;
   const action = { state, reason, reporting, resetHistory, generation: ++releaseReportGeneration, replacementId: '', canceled: false, ready: null, transferred: false, responseReceived: false, deferredCleanup: new Set() };
   releaseReportAction = action;
@@ -324,6 +390,7 @@ async function startPreparedRelease() {
 }
 
 function invalidateReleaseSelection() {
+  cancelReleaseAudioLanguageCheck();
   cancelReleaseAction();
   releaseReportGeneration++;
   releaseReportState = null;
@@ -349,6 +416,7 @@ async function undoReleaseReport() {
 }
 
 function closeReleaseReport() {
+  cancelReleaseAudioLanguageCheck();
   cancelReleaseAction(releaseReportAction, true);
   releaseReportGeneration++;
   releaseReportState = null;
