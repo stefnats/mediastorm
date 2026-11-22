@@ -185,6 +185,15 @@ func TestAudioLanguageAutomaticOptInUsesSelectedProfile(t *testing.T) {
 	}
 }
 
+func TestAudioLanguageAutomaticChoiceIsProfileOnly(t *testing.T) {
+	if _, ok := clientSettingPath("playback.autoCheckAudioLanguage"); ok {
+		t.Fatal("profile-only speech choice advertised as an unsupported device override")
+	}
+	if err := validateUserEditableSettingValue("playback.autoCheckAudioLanguage", json.RawMessage(`false`)); err != nil {
+		t.Fatal("valid profile opt-out rejected", err)
+	}
+}
+
 func TestAudioLanguageSamplerDecodesExactTrackThroughHTTP(t *testing.T) {
 	ffmpeg, err := exec.LookPath("ffmpeg")
 	if err != nil {
