@@ -52,7 +52,7 @@ func TestServeLatencyEndpoints(t *testing.T) {
 		t.Fatalf("page body suspiciously small: %d bytes", len(body))
 	}
 	for _, want := range []string{
-		"click → first frame", "Clear samples", "/admin/api/latency?limit=60", `colspan="10"`,
+		"Playback Latency - server delivery", "Clear samples", "/admin/api/latency?limit=60", `colspan="10"`,
 	} {
 		if !strings.Contains(body, want) {
 			t.Errorf("latency page missing %q", want)

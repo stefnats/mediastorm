@@ -11,8 +11,8 @@ import (
 	"time"
 )
 
-// PlaybackLatencySample is one click→first-frame measurement of the VOD
-// playback path. All timestamps are server wall-clock.
+// PlaybackLatencySample records VOD preparation and first-segment delivery.
+// All timestamps are server wall-clock; client frame decoding is measured separately.
 //
 //	t0 ClientRequestedAt       - client POST /playback/prequeue arrived
 //	t1 PrequeueReadyAt         - prequeue worker marked the entry ready
@@ -660,7 +660,7 @@ func (a *PlaybackLatencyAdmin) ServePlaybackLatencyJSON(w http.ResponseWriter, r
 }
 
 // ServeLatencyPage renders a small self-contained admin page for watching the
-// click→first-frame numbers.
+// server preparation and segment-delivery numbers.
 func (a *PlaybackLatencyAdmin) ServeLatencyPage(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	fmt.Fprint(w, latencyPageHTML)
@@ -705,11 +705,12 @@ const latencyPageHTML = `<!DOCTYPE html>
 </style>
 </head>
 <body>
-<h1>Playback Latency — click → first frame</h1>
+<h1>Playback Latency - server delivery</h1>
 <div class="note">
-  Measures the server-side path: t0 = prequeue request (click), t1 = prequeue ready,
+  Measures the server-side path: t0 = server receives the prequeue request, t1 = prequeue ready,
   t2 = HLS session created, t3 = first segment on disk, t4 = first segment response.
   Native (non-HLS) clients stop at t1 (see PREQUEUE_LATENCY in server logs).
+  Client decoding and the first displayed video frame are outside this measurement.
 </div>
 <div class="row">
   <button class="danger" onclick="clearSamples()">Clear samples</button>
