@@ -5,6 +5,7 @@ import (
 	"errors"
 	"io"
 	"net/http"
+	"novastream/services/picturestyle"
 	"reflect"
 	"strings"
 	"sync"
@@ -27,6 +28,7 @@ type contentPreferencesService interface {
 var _ contentPreferencesService = (*content_preferences.Service)(nil)
 
 type ContentPreferencesHandler struct {
+	PictureStyles *picturestyle.Service
 	ArtworkTitles interface {
 		ResolveArtwork(string, string, string, string) (models.Title, bool)
 	}

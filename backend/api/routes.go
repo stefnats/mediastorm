@@ -1203,6 +1203,8 @@ func Register(
 
 	// Content Preferences endpoints (per-content audio/subtitle preferences)
 	if contentPreferencesHandler != nil {
+		profileProtected.HandleFunc("/{userID}/artwork-learning", contentPreferencesHandler.PictureStyleLearning).Methods(http.MethodGet, http.MethodPut)
+		profileProtected.HandleFunc("/{userID}/artwork-learning", contentPreferencesHandler.Options).Methods(http.MethodOptions)
 		profileProtected.HandleFunc("/{userID}/content-preferences/artwork", contentPreferencesHandler.SetArtworkPreference).Methods(http.MethodPut)
 		profileProtected.HandleFunc("/{userID}/content-preferences/artwork", contentPreferencesHandler.Options).Methods(http.MethodOptions)
 		profileProtected.HandleFunc("/{userID}/content-preferences/local-source", contentPreferencesHandler.SetLocalSourcePreference).Methods(http.MethodPut)

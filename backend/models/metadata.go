@@ -50,6 +50,9 @@ type Rating struct {
 }
 
 type Title struct {
+	// Unpersonalized effective previews, present only for an automatically chosen kind.
+	StandardPoster           *Image                    `json:"standardPoster,omitempty"`
+	StandardBackdrop         *Image                    `json:"standardBackdrop,omitempty"`
 	OriginalLanguageEvidence *OriginalLanguageEvidence `json:"originalLanguageEvidence,omitempty"`
 	PersonalRating           string                    `json:"personalRating,omitempty"`
 	SourceAvailability       *SourceAvailability       `json:"sourceAvailability,omitempty"`

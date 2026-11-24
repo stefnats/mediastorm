@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"novastream/services/picturestyle"
 	"sort"
 	"strconv"
 	"strings"
@@ -64,6 +65,7 @@ type startupHistorySnapshot struct {
 // HTTP round-trips required when the frontend initialises.  All seven data
 // fetches are performed concurrently.
 type StartupHandler struct {
+	PictureStyles      *picturestyle.Service
 	Interests          interestService
 	TitleRatings       titleRatingService
 	Taste              tasteOnboardingService
@@ -621,6 +623,35 @@ func (h *StartupHandler) GetStartup(w http.ResponseWriter, r *http.Request) {
 		resp.HomeShelves[id] = shelf
 	}
 
+	if h.PictureStyles != nil {
+		applyPictures := h.PictureStyles.Annotator(userID)
+		apply := func(items []models.TrendingItem) []models.TrendingItem {
+			titles := make([]models.Title, len(items))
+			for i := range items {
+				titles[i] = items[i].Title
+			}
+			titles = applyPictures(titles)
+			out := append([]models.TrendingItem(nil), items...)
+			for i := range out {
+				out[i].Title = titles[i]
+			}
+			return out
+		}
+		if resp.TrendingMovies != nil {
+			copy := *resp.TrendingMovies
+			copy.Items = apply(copy.Items)
+			resp.TrendingMovies = &copy
+		}
+		if resp.TrendingSeries != nil {
+			copy := *resp.TrendingSeries
+			copy.Items = apply(copy.Items)
+			resp.TrendingSeries = &copy
+		}
+		for id, shelf := range resp.HomeShelves {
+			shelf.Items = apply(shelf.Items)
+			resp.HomeShelves[id] = shelf
+		}
+	}
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(resp)
 }

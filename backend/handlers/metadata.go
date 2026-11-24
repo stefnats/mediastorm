@@ -9,6 +9,7 @@ import (
 	"log"
 	"net/http"
 	"net/url"
+	"novastream/services/picturestyle"
 	"sort"
 	"strconv"
 	"strings"
@@ -194,6 +195,7 @@ type accountsServiceInterface interface {
 }
 
 type MetadataHandler struct {
+	PictureStyles      *picturestyle.Service
 	PostPlayHidden     postPlayHiddenItems
 	Taste              tasteOnboardingService
 	TitleRatings       titleRatingService

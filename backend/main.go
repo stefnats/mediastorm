@@ -15,6 +15,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"novastream/services/picturestyle"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -769,6 +770,9 @@ func main() {
 	titleRatingsService := titleratings.New(store.TitleRatings())
 	metadataHandler.TitleRatings = titleRatingsService
 	contentPreferencesHandler.ArtworkTitles = titleRatingsService
+	pictureStyleService := &picturestyle.Service{Settings: userSettingsService, Preferences: contentPreferencesService}
+	contentPreferencesHandler.PictureStyles = pictureStyleService
+	metadataHandler.PictureStyles = pictureStyleService
 	var reminderRepo reminders.Repository
 	if store != nil {
 		reminderRepo = store.Reminders()
@@ -875,6 +879,7 @@ func main() {
 	startupHandler.SetUsersProvider(userService)
 	startupHandler.Interests = interestService
 	startupHandler.TitleRatings = titleRatingsService
+	startupHandler.PictureStyles = pictureStyleService
 	startupHandler.Taste = tasteOnboardingService
 	startupHandler.SetLocalMedia(localMediaService)
 	startupHandler.SetHiddenItemsService(hiddenItemsService)
@@ -887,6 +892,7 @@ func main() {
 	detailsBundleHandler := handlers.NewDetailsBundleHandler(
 		metadataService, historyService, contentPreferencesService, userService,
 	)
+	detailsBundleHandler.PictureStyles = pictureStyleService
 	detailsBundleHandler.SetConfigManager(cfgManager)
 	detailsBundleHandler.SetUserSettingsProvider(userSettingsService)
 	detailsBundleHandler.SetWatchlistService(watchlistService)

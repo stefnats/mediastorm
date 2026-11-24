@@ -52,7 +52,9 @@ func StringVal(p *string, def string) string {
 // UserSettings contains per-user customizable settings.
 // These override global defaults when set.
 type UserSettings struct {
-	Recommendations *config.RecommendationSettings `json:"recommendations,omitempty"`
+	// Server-owned; only dedicated picture-style operations update this snapshot.
+	PictureStylePreferences json.RawMessage                `json:"pictureStylePreferences,omitempty"`
+	Recommendations         *config.RecommendationSettings `json:"recommendations,omitempty"`
 	// Server-owned opaque snapshot: only the dedicated sports endpoint may update it.
 	SportsPreferences json.RawMessage        `json:"sportsPreferences,omitempty"`
 	Playback          PlaybackSettings       `json:"playback"`

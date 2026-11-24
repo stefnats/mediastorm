@@ -59,17 +59,20 @@ func (h *MetadataHandler) encodeMetadata(w http.ResponseWriter, r *http.Request,
 		profile = mux.Vars(r)["userID"]
 	}
 	client := requestClientID(r)
+	applyPictures := h.PictureStyles.Annotator(profile)
 	var ratings []models.TitleRating
-	if h.TitleRatings != nil && profile != "" {
+	if (h.TitleRatings != nil || h.PictureStyles != nil) && profile != "" {
 		w.Header().Set("Cache-Control", "private, no-store")
-		ratings, _ = h.TitleRatings.List(r.Context(), profile)
+		if h.TitleRatings != nil {
+			ratings, _ = h.TitleRatings.List(r.Context(), profile)
+		}
 	}
 	annotateTitles := func(titles []models.Title) []models.Title {
 		if h.SourceAvailability != nil {
 			titles = h.SourceAvailability.AnnotateTitles(profile, client, titles)
 		}
 		if h.TitleRatings == nil {
-			return titles
+			return applyPictures(titles)
 		}
 		h.TitleRatings.Observe(profile, client, titles)
 		out := append([]models.Title(nil), titles...)
@@ -84,7 +87,7 @@ func (h *MetadataHandler) encodeMetadata(w http.ResponseWriter, r *http.Request,
 		if titles != nil && out == nil {
 			out = []models.Title{}
 		}
-		return out
+		return applyPictures(out)
 	}
 	annotate := func(items []models.TrendingItem) []models.TrendingItem {
 		if items == nil {
@@ -101,7 +104,7 @@ func (h *MetadataHandler) encodeMetadata(w http.ResponseWriter, r *http.Request,
 		}
 		return out
 	}
-	if (h.SourceAvailability != nil || h.TitleRatings != nil) && profile != "" {
+	if (h.SourceAvailability != nil || h.TitleRatings != nil || h.PictureStyles != nil) && profile != "" {
 		switch value := payload.(type) {
 		case models.Title:
 			payload = annotateTitles([]models.Title{value})[0]

@@ -17,6 +17,7 @@ import (
 	"novastream/models"
 	"novastream/services/history"
 	metadatapkg "novastream/services/metadata"
+	"novastream/services/picturestyle"
 
 	"github.com/gorilla/mux"
 )
@@ -25,6 +26,7 @@ import (
 // number of HTTP round-trips when the frontend opens a title details screen.
 // All sub-fetches are performed concurrently.
 type DetailsBundleHandler struct {
+	PictureStyles     *picturestyle.Service
 	metadata          metadataService
 	history           historyService
 	contentPrefs      contentPreferencesService
@@ -337,6 +339,7 @@ func (h *DetailsBundleHandler) GetDetailsShell(w http.ResponseWriter, r *http.Re
 
 	log.Printf("[details-shell timing] TOTAL: %dms (type=%s, titleId=%s)", time.Since(shellStart).Milliseconds(), contentType, titleID)
 	h.observeCatalogue(w, r, resp.MovieDetails, resp.SeriesDetails, nil)
+	resp.MovieDetails, resp.SeriesDetails, _ = h.applyPictureStyles(userID, resp.MovieDetails, resp.SeriesDetails, nil)
 	writeCompressedJSON(w, r, resp, "details-shell")
 }
 
@@ -603,6 +606,7 @@ func (h *DetailsBundleHandler) GetDetailsBundle(w http.ResponseWriter, r *http.R
 	}
 
 	h.observeCatalogue(w, r, resp.MovieDetails, resp.SeriesDetails, resp.Similar)
+	resp.MovieDetails, resp.SeriesDetails, resp.Similar = h.applyPictureStyles(userID, resp.MovieDetails, resp.SeriesDetails, resp.Similar)
 	writeCompressedJSON(w, r, resp, "details-bundle")
 }
 
@@ -731,6 +735,7 @@ func slimTitles(titles []models.Title) []models.Title {
 			Overview:        t.Overview,
 			Year:            t.Year,
 			Poster:          t.Poster,
+			Posters:         t.Posters,
 			TextPoster:      t.TextPoster,
 			Backdrop:        t.Backdrop,
 			TextBackdrop:    t.TextBackdrop,
@@ -865,4 +870,23 @@ func trimAndParseInt64(value string) int64 {
 		return 0
 	}
 	return parsed
+}
+
+// Capture the ordinary delivered gallery before applying this profile's visual
+// projection. One snapshot serves the title and all similar cards together.
+func (h *DetailsBundleHandler) applyPictureStyles(profile string, movie *models.Title, series *models.SeriesDetails, similar []models.Title) (*models.Title, *models.SeriesDetails, []models.Title) {
+	if h.PictureStyles == nil {
+		return movie, series, similar
+	}
+	apply := h.PictureStyles.Annotator(profile)
+	if movie != nil {
+		copy := apply([]models.Title{*movie})[0]
+		movie = &copy
+	}
+	if series != nil {
+		copy := *series
+		copy.Title = apply([]models.Title{series.Title})[0]
+		series = &copy
+	}
+	return movie, series, apply(similar)
 }

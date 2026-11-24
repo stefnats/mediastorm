@@ -94,9 +94,11 @@ func (h *ContentPreferencesHandler) SetArtworkPreference(w http.ResponseWriter, 
 	}
 	if poster {
 		preference.PosterURL = request.PosterURL
+		preference.PosterUseStandard = request.PosterURL == ""
 	}
 	if backdrop {
 		preference.BackdropURL = request.BackdropURL
+		preference.BackdropUseStandard = request.BackdropURL == ""
 	}
 	if err := h.Service.Set(user, preference); err != nil {
 		http.Error(w, "artwork preference could not be saved", http.StatusInternalServerError)
@@ -106,6 +108,38 @@ func (h *ContentPreferencesHandler) SetArtworkPreference(w http.ResponseWriter, 
 	if err != nil || stored == nil {
 		http.Error(w, "saved artwork preference could not be read", http.StatusInternalServerError)
 		return
+	}
+	if h.PictureStyles != nil {
+		// Training is optional: a descriptor persistence error cannot undo an already
+		// confirmed manual choice or turn it into an automatic image override.
+		selected := func(url string, primary, text *models.Image, variants []models.Image) *models.Image {
+			if url == "" {
+				return nil
+			}
+			if primary != nil && primary.URL == url {
+				return primary
+			}
+			if text != nil && text.URL == url {
+				return text
+			}
+			for _, image := range variants {
+				if image.URL == url {
+					copy := image
+					return &copy
+				}
+			}
+			return nil
+		}
+		identity := title
+		if identity.ID == "" {
+			identity = models.Title{ID: id, MediaType: request.ContentType}
+		}
+		if poster {
+			_ = h.PictureStyles.ObserveChoice(user, identity, "poster", selected(request.PosterURL, title.Poster, title.TextPoster, title.Posters))
+		}
+		if backdrop {
+			_ = h.PictureStyles.ObserveChoice(user, identity, "backdrop", selected(request.BackdropURL, title.Backdrop, title.TextBackdrop, title.Backdrops))
+		}
 	}
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("Cache-Control", "no-store")

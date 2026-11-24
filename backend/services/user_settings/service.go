@@ -160,6 +160,7 @@ func (s *Service) Get(userID string) (*models.UserSettings, error) {
 		}
 		copy.LiveTV.FavoriteStationIDs = append([]string(nil), settings.LiveTV.FavoriteStationIDs...)
 		copy.SportsPreferences = append(json.RawMessage(nil), settings.SportsPreferences...)
+		copy.PictureStylePreferences = append(json.RawMessage(nil), settings.PictureStylePreferences...)
 		return &copy, nil
 	}
 
@@ -277,6 +278,7 @@ func (s *Service) GetWithDefaults(userID string, defaults models.UserSettings) (
 		// Sanitize language codes (strip stray quotes/whitespace)
 		settings.LiveTV.FavoriteStationIDs = append([]string(nil), settings.LiveTV.FavoriteStationIDs...)
 		settings.SportsPreferences = append(json.RawMessage(nil), settings.SportsPreferences...)
+		settings.PictureStylePreferences = append(json.RawMessage(nil), settings.PictureStylePreferences...)
 		settings.Playback.PreferredAudioLanguage = sanitizeLanguageCode(settings.Playback.PreferredAudioLanguage)
 		settings.Playback.PreferredSubtitleLanguage = sanitizeLanguageCode(settings.Playback.PreferredSubtitleLanguage)
 		settings.Playback.AllowedTrackLanguages = sanitizeOptionalLanguageCodes(settings.Playback.AllowedTrackLanguages)
@@ -775,6 +777,7 @@ func (s *Service) Update(userID string, settings models.UserSettings) error {
 	// If settings are empty, delete the entry instead of saving
 	// General settings PUTs (including older clients) cannot replace sports data.
 	settings.SportsPreferences = s.settings[userID].SportsPreferences
+	settings.PictureStylePreferences = append(json.RawMessage(nil), s.settings[userID].PictureStylePreferences...)
 	// Station bookmarks change only through the dedicated idempotent endpoint.
 	settings.LiveTV.FavoriteStationIDs = append([]string(nil), s.settings[userID].LiveTV.FavoriteStationIDs...)
 	// Parental Live choices cannot be replaced by general profile preferences.
@@ -841,7 +844,7 @@ func hasExplicitPointerOverride(value reflect.Value) bool {
 
 // isSettingsEmpty checks if user settings have no actual values set.
 func isSettingsEmpty(s models.UserSettings) bool {
-	if len(s.SportsPreferences) != 0 {
+	if len(s.SportsPreferences) != 0 || len(s.PictureStylePreferences) != 0 {
 		return false
 	}
 	if hasExplicitPointerOverride(reflect.ValueOf(s)) {
